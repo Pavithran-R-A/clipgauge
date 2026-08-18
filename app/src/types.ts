@@ -1,11 +1,16 @@
 export interface PipelineEvent {
   event: string
+  protocol_version?: number
   stage?: string
   fraction?: number
   message?: string
   job_id?: string
   ok?: boolean
+  code?: string
   error?: string
+  retryable?: boolean
+  diagnostic_id?: string
+  exit_code?: number | null
   [key: string]: unknown
 }
 
@@ -46,9 +51,17 @@ export interface Clip {
   t1_raw?: Record<string, unknown>
 }
 
+export type ArtifactStatus =
+  | 'available'
+  | 'missing'
+  | 'invalid'
+  | 'outside_managed_root'
+  | 'unreadable'
+
 export interface RenderOutput {
   clip: number
-  path: string
+  path: string | null
+  artifact_status?: ArtifactStatus
   score: number
   best_platform: string
   duration: number
@@ -58,7 +71,7 @@ export interface RenderOutput {
 
 export interface JobResults {
   job_id: string
-  dir: string
+  dir?: string
   ingest: {
     title: string
     heatmap: unknown[] | null

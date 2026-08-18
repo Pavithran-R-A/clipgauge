@@ -64,7 +64,7 @@ export default function App() {
             message: payload.message ?? ''
           }
         }))
-      } else if (payload.event === 'result') {
+      } else if (payload.event === 'terminal') {
         setRunning(false)
         refreshJobs()
         if (payload.ok && activeJobRef.current) {
@@ -73,11 +73,25 @@ export default function App() {
             setView('review')
           })
         } else if (!payload.ok) {
-          setRunError(String(payload.error ?? 'Pipeline failed'))
+          const code = payload.code ? ` [${payload.code}]` : ''
+          const diagnostic = payload.diagnostic_id ? ` Diagnostic ID: ${payload.diagnostic_id}.` : ''
+          setRunError(`${payload.message ?? 'Pipeline failed.'}${code}${diagnostic}`)
+        }
+      } else if (payload.event === 'result') {
+        // Backward-compatible handling for one-shot edit commands.
+        setRunning(false)
+        refreshJobs()
+        if (payload.ok && activeJobRef.current && payload.stages) {
+          api.jobResults(activeJobRef.current).then((r) => {
+            setResults(r)
+            setView('review')
+          })
+        } else if (!payload.ok) {
+          setRunError(String(payload.message ?? payload.error ?? 'Pipeline failed'))
         }
       } else if (payload.event === 'exited') {
         setRunning(false)
-        setRunError('The pipeline exited unexpectedly. Resume the job to continue from its last checkpoint.')
+        setRunError('The pipeline stopped without a structured result. Retry the job and keep the diagnostic details for support.')
       }
     }).then((un) => {
       if (disposed) un()

@@ -20,11 +20,14 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self' ipc: asset:; connect-src 'self' ipc: http://localhost:1430 ws://localhost:1430; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: blob: data:; media-src 'self' asset: blob:; font-src 'self' asset: data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$HOME/.publikclip/**"
+          "$HOME/.publikclip/jobs/*/clips/**",
+          "$HOME/.publikclip/jobs/*/media*.mp4",
+          "$HOME/.publikclip/jobs/*/overlays/**",
+          "$HOME/.publikclip/ig_thumbs/**"
         ]
       }
     }

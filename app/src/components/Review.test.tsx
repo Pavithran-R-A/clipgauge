@@ -57,6 +57,20 @@ describe('Review media trust states', () => {
     expect(screen.queryByTestId('review-video')).not.toBeInTheDocument()
   })
 
+  it('shows ready media controls after successful metadata load', () => {
+    render(
+      <Review
+        results={results({ path: '/managed/jobs/20260818-155237-c6b118/clips/clip_00.mp4', artifact_status: 'available' })}
+        onBack={vi.fn()}
+        onRestyle={vi.fn()}
+      />
+    )
+    const video = screen.getByTestId('review-video')
+    fireEvent.loadedMetadata(video)
+    expect(screen.queryByText('loading clip…')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'EXPORT MP4' })).toBeEnabled()
+  })
+
   it('shows decode failure diagnostics and supports retry', () => {
     render(
       <Review

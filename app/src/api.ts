@@ -12,8 +12,8 @@ export const api = {
   setupState: () => invoke<SetupState>('get_setup_state'),
   markOnboarded: () => invoke<void>('mark_onboarded'),
   checkOllama: () => invoke<{ running: boolean; models: string[] }>('check_ollama'),
-  exportClip: (path: string, title?: string) =>
-    invoke<string>('export_clip', { path, title }),
+  exportClip: (jobId: string, clip: number, title?: string) =>
+    invoke<string>('export_clip', { jobId, clip, title }),
   igStatus: () => invoke<{ connected: boolean; username?: string }>('ig_status'),
   igSync: () => invoke<SyncSummary>('ig_tool', { args: ['sync'] }),
   igOverview: () => invoke<LoopOverview>('ig_tool', { args: ['overview'] }),

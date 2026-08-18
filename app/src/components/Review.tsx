@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import type { Clip, JobResults, RenderOutput } from '../types'
 import ClipEditor from './ClipEditor'
@@ -54,6 +54,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
   const [restyleCamera, setRestyleCamera] = useState('cut')
   const [editing, setEditing] = useState<number | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
+  const [mediaState, setMediaState] = useState<'loading' | 'ready' | 'error'>('loading')
   const styleChanged = restylePreset !== currentPreset || restyleCamera !== 'cut'
 
   const pair = useMemo(() => {
@@ -62,9 +63,19 @@ export default function Review({ results, onBack, onRestyle }: Props) {
     return { out, clip }
   }, [outputs, clips, selected])
 
+  const artifactAvailable = Boolean(
+    pair.out?.path && (pair.out.artifact_status === undefined || pair.out.artifact_status === 'available')
+  )
+
+  useEffect(() => {
+    setMediaState(artifactAvailable ? 'loading' : 'error')
+  }, [artifactAvailable, pair.out?.path, pair.out?.artifact_status, reloadKey])
+
   async function doExport(out: RenderOutput, clip: Clip) {
+    if (!out.path || !artifactAvailable) return
     const dest = await api.exportClip(
-      out.path,
+      results.job_id,
+      out.clip,
       `${results.ingest?.title ?? 'clip'} ${fmtTime(clip.start)}`
     )
     setExported((prev) => ({ ...prev, [out.clip]: dest }))
@@ -157,13 +168,44 @@ export default function Review({ results, onBack, onRestyle }: Props) {
       {pair.out && pair.clip && (
         <div className="bay">
           <div className="monitor-wrap">
-            <video
-              key={pair.out.path}
-              className="monitor"
-              src={api.fileUrl(pair.out.path)}
-              controls
-              playsInline
-            />
+            {artifactAvailable && pair.out.path ? (
+              <>
+                <video
+                  key={`${pair.out.path}-${reloadKey}`}
+                  className="monitor"
+                  src={api.fileUrl(pair.out.path)}
+                  controls
+                  playsInline
+                  onLoadedMetadata={() => setMediaState('ready')}
+                  onError={() => setMediaState('error')}
+                  data-testid="review-video"
+                />
+                {mediaState === 'loading' && <p className="monitor-status mono">loading clip…</p>}
+                {mediaState === 'error' && (
+                  <div className="monitor-error" role="alert" data-testid="video-error">
+                    <strong>CLIP COULD NOT BE LOADED</strong>
+                    <span>Check the render artifact or retry this job.</span>
+                    <button className="btn-secondary" onClick={() => setReloadKey((k) => k + 1)}>
+                      RETRY LOAD
+                    </button>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="monitor-error" role="alert" data-testid="artifact-error">
+                <strong>RENDER ARTIFACT UNAVAILABLE</strong>
+                <span>
+                  {pair.out?.artifact_status === 'outside_managed_root'
+                    ? 'The clip is outside the managed application folder.'
+                    : pair.out?.artifact_status === 'invalid'
+                      ? 'The saved render record is invalid.'
+                      : 'The rendered clip is missing or unreadable.'}
+                </span>
+                <button className="btn-secondary" onClick={() => setReloadKey((k) => k + 1)}>
+                  RETRY LOAD
+                </button>
+              </div>
+            )}
             <div className="monitor-actions">
               <button className="btn-secondary" onClick={() => setEditing(pair.out!.clip)}>
                 ✎ EDIT CLIP (bounds · cuts · visuals)
