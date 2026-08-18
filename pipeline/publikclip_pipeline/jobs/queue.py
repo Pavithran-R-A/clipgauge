@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from .. import config
+from .. import config, protocol
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -119,6 +119,7 @@ def list_jobs(limit: int = 50) -> list[Job]:
 
 
 def set_job_status(job_id: str, status: str, error: str | None = None, title: str | None = None) -> None:
+    error = protocol.safe_message(error, limit=2000) if error else None
     with _connect() as conn:
         if title is not None:
             conn.execute(
@@ -181,6 +182,7 @@ def read_checkpoint(job: Job, stage: str, schema_version: int) -> dict | None:
 
 
 def mark_stage(job_id: str, stage: str, status: str, schema_version: int, error: str | None = None) -> None:
+    error = protocol.safe_message(error, limit=2000) if error else None
     with _connect() as conn:
         conn.execute(
             "INSERT INTO stage_runs (job_id, stage, status, schema_version, started_at, error)"
@@ -208,6 +210,28 @@ def stage_statuses(job_id: str) -> dict[str, str]:
 
 class StageError(Exception):
     """A stage failed in a way the user can act on. Message is user-facing."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "STAGE_FAILED",
+        retryable: bool = True,
+        stage: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+        self.stage = stage
+
+
+class StageExecutionError(Exception):
+    """An unexpected exception annotated with the stage that raised it."""
+
+    def __init__(self, stage: str, original: BaseException) -> None:
+        super().__init__(str(original))
+        self.stage = stage
+        self.original = original
 
 
 ProgressFn = Callable[[str, float, str], None]  # (stage, fraction 0..1 or -1, message)
@@ -262,13 +286,14 @@ def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[
         try:
             data = stage.run(_ctx_for(ctx, stage.name, results))
         except StageError as err:
+            err.stage = err.stage or stage.name
             mark_stage(job.id, stage.name, "failed", stage.schema_version, str(err))
             set_job_status(job.id, "failed", f"{stage.name}: {err}")
             raise
-        except Exception as err:  # noqa: BLE001 - record then re-raise
+        except Exception as err:  # noqa: BLE001 - annotate, then protocol boundary handles it
             mark_stage(job.id, stage.name, "failed", stage.schema_version, repr(err))
             set_job_status(job.id, "failed", f"{stage.name}: {err!r}")
-            raise
+            raise StageExecutionError(stage.name, err) from err
         write_checkpoint(job, stage.name, stage.schema_version, data)
         results[stage.name] = data
         progress(stage.name, 1.0, "done")

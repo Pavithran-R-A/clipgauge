@@ -11,7 +11,7 @@ import argparse
 import json
 import sys
 
-from . import config
+from . import config, protocol
 from .jobs import queue
 
 
@@ -63,6 +63,24 @@ def _emit_result(jsonl: bool, payload: dict) -> None:
         print(json.dumps(payload, indent=2))
 
 
+def _preflight_terminal(jsonl: bool, job_id: str | None, code: str, message: str, retryable: bool = False) -> int:
+    if jsonl:
+        protocol.TerminalEmitter(
+            emit=lambda event: print(json.dumps(event), flush=True),
+            job_id=job_id,
+        ).terminal(
+            ok=False,
+            code=code,
+            message=message,
+            retryable=retryable,
+            stage="pipeline",
+            exit_code=2,
+        )
+    else:
+        print(message, file=sys.stderr)
+    return 2
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     source = args.source
     source_type = "url" if source.startswith(("http://", "https://")) else "file"
@@ -73,15 +91,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         settings.caption_preset = args.captions
     if args.camera:
         settings.camera.speaker_change = args.camera
-    job = queue.create_job(source_type, source, json.dumps(settings.to_json()))
+    try:
+        job = queue.create_job(source_type, source, json.dumps(settings.to_json()))
+    except Exception as err:  # noqa: BLE001 — pre-job protocol boundary
+        return _preflight_terminal(args.jsonl, None, "JOB_CREATE_FAILED", f"Could not create a pipeline job: {protocol.safe_message(str(err))}", True)
     return _execute(job, args.jsonl)
 
 
 def cmd_resume(args: argparse.Namespace) -> int:
     job = queue.get_job(args.job_id)
     if job is None:
-        print(f"No job {args.job_id}", file=sys.stderr)
-        return 2
+        return _preflight_terminal(args.jsonl, args.job_id, "JOB_NOT_FOUND", "The requested job could not be found in the managed job store.")
     if args.llm or args.captions or args.camera:
         settings = config.Settings.from_json(json.loads(job.settings_json))
         if args.llm:
@@ -99,14 +119,57 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
 def _execute(job: queue.Job, jsonl: bool) -> int:
     emit = _progress_printer(jsonl)
+    terminal = protocol.TerminalEmitter(
+        emit=lambda event: print(json.dumps(event), flush=True),
+        job_id=job.id,
+    )
     if jsonl:
-        print(json.dumps({"event": "job", "job_id": job.id, "dir": str(job.dir)}), flush=True)
+        print(json.dumps({"event": "job", "job_id": job.id}), flush=True)
     else:
         print(f"job {job.id} → {job.dir}", file=sys.stderr)
     try:
         results = queue.run_stages(job, _stages(), emit)
     except queue.StageError as err:
-        _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": str(err)})
+        if jsonl:
+            terminal.terminal(
+                ok=False,
+                code=err.code,
+                message=str(err),
+                retryable=err.retryable,
+                stage=err.stage,
+            )
+        else:
+            _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": str(err)})
+        return 1
+    except queue.StageExecutionError as err:
+        diagnostic = protocol.write_diagnostic(job.dir, err.stage, err.original)
+        message = f"Pipeline failed unexpectedly. Diagnostic ID: {diagnostic}."
+        if jsonl:
+            terminal.terminal(
+                ok=False,
+                code="INTERNAL_ERROR",
+                message=message,
+                retryable=False,
+                stage=err.stage,
+                diagnostic=diagnostic,
+            )
+        else:
+            _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": message})
+        return 1
+    except Exception as err:  # noqa: BLE001 — final protocol guard
+        diagnostic = protocol.write_diagnostic(job.dir, "pipeline", err)
+        message = f"Pipeline failed unexpectedly. Diagnostic ID: {diagnostic}."
+        if jsonl:
+            terminal.terminal(
+                ok=False,
+                code="INTERNAL_ERROR",
+                message=message,
+                retryable=False,
+                stage="pipeline",
+                diagnostic=diagnostic,
+            )
+        else:
+            _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": message})
         return 1
     summary = {
         "ok": True,
@@ -115,7 +178,16 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
         "title": results.get("ingest", {}).get("title"),
         "heatmap_segments": len(results.get("ingest", {}).get("heatmap") or []),
     }
-    _emit_result(jsonl, summary)
+    if jsonl:
+        terminal.terminal(
+            ok=True,
+            code="OK",
+            message="Pipeline completed.",
+            retryable=False,
+            stage="pipeline",
+        )
+    else:
+        _emit_result(jsonl, summary)
     return 0
 
 
@@ -188,7 +260,13 @@ def cmd_ig(args: argparse.Namespace) -> int:
     from .insights import calibration, instagram
 
     if args.ig_cmd == "connect":
-        conn = instagram.connect(args.app_id, args.app_secret)
+        app_secret = args.app_secret
+        if args.app_secret_stdin:
+            app_secret = sys.stdin.read().strip()
+        if not app_secret:
+            print("Meta app secret is required.", file=sys.stderr)
+            return 2
+        conn = instagram.connect(args.app_id, app_secret)
         print(f"Connected as @{conn['username']} (user {conn['user_id']}).")
         return 0
 
@@ -317,7 +395,8 @@ def main(argv: list[str] | None = None) -> int:
     ig_sub = p_ig.add_subparsers(dest="ig_cmd", required=True)
     p_connect = ig_sub.add_parser("connect", help="OAuth against your own Meta app")
     p_connect.add_argument("--app-id", required=True)
-    p_connect.add_argument("--app-secret", required=True)
+    p_connect.add_argument("--app-secret", default=None, help="direct CLI use; desktop uses stdin")
+    p_connect.add_argument("--app-secret-stdin", action="store_true", help=argparse.SUPPRESS)
     ig_sub.add_parser("sync", help="one sync pass: media + thumbnails + insights ladder + auto-fit (JSON)")
     ig_sub.add_parser("overview", help="everything the Loop screen renders (JSON)")
     ig_sub.add_parser("media", help="list your recent Reels to link against")

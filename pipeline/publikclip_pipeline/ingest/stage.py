@@ -9,6 +9,7 @@ Artifacts produced in the job dir:
 from __future__ import annotations
 
 import hashlib
+import shutil
 from pathlib import Path
 
 from ..jobs.queue import Stage, StageContext, StageError
@@ -49,17 +50,54 @@ class IngestStage(Stage):
         heatmap = None
         title = None
         if job.source_type == "url":
-            meta = ytdlp.fetch_meta(job.source, prog)
-            heatmap = meta.heatmap
-            title = meta.title
+            try:
+                meta = ytdlp.fetch_meta(job.source, prog)
+                heatmap = meta.heatmap
+                title = meta.title
+                media_path = ctx.job_dir / "media.mp4"
+                if not media_path.exists():
+                    ytdlp.download(job.source, media_path, prog)
+            except ytdlp.YtDlpError as err:
+                message = str(err)
+                if ytdlp.is_auth_error(message):
+                    code = "YTDLP_AUTH_REQUIRED"
+                elif "download" in message.lower() or "connection" in message.lower():
+                    code = "YTDLP_DOWNLOAD_FAILED"
+                else:
+                    code = "YTDLP_METADATA_FAILED"
+                raise StageError(
+                    f"yt-dlp could not process this video: {message}",
+                    code=code,
+                    retryable=True,
+                ) from err
+        else:
+            source_path = Path(job.source).expanduser().resolve()
+            if not source_path.exists():
+                raise StageError(
+                    f"File not found: {source_path}",
+                    code="INPUT_FILE_NOT_FOUND",
+                    retryable=False,
+                )
+            if not source_path.is_file():
+                raise StageError(
+                    f"Input is not a file: {source_path}",
+                    code="INPUT_FILE_INVALID",
+                    retryable=False,
+                )
+            # Keep all desktop-readable media inside the Rust-managed asset
+            # root. This also makes resume independent of an external path
+            # being moved or revoked after the run starts.
             media_path = ctx.job_dir / "media.mp4"
             if not media_path.exists():
-                ytdlp.download(job.source, media_path, prog)
-        else:
-            media_path = Path(job.source).expanduser().resolve()
-            if not media_path.exists():
-                raise StageError(f"File not found: {media_path}")
-            title = media_path.stem
+                try:
+                    shutil.copyfile(source_path, media_path)
+                except OSError as err:
+                    raise StageError(
+                        f"Could not copy the source video into the managed job folder: {err}",
+                        code="INPUT_COPY_FAILED",
+                        retryable=True,
+                    ) from err
+            title = source_path.stem
 
         prog(0.96, "Probing media…")
         try:
