@@ -31,7 +31,41 @@ The ending SHA above is the final implementation commit before this report artif
 
 ## FILES CHANGED
 
-The implementation changes are limited to the pipeline protocol/ingest/queue boundary, focused Rust bridge modules and configuration, targeted React state/API changes, minimal frontend test infrastructure, tests, and Stage 1A documentation. The complete exact file list is captured in the delivery bundle’s `git diff` and checksum manifest. No unrelated creator feature, broad rename, license rewrite, or production asset replacement was performed.
+The implementation changes are limited to the pipeline protocol/ingest/queue boundary, focused Rust bridge modules and configuration, targeted React state/API changes, minimal frontend test infrastructure, tests, and Stage 1A documentation. No unrelated creator feature, broad rename, license rewrite, or production asset replacement was performed.
+
+The exact tracked file set relative to the audited SHA is:
+
+| Status | File |
+|---|---|
+| A | `CLIPGAUGE_STAGE1A_REPORT.md` |
+| M | `app/package-lock.json` |
+| M | `app/package.json` |
+| A | `app/src-tauri/src/artifact.rs` |
+| A | `app/src-tauri/src/diagnostics.rs` |
+| M | `app/src-tauri/src/main.rs` |
+| A | `app/src-tauri/src/path_security.rs` |
+| M | `app/src-tauri/tauri.conf.json` |
+| A | `app/src/App.test.tsx` |
+| M | `app/src/App.tsx` |
+| M | `app/src/api.ts` |
+| A | `app/src/components/Review.test.tsx` |
+| M | `app/src/components/Review.tsx` |
+| A | `app/src/securityConfig.test.ts` |
+| M | `app/src/styles.css` |
+| A | `app/src/test/setup.ts` |
+| M | `app/src/types.ts` |
+| A | `app/vitest.config.ts` |
+| A | `docs/clipgauge/STAGE1A_APP_PATHS.md` |
+| A | `docs/clipgauge/STAGE1A_CSP.md` |
+| A | `docs/clipgauge/STAGE1A_PROTOCOL.md` |
+| A | `docs/clipgauge/plans/STAGE1A_IMPLEMENTATION_PLAN.md` |
+| M | `pipeline/publikclip_pipeline/cli.py` |
+| M | `pipeline/publikclip_pipeline/ingest/stage.py` |
+| M | `pipeline/publikclip_pipeline/jobs/queue.py` |
+| A | `pipeline/publikclip_pipeline/protocol.py` |
+| A | `pipeline/tests/test_stage1a_protocol.py` |
+
+The delivery bundle additionally contains generated evidence and the complete binary diff; those evidence files are not production source changes.
 
 ## ARCHITECTURE CHANGES
 
