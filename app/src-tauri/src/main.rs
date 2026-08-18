@@ -3,8 +3,12 @@
 // event to the frontend, and exposes small filesystem/settings commands.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod artifact;
+mod diagnostics;
+mod path_security;
+
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -12,9 +16,9 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
 fn home_dir() -> PathBuf {
-    if let Ok(custom) = std::env::var("PUBLIKCLIP_HOME") {
-        return PathBuf::from(custom);
-    }
+    // The desktop owns one stable root. Direct Python CLI tests may still use
+    // PUBLIKCLIP_HOME, but packaged Rust commands never accept an arbitrary
+    // user-provided root that could escape the asset scope.
     dirs_home().join(".publikclip")
 }
 
@@ -24,6 +28,10 @@ fn dirs_home() -> PathBuf {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+fn validate_job_id(job_id: &str) -> Result<PathBuf, String> {
+    path_security::resolve_job_dir(&home_dir(), job_id)
 }
 
 /// Command that never flashes a console window on Windows (CREATE_NO_WINDOW).
@@ -73,7 +81,11 @@ fn pipeline_invocation() -> (String, Vec<String>) {
         } else {
             exe_dir.join("resources")
         };
-        let uv = if cfg!(target_os = "windows") { "bin/uv.exe" } else { "bin/uv" };
+        let uv = if cfg!(target_os = "windows") {
+            "bin/uv.exe"
+        } else {
+            "bin/uv"
+        };
         (
             resources.join(uv).to_string_lossy().to_string(),
             vec![
@@ -87,7 +99,12 @@ fn pipeline_invocation() -> (String, Vec<String>) {
 }
 
 #[tauri::command]
-fn run_job(app: AppHandle, source: String, llm: Option<String>, captions: Option<String>) -> Result<(), String> {
+fn run_job(
+    app: AppHandle,
+    source: String,
+    llm: Option<String>,
+    captions: Option<String>,
+) -> Result<(), String> {
     let (program, base_args) = pipeline_invocation();
     std::thread::spawn(move || {
         let mut args = base_args.clone();
@@ -115,6 +132,7 @@ fn resume_job(
     captions: Option<String>,
     camera: Option<String>,
 ) -> Result<(), String> {
+    validate_job_id(&job_id)?;
     let (program, base_args) = pipeline_invocation();
     std::thread::spawn(move || {
         let mut args = base_args.clone();
@@ -138,33 +156,98 @@ fn resume_job(
     Ok(())
 }
 
+fn emit_terminal(app: &AppHandle, payload: Value) {
+    let _ = app.emit("pipeline-event", payload);
+}
+
+fn write_bridge_diagnostic(tail: &str) -> String {
+    let id = diagnostics::diagnostic_id();
+    let directory = home_dir().join("diagnostics");
+    let _ = fs::create_dir_all(&directory);
+    let path = directory.join(format!("{id}.log"));
+    if let Ok(mut file) = fs::File::create(&path) {
+        let _ = file.write_all(diagnostics::redact(tail).as_bytes());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        }
+    }
+    id
+}
+
 fn stream_pipeline(app: &AppHandle, program: &str, args: &[String]) {
     let child = quiet_command(program)
+        .env("PUBLIKCLIP_HOME", home_dir())
         .args(args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn();
     let mut child = match child {
         Ok(c) => c,
         Err(err) => {
-            let _ = app.emit(
-                "pipeline-event",
-                json!({"event": "result", "ok": false, "error": format!("could not start pipeline: {err}")}),
+            emit_terminal(
+                app,
+                json!({
+                    "event": "terminal",
+                    "protocol_version": 1,
+                    "ok": false,
+                    "stage": "pipeline",
+                    "code": "PIPELINE_START_FAILED",
+                    "message": "Could not start the local pipeline. Check the installation and try again.",
+                    "retryable": true,
+                    "diagnostic_id": write_bridge_diagnostic(&err.to_string()),
+                }),
             );
             return;
         }
     };
+    let stderr_thread = child.stderr.take().map(|stderr| {
+        std::thread::spawn(move || {
+            let mut tail = diagnostics::BoundedTail::default();
+            let mut reader = BufReader::new(stderr);
+            let mut buffer = [0u8; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => tail.push(&buffer[..count]),
+                }
+            }
+            tail
+        })
+    });
+    let mut terminal_seen = false;
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                if value.get("event").and_then(Value::as_str) == Some("terminal") {
+                    terminal_seen = true;
+                }
                 let _ = app.emit("pipeline-event", value);
             }
         }
     }
-    if let Ok(status) = child.wait() {
-        if !status.success() {
-            let _ = app.emit("pipeline-event", json!({"event": "exited", "code": status.code()}));
-        }
+    let status = child.wait();
+    let stderr_tail = stderr_thread
+        .and_then(|thread| thread.join().ok())
+        .unwrap_or_default();
+    if !terminal_seen {
+        let exit_code = status.as_ref().ok().and_then(|s| s.code());
+        let diagnostic_id = write_bridge_diagnostic(&stderr_tail.text());
+        emit_terminal(
+            app,
+            json!({
+                "event": "terminal",
+                "protocol_version": 1,
+                "ok": false,
+                "stage": "pipeline",
+                "code": "PIPELINE_EXIT_WITHOUT_TERMINAL",
+                "message": "The local pipeline stopped before reporting a complete result. Retry the job or use the diagnostic ID for support.",
+                "retryable": true,
+                "diagnostic_id": diagnostic_id,
+                "exit_code": exit_code,
+            }),
+        );
     }
 }
 
@@ -172,27 +255,7 @@ fn stream_pipeline(app: &AppHandle, program: &str, args: &[String]) {
 /// dir's checkpoint files (artifacts are the truth).
 #[tauri::command]
 fn job_results(job_id: String) -> Result<Value, String> {
-    let dir = home_dir().join("jobs").join(&job_id);
-    if !dir.exists() {
-        return Err(format!("no job dir for {job_id}"));
-    }
-    let read_stage = |name: &str| -> Value {
-        fs::read_to_string(dir.join(format!("{name}.json")))
-            .ok()
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .and_then(|v| v.get("data").cloned())
-            .unwrap_or(Value::Null)
-    };
-    Ok(json!({
-        "job_id": job_id,
-        "dir": dir.to_string_lossy(),
-        "ingest": read_stage("ingest"),
-        "score": read_stage("score"),
-        "camera": read_stage("camera"),
-        "render": read_stage("render"),
-        "events": read_stage("events"),
-        "candidates": read_stage("candidates"),
-    }))
+    artifact::job_results(&home_dir(), &job_id)
 }
 
 #[tauri::command]
@@ -202,6 +265,11 @@ fn list_job_dirs() -> Result<Vec<Value>, String> {
     if let Ok(entries) = fs::read_dir(&jobs_dir) {
         for entry in entries.flatten() {
             let id = entry.file_name().to_string_lossy().to_string();
+            if !path_security::valid_job_id(&id)
+                || path_security::resolve_job_dir(&home_dir(), &id).is_err()
+            {
+                continue;
+            }
             let dir = entry.path();
             let has_render = dir.join("render.json").exists();
             let has_ingest = dir.join("ingest.json").exists();
@@ -244,7 +312,12 @@ fn get_setup_state() -> Result<Value, String> {
     let has_key = fs::read_to_string(&secrets)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .map(|v| v["gemini_api_key"].as_str().map(|k| !k.is_empty()).unwrap_or(false))
+        .map(|v| {
+            v["gemini_api_key"]
+                .as_str()
+                .map(|k| !k.is_empty())
+                .unwrap_or(false)
+        })
         .unwrap_or(false);
     let onboarded = home_dir().join("onboarded").exists();
     Ok(json!({"has_gemini_key": has_key, "onboarded": onboarded}))
@@ -269,7 +342,11 @@ async fn check_ollama() -> Result<Value, String> {
     let parsed: Value = serde_json::from_slice(&out.stdout).unwrap_or(json!({}));
     let models: Vec<String> = parsed["models"]
         .as_array()
-        .map(|arr| arr.iter().filter_map(|m| m["name"].as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m["name"].as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     Ok(json!({"running": true, "models": models}))
 }
@@ -284,23 +361,31 @@ async fn edit_tool(args: Vec<String>) -> Result<Value, String> {
     full.push("edit".to_string());
     full.extend(args);
     let out = quiet_command(&program)
+        .env("PUBLIKCLIP_HOME", home_dir())
         .args(&full)
         .output()
         .map_err(|e| e.to_string())?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     // last JSON line is the payload (progress lines may precede it)
-    let line = stdout.lines().rev().find(|l| l.trim_start().starts_with('{'));
+    let line = stdout
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with('{'));
     match line.and_then(|l| serde_json::from_str::<Value>(l).ok()) {
         Some(v) => Ok(v),
         None => Err(format!(
             "edit tool produced no JSON: {}",
-            String::from_utf8_lossy(&out.stderr).chars().take(400).collect::<String>()
+            String::from_utf8_lossy(&out.stderr)
+                .chars()
+                .take(400)
+                .collect::<String>()
         )),
     }
 }
 
 #[tauri::command]
 fn run_edit_render(app: AppHandle, job_id: String, clip: u32) -> Result<(), String> {
+    validate_job_id(&job_id)?;
     let (program, base_args) = pipeline_invocation();
     std::thread::spawn(move || {
         let mut args = base_args.clone();
@@ -316,7 +401,8 @@ fn run_edit_render(app: AppHandle, job_id: String, clip: u32) -> Result<(), Stri
 
 #[tauri::command]
 fn save_clip_edits(job_id: String, edits: Value) -> Result<(), String> {
-    let path = home_dir().join("jobs").join(&job_id).join("clip_edits.json");
+    let dir = validate_job_id(&job_id)?;
+    let path = dir.join("clip_edits.json");
     // Merge: the app sends one clip's state at a time; other clips' edits
     // must survive.
     let mut current: Value = fs::read_to_string(&path)
@@ -342,6 +428,11 @@ fn save_pexels_key(key: String) -> Result<bool, String> {
         .unwrap_or_else(|| json!({}));
     current["pexels_api_key"] = json!(key.trim());
     fs::write(&path, serde_json::to_string_pretty(&current).unwrap()).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
     Ok(true)
 }
 
@@ -361,22 +452,39 @@ fn ig_status() -> Result<Value, String> {
     }
 }
 
+fn ig_connect_args(mut base_args: Vec<String>, app_id: String) -> Vec<String> {
+    base_args.extend([
+        "ig".into(),
+        "connect".into(),
+        "--app-id".into(),
+        app_id,
+        "--app-secret-stdin".into(),
+    ]);
+    base_args
+}
+
 /// Runs the CLI's OAuth dance (it opens the browser + catches the localhost
 /// callback). Blocking by design — the frontend shows a "finish in your
 /// browser" state until this returns.
 #[tauri::command]
 async fn ig_connect(app_id: String, app_secret: String) -> Result<String, String> {
     let (program, base_args) = pipeline_invocation();
-    let mut args = base_args;
-    args.extend([
-        "ig".into(), "connect".into(),
-        "--app-id".into(), app_id,
-        "--app-secret".into(), app_secret,
-    ]);
-    let out = quiet_command(&program)
+    let args = ig_connect_args(base_args, app_id);
+
+    let mut child = quiet_command(&program)
+        .env("PUBLIKCLIP_HOME", home_dir())
         .args(&args)
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| e.to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(app_secret.as_bytes())
+            .map_err(|e| e.to_string())?;
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
     if out.status.success() {
@@ -395,45 +503,36 @@ async fn ig_tool(args: Vec<String>) -> Result<Value, String> {
     full.push("ig".to_string());
     full.extend(args);
     let out = quiet_command(&program)
+        .env("PUBLIKCLIP_HOME", home_dir())
         .args(&full)
         .output()
         .map_err(|e| e.to_string())?;
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let line = stdout.lines().rev().find(|l| l.trim_start().starts_with('{'));
+    let line = stdout
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with('{'));
     match line.and_then(|l| serde_json::from_str::<Value>(l).ok()) {
         Some(v) => Ok(v),
         None => Err(format!(
             "ig tool produced no JSON: {}",
-            String::from_utf8_lossy(&out.stderr).chars().take(400).collect::<String>()
+            String::from_utf8_lossy(&out.stderr)
+                .chars()
+                .take(400)
+                .collect::<String>()
         )),
     }
 }
 
 #[tauri::command]
-fn export_clip(path: String, title: Option<String>) -> Result<String, String> {
-    let src = PathBuf::from(&path);
-    if !src.exists() {
-        return Err("clip file missing".into());
-    }
-    let downloads = dirs_home().join("Downloads");
-    let stem = title.unwrap_or_else(|| "publikclip".into());
-    let safe: String = stem
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { '_' })
-        .collect::<String>()
-        .trim()
-        .replace(' ', "-")
-        .chars()
-        .take(60)
-        .collect();
-    let mut dest = downloads.join(format!("{safe}.mp4"));
-    let mut n = 1;
-    while dest.exists() {
-        dest = downloads.join(format!("{safe}-{n}.mp4"));
-        n += 1;
-    }
-    fs::copy(&src, &dest).map_err(|e| e.to_string())?;
-    Ok(dest.to_string_lossy().to_string())
+fn export_clip(job_id: String, clip: u32, title: Option<String>) -> Result<String, String> {
+    artifact::export_clip(
+        &home_dir(),
+        &dirs_home().join("Downloads"),
+        &job_id,
+        clip,
+        title,
+    )
 }
 
 fn main() {
@@ -465,4 +564,17 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running publikclip");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ig_connect_args;
+
+    #[test]
+    fn meta_secret_is_not_part_of_child_arguments() {
+        let args = ig_connect_args(vec!["uv".into()], "app-id".into());
+        assert!(args.iter().any(|arg| arg == "--app-secret-stdin"));
+        assert!(!args.iter().any(|arg| arg == "super-secret"));
+        assert!(!args.iter().any(|arg| arg == "--app-secret"));
+    }
 }
