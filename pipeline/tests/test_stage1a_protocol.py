@@ -138,13 +138,13 @@ def test_success_has_exactly_one_terminal_event(monkeypatch, capsys):
     assert terminal["retryable"] is False
 
 
-def test_real_ingest_translates_ytdlp_failure(monkeypatch, capsys):
+def test_real_ingest_translates_fake_ytdlp_failure(monkeypatch, tmp_path, capsys):
     from publikclip_pipeline.ingest import stage as ingest_stage
 
-    def fail_fetch(_url, _progress):
-        raise YtDlpError("video unavailable after yt-dlp update")
-
-    monkeypatch.setattr(ingest_stage.ytdlp, "fetch_meta", fail_fetch)
+    fake = tmp_path / "yt-dlp-fake"
+    fake.write_text("#!/bin/sh\nprintf 'ERROR: video unavailable after extractor failure\\n' >&2\nexit 1\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(ingest_stage.ytdlp, "ensure_ytdlp", lambda _progress: fake)
     monkeypatch.setattr(cli, "_stages", lambda: [ingest_stage.IngestStage()])
     code = cli.main(["--jsonl", "run", "https://example.test/video"])
     events = _events(capsys)
