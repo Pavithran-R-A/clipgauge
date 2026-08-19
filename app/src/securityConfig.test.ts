@@ -5,14 +5,32 @@ import { describe, expect, it } from 'vitest'
 const config = JSON.parse(
   readFileSync(resolve(process.cwd(), 'src-tauri/tauri.conf.json'), 'utf8')
 ) as {
-  app: { security: { csp: string | null; assetProtocol: { scope: string[] } } }
+  app: { security: { csp: string | null; devCsp: string | null; assetProtocol: { scope: string[] } } }
 }
 
 describe('desktop security configuration', () => {
-  it('uses a restrictive CSP without wildcard or unsafe-eval sources', () => {
-    expect(config.app.security.csp).toBeTruthy()
-    expect(config.app.security.csp).not.toContain("'unsafe-eval'")
-    expect(config.app.security.csp).not.toContain('*')
+  it('uses a restrictive production CSP with the exact Tauri IPC and asset origins', () => {
+    const csp = config.app.security.csp ?? ''
+    expect(csp).toContain('ipc:')
+    expect(csp).toContain('http://ipc.localhost')
+    expect(csp).toContain('asset:')
+    expect(csp).toContain('http://asset.localhost')
+    expect(csp).toMatch(/img-src[^;]*asset:[^;]*http:\/\/asset\.localhost/)
+    expect(csp).toMatch(/media-src[^;]*asset:[^;]*http:\/\/asset\.localhost/)
+    expect(csp).not.toContain('localhost:1430')
+    expect(csp).not.toContain('ws://localhost:1430')
+    expect(csp).not.toContain("'unsafe-eval'")
+    expect(csp).not.toContain('*')
+  })
+
+  it('keeps Vite and HMR origins in development CSP only', () => {
+    const devCsp = config.app.security.devCsp ?? ''
+    expect(devCsp).toContain('http://localhost:1430')
+    expect(devCsp).toContain('ws://localhost:1430')
+    expect(devCsp).toContain('http://ipc.localhost')
+    expect(devCsp).toContain('http://asset.localhost')
+    expect(devCsp).not.toContain("'unsafe-eval'")
+    expect(devCsp).not.toContain('*')
   })
 
   it('scopes assets to media directories rather than whole application state', () => {

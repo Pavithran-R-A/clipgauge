@@ -161,19 +161,16 @@ fn emit_terminal(app: &AppHandle, payload: Value) {
 }
 
 fn write_bridge_diagnostic(tail: &str) -> String {
-    let id = diagnostics::diagnostic_id();
     let directory = home_dir().join("diagnostics");
-    let _ = fs::create_dir_all(&directory);
-    let path = directory.join(format!("{id}.log"));
-    if let Ok(mut file) = fs::File::create(&path) {
-        let _ = file.write_all(diagnostics::redact(tail).as_bytes());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    for _ in 0..3 {
+        let id = diagnostics::diagnostic_id();
+        match diagnostics::write_log(&directory, &id, tail) {
+            Ok(true) => return id,
+            Ok(false) => continue,
+            Err(_) => return id,
         }
     }
-    id
+    diagnostics::diagnostic_id()
 }
 
 fn stream_pipeline(app: &AppHandle, program: &str, args: &[String]) {
@@ -463,6 +460,23 @@ fn ig_connect_args(mut base_args: Vec<String>, app_id: String) -> Vec<String> {
     base_args
 }
 
+fn ig_failure_message(stderr: &str, stdout: &str, exit_code: Option<i32>) -> String {
+    let context = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
+    let safe = diagnostics::redact(context.trim());
+    match exit_code {
+        Some(code) if safe.is_empty() => format!("Instagram connection failed (exit code {code})."),
+        Some(code) => format!("Instagram connection failed (exit code {code}): {safe}"),
+        None if safe.is_empty() => {
+            "Instagram connection failed before it returned a result.".to_string()
+        }
+        None => format!("Instagram connection failed: {safe}"),
+    }
+}
+
 /// Runs the CLI's OAuth dance (it opens the browser + catches the localhost
 /// callback). Blocking by design — the frontend shows a "finish in your
 /// browser" state until this returns.
@@ -478,19 +492,21 @@ async fn ig_connect(app_id: String, app_secret: String) -> Result<String, String
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| diagnostics::redact(&e.to_string()))?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(app_secret.as_bytes())
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| diagnostics::redact(&e.to_string()))?;
     }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| diagnostics::redact(&e.to_string()))?;
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
     if out.status.success() {
         Ok(stdout)
     } else {
-        Err(if stderr.is_empty() { stdout } else { stderr })
+        Err(ig_failure_message(&stderr, &stdout, out.status.code()))
     }
 }
 
@@ -568,7 +584,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::ig_connect_args;
+    use super::{ig_connect_args, ig_failure_message};
 
     #[test]
     fn meta_secret_is_not_part_of_child_arguments() {
@@ -576,5 +592,17 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--app-secret-stdin"));
         assert!(!args.iter().any(|arg| arg == "super-secret"));
         assert!(!args.iter().any(|arg| arg == "--app-secret"));
+    }
+
+    #[test]
+    fn ig_failure_message_redacts_the_exact_stdin_secret() {
+        let secret = "meta-secret-exact-value";
+        let stderr =
+            format!("provider=Meta status=401 Authorization: Bearer {secret} app_secret={secret}");
+        let public = ig_failure_message(&stderr, "", Some(1));
+        assert!(!public.contains(secret));
+        assert!(public.contains("Instagram connection failed"));
+        assert!(public.contains("401"));
+        assert!(public.contains("provider=Meta"));
     }
 }

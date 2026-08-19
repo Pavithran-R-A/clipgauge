@@ -1,4 +1,9 @@
 use std::collections::VecDeque;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::Path;
+
+use uuid::Uuid;
 
 const MAX_TAIL_BYTES: usize = 64 * 1024;
 
@@ -123,17 +128,30 @@ pub fn redact(input: &str) -> String {
 }
 
 pub fn diagnostic_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or_default();
-    format!("diag-{}", millis)
+    format!("diag-{}", Uuid::new_v4().simple())
+}
+
+pub fn write_log(directory: &Path, id: &str, text: &str) -> io::Result<bool> {
+    fs::create_dir_all(directory)?;
+    let path = directory.join(format!("{id}.log"));
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    file.write_all(redact(text).as_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{redact, BoundedTail};
+    use super::{diagnostic_id, redact, write_log, BoundedTail};
+    use std::fs;
 
     #[test]
     fn tail_is_bounded_and_keeps_latest_bytes() {
@@ -153,5 +171,34 @@ mod tests {
         assert!(!clean.contains("pexels-secret"));
         assert!(!clean.contains("meta-token"));
         assert!(!clean.contains("ig-secret"));
+    }
+
+    #[test]
+    fn diagnostic_ids_are_unique_and_have_a_safe_format() {
+        let ids: Vec<String> = (0..64).map(|_| diagnostic_id()).collect();
+        for id in &ids {
+            let parts: Vec<&str> = id.split('-').collect();
+            assert_eq!(parts.len(), 2);
+            assert_eq!(parts[0], "diag");
+            assert_eq!(parts[1].len(), 32);
+            assert!(parts[1].chars().all(|c| c.is_ascii_hexdigit()));
+        }
+        let unique: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+        assert_eq!(unique.len(), ids.len());
+    }
+
+    #[test]
+    fn diagnostic_log_creation_does_not_overwrite_existing_file() {
+        let directory =
+            std::env::temp_dir().join(format!("clipgauge-stage1a1-{}", diagnostic_id()));
+        fs::create_dir_all(&directory).unwrap();
+        let id = "diag-1-2-3";
+        assert!(write_log(&directory, id, "first=ok").unwrap());
+        assert!(!write_log(&directory, id, "second=must-not-overwrite").unwrap());
+        assert_eq!(
+            fs::read_to_string(directory.join(format!("{id}.log"))).unwrap(),
+            "first=ok"
+        );
+        let _ = fs::remove_dir_all(directory);
     }
 }
