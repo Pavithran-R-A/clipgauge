@@ -14,7 +14,17 @@ ClipGauge is an AGPL-3.0-or-later desktop application for turning a YouTube URL 
 
 ## Current release
 
-ClipGauge v0.1.0 is an unsigned release candidate for Linux packaging. The release does not claim paid signing certificates, notarization, Windows/macOS build results, hardware benchmarks, or trademark clearance. The updater remains disabled because no real signing key is configured.
+ClipGauge v0.1.1 is a public open-source release-engineering closure release. It does not rewrite the analytical pipeline. Linux amd64 and Windows x64 release artifacts are unsigned when the corresponding native release jobs succeed. Native macOS builds are qualification results from GitHub-hosted runners; macOS distribution is not claimed to be signed or notarized unless real Apple credentials were used and the release explicitly says so. The updater remains disabled because no real signing key is configured.
+
+Unsigned Windows software may trigger SmartScreen or other reputation warnings. Unsigned and non-notarized macOS software may be blocked or warned about by Gatekeeper. These warnings are expected consequences of distributing without platform signing credentials; they are not evidence that ClipGauge is signed or notarized. Review the release notes and checksums before installing any artifact.
+
+The earlier v0.1.0 release remains available as historical release metadata and packaging. v0.1.1 supersedes it for release-engineering documentation, version consistency, SBOM correctness, and current platform packaging. The v0.1.0 tag and release are not rewritten.
+
+## Public artifacts
+
+The v0.1.1 release workflow is the source of truth for downloadable artifacts. It publishes a Linux amd64 Debian package and a Windows x64 NSIS installer only after their native release jobs pass. macOS builds are retained as CI qualification artifacts unless the release notes explicitly identify an unsigned, non-notarized macOS asset.
+
+Every public binary is accompanied by `SHA256SUMS`. The release also includes a CycloneDX SBOM and a human-readable provenance record. A checksum is not a cryptographic attestation, and neither is a substitute for Windows code signing or Apple signing/notarization.
 
 ## Requirements
 
@@ -65,7 +75,8 @@ Credentials are stored through the operating system credential store when availa
 ```text
 pipeline/   Python package, CLI, model/runtime registry, and tests
 app/        Tauri 2 desktop shell, React frontend, Rust bridge, and tests
-docs/       Completion and provenance planning material
+docs/       Completion, release, and provenance planning material
+scripts/    Deterministic version and release-metadata validators
 ```
 
 ## Development checks
@@ -73,6 +84,8 @@ docs/       Completion and provenance planning material
 Run the same checks used by continuous integration:
 
 ```sh
+python3 scripts/check-version-consistency.py
+
 cd app/src-tauri
 cargo fmt -- --check
 cargo test
@@ -87,11 +100,11 @@ npm run build
 npm run test
 ```
 
-The test suite includes Rust security and lifecycle tests, Python pipeline tests, and frontend tests. Hardware-dependent model execution, optional Instagram setup, and platform signing are not release prerequisites.
+The test suite includes Rust security and lifecycle tests, Python pipeline tests, and frontend tests. Hardware-dependent model execution, optional Instagram setup, platform signing, and notarization are not assumed by the deterministic source checks.
 
 ## Documentation and support
 
-Read [`INSTALL.md`](INSTALL.md) for platform prerequisites, [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for preflight and runtime failures, and [`CHANGELOG.md`](CHANGELOG.md) for the v0.1.0 release record. License and provenance information is available in [`NOTICE.md`](NOTICE.md), [`ORIGIN.md`](ORIGIN.md), and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Use the in-app support-bundle action when reporting a failure, and redact any remaining personal or source-specific information before sharing.
+Read [`INSTALL.md`](INSTALL.md) for platform prerequisites, [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for preflight and runtime failures, and [`CHANGELOG.md`](CHANGELOG.md) for the v0.1.1 release record. License and provenance information is available in [`NOTICE.md`](NOTICE.md), [`ORIGIN.md`](ORIGIN.md), and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Use the in-app support-bundle action when reporting a failure, and redact any remaining personal or source-specific information before sharing.
 
 ## License
 
