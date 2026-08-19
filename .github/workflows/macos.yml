@@ -71,15 +71,27 @@ jobs:
         working-directory: pipeline
         run: |
           if [ "${{ matrix.arch }}" = "x86_64" ]; then
-            uv sync --dev --no-install-package onnxruntime --no-install-package torch --no-install-package torchaudio --no-install-package torchvision --no-install-package torchcodec --no-install-package numba --no-install-package librosa
+            # The locked ML stack has no Intel macOS wheels. Install only the
+            # compatible dependencies needed by deterministic test modules.
+            uv venv --python 3.12 .venv
+            uv pip install --python .venv/bin/python pytest httpx numpy scipy scikit-learn yt-dlp python-speech-features
+            PYTHONPATH="$GITHUB_WORKSPACE/pipeline" .venv/bin/python -c "from clipgauge_pipeline.render import ffmpeg_bin; path, captions = ffmpeg_bin.resolve(); print(path, captions); assert captions, 'caption-capable ffmpeg unavailable'"
           else
             uv sync --dev
+            uv run python -c "from clipgauge_pipeline.render import ffmpeg_bin; path, captions = ffmpeg_bin.resolve(); print(path, captions); assert captions, 'caption-capable ffmpeg unavailable'"
           fi
-          uv run python -c "from clipgauge_pipeline.render import ffmpeg_bin; path, captions = ffmpeg_bin.resolve(); print(path, captions); assert captions, 'caption-capable ffmpeg unavailable'"
 
-      - name: Run Python tests
+      - name: Run Python deterministic tests
         working-directory: pipeline
-        run: uv run pytest -q
+        run: |
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            # events/dsp imports librosa at module import time; that optional
+            # ML/audio path is unavailable on Intel macOS and is excluded
+            # explicitly. All other deterministic tests run natively.
+            PYTHONPATH="$GITHUB_WORKSPACE/pipeline" .venv/bin/pytest -q --ignore=tests/test_events_post.py
+          else
+            uv run pytest -q
+          fi
 
       - name: Install frontend dependencies
         working-directory: app
