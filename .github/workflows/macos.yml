@@ -71,7 +71,7 @@ jobs:
         working-directory: pipeline
         run: |
           if [ "${{ matrix.arch }}" = "x86_64" ]; then
-            uv sync --dev --no-install-package onnxruntime --no-install-package torch
+            uv sync --dev --no-install-package onnxruntime --no-install-package torch --no-install-package torchaudio
           else
             uv sync --dev
           fi
