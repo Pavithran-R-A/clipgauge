@@ -78,6 +78,8 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev
+      - name: Prepare Tauri resource directory for Rust checks
+        run: mkdir -p resources
       - name: Check formatting
         run: cargo fmt -- --check
       - name: Run tests
