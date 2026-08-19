@@ -43,7 +43,7 @@ jobs:
   linux-release:
     name: Build unsigned Linux amd64 Debian package
     needs: validate-tag
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     permissions:
       contents: read
     steps:
