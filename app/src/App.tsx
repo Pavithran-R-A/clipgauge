@@ -18,7 +18,9 @@ export default function App() {
   const [results, setResults] = useState<JobResults | null>(null)
   const [stages, setStages] = useState<Record<string, { fraction: number; message: string }>>({})
   const [running, setRunning] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
   const [runError, setRunError] = useState<string | null>(null)
+  const [runNotice, setRunNotice] = useState<string | null>(null)
   const unlistenRef = useRef<(() => void) | null>(null)
   const activeJobRef = useRef<string | null>(null)
   activeJobRef.current = activeJob
@@ -35,9 +37,7 @@ export default function App() {
     refreshJobs()
   }, [refreshJobs])
 
-  // Instagram loop: opportunistic sync on launch + hourly while open
-  // (decision #12 — no background process, the app's own uptime is the
-  // schedule). Fire-and-forget; the Loop screen re-reads on entry.
+  // Instagram loop: opportunistic sync on launch + hourly while open.
   useEffect(() => {
     const kick = () => {
       api
@@ -66,13 +66,19 @@ export default function App() {
         }))
       } else if (payload.event === 'terminal') {
         setRunning(false)
+        setCancelling(false)
         refreshJobs()
-        if (payload.ok && activeJobRef.current) {
+        if (payload.code === 'CANCELLED') {
+          setRunError(null)
+          setRunNotice(payload.message ?? 'Job cancelled. Completed checkpoints remain available for resume.')
+        } else if (payload.ok && activeJobRef.current) {
+          setRunNotice(null)
           api.jobResults(activeJobRef.current).then((r) => {
             setResults(r)
             setView('review')
           })
         } else if (!payload.ok) {
+          setRunNotice(null)
           const code = payload.code ? ` [${payload.code}]` : ''
           const diagnostic = payload.diagnostic_id ? ` Diagnostic ID: ${payload.diagnostic_id}.` : ''
           setRunError(`${payload.message ?? 'Pipeline failed.'}${code}${diagnostic}`)
@@ -80,6 +86,8 @@ export default function App() {
       } else if (payload.event === 'result') {
         // Backward-compatible handling for one-shot edit commands.
         setRunning(false)
+        setCancelling(false)
+        setRunNotice(null)
         refreshJobs()
         if (payload.ok && activeJobRef.current && payload.stages) {
           api.jobResults(activeJobRef.current).then((r) => {
@@ -91,6 +99,8 @@ export default function App() {
         }
       } else if (payload.event === 'exited') {
         setRunning(false)
+        setCancelling(false)
+        setRunNotice(null)
         setRunError('The pipeline stopped without a structured result. Retry the job and keep the diagnostic details for support.')
       }
     }).then((un) => {
@@ -106,7 +116,9 @@ export default function App() {
   const startRun = useCallback(
     async (source: string, llm: string, captions: string) => {
       setRunning(true)
+      setCancelling(false)
       setRunError(null)
+      setRunNotice(null)
       setStages({})
       setResults(null)
       setActiveJob(null)
@@ -150,7 +162,9 @@ export default function App() {
         }}
         onRestyle={(captions, camera) => {
           setRunning(true)
+          setCancelling(false)
           setRunError(null)
+          setRunNotice(null)
           setStages({})
           setActiveJob(results.job_id)
           setView('studio')
@@ -164,14 +178,26 @@ export default function App() {
     <Studio
       jobs={jobs}
       running={running}
+      cancelling={cancelling}
       stages={stages}
       error={runError}
+      notice={runNotice}
       onRun={startRun}
+      onCancel={() => {
+        if (!activeJob) return
+        setCancelling(true)
+        api.cancelJob(activeJob).catch((error) => {
+          setCancelling(false)
+          setRunError(String(error))
+        })
+      }}
       onOpenLoop={() => setView('loop')}
       onOpenJob={openJob}
       onResume={(id, llm) => {
         setRunning(true)
+        setCancelling(false)
         setRunError(null)
+        setRunNotice(null)
         setStages({})
         setActiveJob(id)
         api.resumeJob(id, llm)
@@ -179,3 +205,4 @@ export default function App() {
     />
   )
 }
+

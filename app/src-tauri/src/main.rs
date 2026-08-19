@@ -6,14 +6,29 @@
 mod artifact;
 mod diagnostics;
 mod path_security;
+mod process_manager;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+#[derive(Clone)]
+struct AppState {
+    processes: Arc<Mutex<process_manager::ProcessManager>>,
+}
+
+impl AppState {
+    fn new() -> Self {
+        Self {
+            processes: Arc::new(Mutex::new(process_manager::ProcessManager::new())),
+        }
+    }
+}
 
 fn home_dir() -> PathBuf {
     // The desktop owns one stable root. Direct Python CLI tests may still use
@@ -101,11 +116,15 @@ fn pipeline_invocation() -> (String, Vec<String>) {
 #[tauri::command]
 fn run_job(
     app: AppHandle,
+    state: State<'_, AppState>,
     source: String,
     llm: Option<String>,
     captions: Option<String>,
 ) -> Result<(), String> {
     let (program, base_args) = pipeline_invocation();
+    let processes = state.processes.clone();
+    let key = format!("run:{}", diagnostics::diagnostic_id());
+    reserve_process(&processes, key.clone())?;
     std::thread::spawn(move || {
         let mut args = base_args.clone();
         args.push("--jsonl".to_string());
@@ -119,7 +138,7 @@ fn run_job(
             args.push("--captions".to_string());
             args.push(preset);
         }
-        stream_pipeline(&app, &program, &args);
+        stream_pipeline(&app, &program, &args, processes, key);
     });
     Ok(())
 }
@@ -127,6 +146,7 @@ fn run_job(
 #[tauri::command]
 fn resume_job(
     app: AppHandle,
+    state: State<'_, AppState>,
     job_id: String,
     llm: Option<String>,
     captions: Option<String>,
@@ -134,6 +154,9 @@ fn resume_job(
 ) -> Result<(), String> {
     validate_job_id(&job_id)?;
     let (program, base_args) = pipeline_invocation();
+    let processes = state.processes.clone();
+    let key = format!("job:{job_id}");
+    reserve_process(&processes, key.clone())?;
     std::thread::spawn(move || {
         let mut args = base_args.clone();
         args.push("--jsonl".to_string());
@@ -151,9 +174,80 @@ fn resume_job(
             args.push("--camera".to_string());
             args.push(cam);
         }
-        stream_pipeline(&app, &program, &args);
+        stream_pipeline(&app, &program, &args, processes, key);
     });
     Ok(())
+}
+
+fn reserve_process(
+    processes: &Arc<Mutex<process_manager::ProcessManager>>,
+    key: String,
+) -> Result<(), String> {
+    processes
+        .lock()
+        .map_err(|_| "job lifecycle state is unavailable".to_string())?
+        .reserve(key)
+        .map(|_| ())
+        .map_err(|error| match error {
+            process_manager::ReserveError::AlreadyActive => {
+                "This job is already running in ClipGauge. Wait for it to finish or cancel it before retrying.".to_string()
+            }
+            process_manager::ReserveError::Busy => {
+                "Another heavy ClipGauge job is running. Wait for it to finish or cancel it before starting another.".to_string()
+            }
+        })
+}
+
+fn lifecycle_path(job_id: &str) -> Result<PathBuf, String> {
+    Ok(validate_job_id(job_id)?.join("runtime.json"))
+}
+
+fn write_lifecycle_snapshot(processes: &Arc<Mutex<process_manager::ProcessManager>>, key: &str) {
+    let lease = processes
+        .lock()
+        .ok()
+        .and_then(|state| state.lease(key, env!("CARGO_PKG_VERSION"), 1));
+    let Some(lease) = lease else { return };
+    let Ok(path) = lifecycle_path(&lease.job_id) else {
+        return;
+    };
+    let temp = path.with_extension("json.tmp");
+    if let Ok(payload) = serde_json::to_vec_pretty(&lease) {
+        if fs::write(&temp, payload).is_ok() {
+            let _ = fs::rename(&temp, &path);
+        }
+    }
+}
+
+fn reconcile_stale_leases(processes: &mut process_manager::ProcessManager) {
+    let jobs = home_dir().join("jobs");
+    let Ok(entries) = fs::read_dir(jobs) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let id = entry.file_name().to_string_lossy().to_string();
+        if !path_security::valid_job_id(&id) {
+            continue;
+        }
+        let Ok(path) = lifecycle_path(&id) else {
+            continue;
+        };
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(lease) = serde_json::from_str::<process_manager::LeaseRecord>(&text) else {
+            continue;
+        };
+        if lease.session_id != processes.session_id() && !lease.state.terminal() {
+            let stale = process_manager::ProcessManager::mark_interrupted(&lease);
+            let temp = path.with_extension("json.tmp");
+            if let Ok(payload) = serde_json::to_vec_pretty(&stale) {
+                if fs::write(&temp, payload).is_ok() {
+                    let _ = fs::rename(temp, path);
+                }
+            }
+        }
+    }
 }
 
 fn emit_terminal(app: &AppHandle, payload: Value) {
@@ -173,16 +267,34 @@ fn write_bridge_diagnostic(tail: &str) -> String {
     diagnostics::diagnostic_id()
 }
 
-fn stream_pipeline(app: &AppHandle, program: &str, args: &[String]) {
-    let child = quiet_command(program)
+fn stream_pipeline(
+    app: &AppHandle,
+    program: &str,
+    args: &[String],
+    processes: Arc<Mutex<process_manager::ProcessManager>>,
+    key: String,
+) {
+    let mut command = quiet_command(program);
+    process_manager::configure_process_group(&mut command);
+    let child = command
         .env("PUBLIKCLIP_HOME", home_dir())
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
     let mut child = match child {
-        Ok(c) => c,
+        Ok(c) => {
+            let _ = processes
+                .lock()
+                .map_err(|_| ())
+                .and_then(|mut state| state.register_process(&key, c.id()).map_err(|_| ()));
+            c
+        }
         Err(err) => {
+            if let Ok(mut state) = processes.lock() {
+                let _ = state.finish(&key, false);
+            }
+            write_lifecycle_snapshot(&processes, &key);
             emit_terminal(
                 app,
                 json!({
@@ -213,12 +325,26 @@ fn stream_pipeline(app: &AppHandle, program: &str, args: &[String]) {
             tail
         })
     });
-    let mut terminal_seen = false;
+    let mut terminal_payload: Option<Value> = None;
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if let Ok(value) = serde_json::from_str::<Value>(&line) {
                 if value.get("event").and_then(Value::as_str) == Some("terminal") {
-                    terminal_seen = true;
+                    terminal_payload = Some(value);
+                    continue;
+                }
+                if let Some(job_id) = value.get("job_id").and_then(Value::as_str) {
+                    if let Ok(mut state) = processes.lock() {
+                        let _ = state.adopt_job_id(&key, job_id.to_string());
+                        state.update_stage(
+                            &key,
+                            value
+                                .get("stage")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        );
+                    }
+                    write_lifecycle_snapshot(&processes, &key);
                 }
                 let _ = app.emit("pipeline-event", value);
             }
@@ -228,7 +354,39 @@ fn stream_pipeline(app: &AppHandle, program: &str, args: &[String]) {
     let stderr_tail = stderr_thread
         .and_then(|thread| thread.join().ok())
         .unwrap_or_default();
-    if !terminal_seen {
+    let cancelled = processes
+        .lock()
+        .map(|state| state.is_cancel_requested(&key))
+        .unwrap_or(false);
+    if cancelled {
+        if let Ok(mut state) = processes.lock() {
+            let _ = state.finish(&key, false);
+        }
+        write_lifecycle_snapshot(&processes, &key);
+        emit_terminal(
+            app,
+            json!({
+                "event": "terminal",
+                "protocol_version": 1,
+                "ok": false,
+                "stage": "pipeline",
+                "code": "CANCELLED",
+                "message": "The job was cancelled. Completed checkpoints remain available for resume.",
+                "retryable": true,
+            }),
+        );
+    } else if let Some(payload) = terminal_payload {
+        let success = payload.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        if let Ok(mut state) = processes.lock() {
+            let _ = state.finish(&key, success);
+        }
+        write_lifecycle_snapshot(&processes, &key);
+        let _ = app.emit("pipeline-event", payload);
+    } else {
+        if let Ok(mut state) = processes.lock() {
+            let _ = state.finish(&key, false);
+        }
+        write_lifecycle_snapshot(&processes, &key);
         let exit_code = status.as_ref().ok().and_then(|s| s.code());
         let diagnostic_id = write_bridge_diagnostic(&stderr_tail.text());
         emit_terminal(
@@ -250,6 +408,17 @@ fn stream_pipeline(app: &AppHandle, program: &str, args: &[String]) {
 
 /// Everything the review UI needs for one job, read straight off the job
 /// dir's checkpoint files (artifacts are the truth).
+#[tauri::command]
+fn cancel_job(state: State<'_, AppState>, job_id: String) -> Result<(), String> {
+    validate_job_id(&job_id)?;
+    let process_id = state
+        .processes
+        .lock()
+        .map_err(|_| "job lifecycle state is unavailable".to_string())?
+        .request_cancel(&job_id)?;
+    process_manager::terminate_owned(process_id)
+}
+
 #[tauri::command]
 fn job_results(job_id: String) -> Result<Value, String> {
     artifact::job_results(&home_dir(), &job_id)
@@ -381,9 +550,17 @@ async fn edit_tool(args: Vec<String>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-fn run_edit_render(app: AppHandle, job_id: String, clip: u32) -> Result<(), String> {
+fn run_edit_render(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+    clip: u32,
+) -> Result<(), String> {
     validate_job_id(&job_id)?;
     let (program, base_args) = pipeline_invocation();
+    let processes = state.processes.clone();
+    let key = format!("edit:{job_id}:{clip}");
+    reserve_process(&processes, key.clone())?;
     std::thread::spawn(move || {
         let mut args = base_args.clone();
         args.push("--jsonl".to_string());
@@ -391,7 +568,7 @@ fn run_edit_render(app: AppHandle, job_id: String, clip: u32) -> Result<(), Stri
         args.push("render-clip".to_string());
         args.push(job_id);
         args.push(clip.to_string());
-        stream_pipeline(&app, &program, &args);
+        stream_pipeline(&app, &program, &args, processes, key);
     });
     Ok(())
 }
@@ -553,12 +730,14 @@ fn export_clip(job_id: String, clip: u32, title: Option<String>) -> Result<Strin
 
 fn main() {
     tauri::Builder::default()
+        .manage(AppState::new())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             run_job,
             resume_job,
+            cancel_job,
             job_results,
             list_job_dirs,
             save_gemini_key,
@@ -576,6 +755,9 @@ fn main() {
         ])
         .setup(|app| {
             let _ = app.get_webview_window("main");
+            if let Ok(mut processes) = app.state::<AppState>().processes.lock() {
+                reconcile_stale_leases(&mut processes);
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -22,15 +22,18 @@ const CAPTION_PRESETS = ['classic', 'beast', 'hormozi', 'minimal', 'karaoke-pop'
 interface Props {
   jobs: JobSummary[]
   running: boolean
+  cancelling: boolean
   stages: Record<string, { fraction: number; message: string }>
   error: string | null
+  notice: string | null
   onRun: (source: string, llm: string, captions: string) => void
+  onCancel: () => void
   onOpenLoop: () => void
   onOpenJob: (id: string) => void
   onResume: (id: string, llm?: string) => void
 }
 
-export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop, onOpenJob, onResume }: Props) {
+export default function Studio({ jobs, running, cancelling, stages, error, notice, onRun, onCancel, onOpenLoop, onOpenJob, onResume }: Props) {
   const [source, setSource] = useState('')
   const [llm, setLlm] = useState('gemini')
   const [captions, setCaptions] = useState('classic')
@@ -92,6 +95,16 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
             >
               {running ? 'WORKING' : 'CUT IT'}
             </button>
+            {running && (
+              <button
+                className="btn-ghost"
+                onClick={onCancel}
+                disabled={cancelling}
+                aria-label="Cancel the active job"
+              >
+                {cancelling ? 'CANCELLING' : 'CANCEL'}
+              </button>
+            )}
           </div>
           <div className="run-options">
             <div className="opt-group">
@@ -144,8 +157,14 @@ export default function Studio({ jobs, running, stages, error, onRun, onOpenLoop
           </section>
         )}
 
+        {notice && (
+          <section className="status-block" role="status">
+            <span className="led led-half" />
+            {notice}
+          </section>
+        )}
         {error && (
-          <section className="error-block">
+          <section className="error-block" role="alert">
             <span className="led led-err" />
             {error}
           </section>

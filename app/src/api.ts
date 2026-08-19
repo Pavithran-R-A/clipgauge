@@ -6,6 +6,7 @@ export const api = {
     invoke<void>('run_job', { source, llm, captions }),
   resumeJob: (jobId: string, llm?: string, captions?: string, camera?: string) =>
     invoke<void>('resume_job', { jobId, llm, captions, camera }),
+  cancelJob: (jobId: string) => invoke<void>('cancel_job', { jobId }),
   jobResults: (jobId: string) => invoke<JobResults>('job_results', { jobId }),
   listJobs: () => invoke<JobSummary[]>('list_job_dirs'),
   saveGeminiKey: (key: string) => invoke<boolean>('save_gemini_key', { key }),
