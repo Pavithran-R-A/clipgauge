@@ -4,9 +4,19 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing immutable release tag to package and publish"
+        required: true
+        default: "v0.1.1"
+        type: string
 
 permissions:
   contents: read
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
 
 concurrency:
   group: release-${{ github.ref }}
@@ -23,9 +33,9 @@ jobs:
       - name: Enforce tag/version equality
         run: |
           set -euo pipefail
-          tag_version="${GITHUB_REF_NAME#v}"
+          tag_version="${RELEASE_TAG#v}"
           manifest_version=$(python3 -c 'import json; print(json.load(open("app/package.json"))["version"])')
-          test "$GITHUB_REF_NAME" = "v${manifest_version}"
+          test "$RELEASE_TAG" = "v${manifest_version}"
           test "$tag_version" = "0.1.1"
       - name: Run version consistency check
         run: python3 scripts/check-version-consistency.py
@@ -82,8 +92,8 @@ jobs:
           test -n "$package"
           dpkg-deb --info "$package" | tee release-assets/linux-deb-info.txt
           dpkg-deb --contents "$package" > release-assets/linux-deb-contents.txt
-          cp "$package" "release-assets/ClipGauge_${GITHUB_REF_NAME#v}_amd64.deb"
-          test "$(dpkg-deb --field "$package" Version)" = "${GITHUB_REF_NAME#v}"
+          cp "$package" "release-assets/ClipGauge_${RELEASE_TAG#v}_amd64.deb"
+          test "$(dpkg-deb --field "$package" Version)" = "${RELEASE_TAG#v}"
       - uses: actions/upload-artifact@v4
         with:
           name: clipgauge-linux-${{ github.sha }}
@@ -152,7 +162,7 @@ jobs:
         run: |
           $setup = Get-ChildItem app/src-tauri/target/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
           if (-not $setup) { throw "no NSIS installer produced" }
-          $version = "${env:GITHUB_REF_NAME}".Substring(1)
+          $version = "${env:RELEASE_TAG}".Substring(1)
           $releaseDir = Join-Path $env:GITHUB_WORKSPACE "release-assets"
           New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
           $publicName = "ClipGauge_${version}_Windows_x64_NSIS.exe"
@@ -265,7 +275,7 @@ jobs:
           test -n "$app_bundle"
           plist="$app_bundle/Contents/Info.plist"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "io.github.pavithranra.clipgauge"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "${GITHUB_REF_NAME#v}"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "${RELEASE_TAG#v}"
           executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")
           test -x "$app_bundle/Contents/MacOS/$executable"
           find "$app_bundle/Contents/Resources" -path '*clipgauge_pipeline*' -print -quit | grep .
@@ -312,9 +322,9 @@ jobs:
           find release-inputs/windows -maxdepth 1 -type f -name 'ClipGauge_*.exe' -exec cp {} release-assets/ \;
           test "$(find release-assets -maxdepth 1 -type f \( -name '*.deb' -o -name '*.exe' \) | wc -l)" -eq 2
       - name: Generate CycloneDX SBOM
-        run: python3 scripts/generate-release-metadata.py --tag "$GITHUB_REF_NAME" --output-dir release-assets
+        run: python3 scripts/generate-release-metadata.py --tag "$RELEASE_TAG" --output-dir release-assets
       - name: Validate CycloneDX SBOM
-        run: python3 scripts/validate-sbom.py release-assets/SBOM.cyclonedx.json --tag "$GITHUB_REF_NAME"
+        run: python3 scripts/validate-sbom.py release-assets/SBOM.cyclonedx.json --tag "$RELEASE_TAG"
       - name: Generate GitHub build provenance attestation
         id: attest
         continue-on-error: true
@@ -332,7 +342,7 @@ jobs:
       - name: Generate human-readable provenance
         run: |
           python3 scripts/generate-release-metadata.py \
-            --tag "$GITHUB_REF_NAME" \
+            --tag "$RELEASE_TAG" \
             --output-dir release-assets \
             --workflow-run "$GITHUB_RUN_ID" \
             --attestation-status "$(tr '\n' ' ' < release-assets/ATTESTATION_STATUS.md)"
@@ -379,8 +389,8 @@ jobs:
         working-directory: release-assets
         run: |
           set -euo pipefail
-          test -f "ClipGauge_${GITHUB_REF_NAME#v}_amd64.deb"
-          test -f "ClipGauge_${GITHUB_REF_NAME#v}_Windows_x64_NSIS.exe"
+          test -f "ClipGauge_${RELEASE_TAG#v}_amd64.deb"
+          test -f "ClipGauge_${RELEASE_TAG#v}_Windows_x64_NSIS.exe"
           test -f SBOM.cyclonedx.json
           test -f RELEASE_PROVENANCE.md
           test -f ATTESTATION_STATUS.md
@@ -390,14 +400,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $GITHUB_REF_NAME already exists; refusing to replace it" >&2
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $RELEASE_TAG already exists; refusing to replace it" >&2
             exit 1
           fi
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --draft \
-            --title "ClipGauge $GITHUB_REF_NAME" \
+            --title "ClipGauge $RELEASE_TAG" \
             --notes-file release-assets/RELEASE_NOTES.md \
             release-assets/ClipGauge_*.deb \
             release-assets/ClipGauge_*.exe \
@@ -410,6 +420,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          asset_count=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')
+          asset_count=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')
           test "$asset_count" -eq 6
-          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
