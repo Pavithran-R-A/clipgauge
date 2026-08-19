@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import os
 import secrets as pysecrets
 import threading
 import time
@@ -32,14 +33,14 @@ from dataclasses import dataclass
 
 import httpx
 
-from .. import config
+from .. import config, protocol
 
 AUTH_URL = "https://www.instagram.com/oauth/authorize"
 TOKEN_URL = "https://api.instagram.com/oauth/access_token"
 GRAPH = "https://graph.instagram.com"
 API_VERSION = "v23.0"
 SCOPES = "instagram_business_basic,instagram_business_manage_insights"
-CALLBACK_PORT = 8137
+CALLBACK_PORT = 0  # bind an ephemeral loopback port for each OAuth operation
 REEL_METRICS = (
     "views,reach,likes,comments,saved,shares,reposts,total_interactions,"
     "ig_reels_avg_watch_time,ig_reels_video_view_total_time,reels_skip_rate"
@@ -60,40 +61,50 @@ class IgError(Exception):
     """User-actionable Instagram API failure."""
 
 
-def _store_path():
-    return config.home_dir() / "instagram.json"
-
-
 def load_connection() -> dict | None:
-    path = _store_path()
-    if not path.exists():
+    raw = os.environ.get("PUBLIKCLIP_INSTAGRAM_CONNECTION_JSON")
+    if not raw:
         return None
     try:
-        return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
         return None
 
 
 def save_connection(data: dict) -> None:
-    path = _store_path()
+    bridge = os.environ.get("PUBLIKCLIP_CONNECTION_OUTPUT")
+    if not bridge:
+        raise IgError("Instagram credential storage is available only through the desktop vault bridge.")
+    path = __import__("pathlib").Path(bridge)
     config.ensure_home()
-    path.write_text(json.dumps(data, indent=1))
-    path.chmod(0o600)
+    path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
 
 
 @dataclass
 class CallbackResult:
     code: str | None = None
     error: str | None = None
+    port: int = 0
 
 
-def _wait_for_callback(state: str, timeout_sec: float = 300.0) -> CallbackResult:
+def _wait_for_callback(
+    state: str,
+    timeout_sec: float = 300.0,
+    on_ready=None,
+) -> CallbackResult:
     """Tiny localhost server that catches the OAuth redirect once."""
     result = CallbackResult()
     done = threading.Event()
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
+            if done.is_set():
+                return
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             if query.get("state", [""])[0] != state:
                 result.error = "OAuth state mismatch — try connecting again."
@@ -117,9 +128,12 @@ def _wait_for_callback(state: str, timeout_sec: float = 300.0) -> CallbackResult
             pass
 
     server = http.server.HTTPServer(("127.0.0.1", CALLBACK_PORT), Handler)
+    result.port = int(server.server_port)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        if on_ready:
+            on_ready(result.port)
         if not done.wait(timeout_sec):
             result.error = "Timed out waiting for the browser authorization."
     finally:
@@ -127,27 +141,29 @@ def _wait_for_callback(state: str, timeout_sec: float = 300.0) -> CallbackResult
     return result
 
 
-def redirect_uri() -> str:
-    return f"http://localhost:{CALLBACK_PORT}/callback"
+def redirect_uri(port: int | None = None) -> str:
+    return f"http://127.0.0.1:{port if port is not None else CALLBACK_PORT}/callback"
 
 
 def connect(app_id: str, app_secret: str, open_browser: bool = True) -> dict:
     """Full OAuth dance against the user's own app. Blocks until the browser
     round-trip completes. Returns + persists the connection."""
     state = pysecrets.token_urlsafe(16)
-    params = {
-        "client_id": app_id.strip(),
-        "redirect_uri": redirect_uri(),
-        "scope": SCOPES,
-        "response_type": "code",
-        "state": state,
-        "enable_fb_login": "0",
-        "force_authentication": "0",
-    }
-    url = AUTH_URL + "?" + urllib.parse.urlencode(params)
-    if open_browser:
-        webbrowser.open(url)
-    result = _wait_for_callback(state)
+
+    def open_authorization(port: int) -> None:
+        params = {
+            "client_id": app_id.strip(),
+            "redirect_uri": redirect_uri(port),
+            "scope": SCOPES,
+            "response_type": "code",
+            "state": state,
+            "enable_fb_login": "0",
+            "force_authentication": "0",
+        }
+        if open_browser:
+            webbrowser.open(AUTH_URL + "?" + urllib.parse.urlencode(params))
+
+    result = _wait_for_callback(state, on_ready=open_authorization)
     if not result.code:
         raise IgError(result.error or "Authorization failed.")
 
@@ -157,13 +173,13 @@ def connect(app_id: str, app_secret: str, open_browser: bool = True) -> dict:
             "client_id": app_id.strip(),
             "client_secret": app_secret.strip(),
             "grant_type": "authorization_code",
-            "redirect_uri": redirect_uri(),
+            "redirect_uri": redirect_uri(result.port),
             "code": result.code,
         },
         timeout=HTTP_TIMEOUT,
     )
     if res.status_code != 200:
-        raise IgError(f"Token exchange failed ({res.status_code}): {res.text[:300]}")
+        raise IgError(f"Token exchange failed ({res.status_code}): {protocol.safe_message(res.text)}")
     short = res.json()
 
     res = httpx.get(
@@ -176,7 +192,7 @@ def connect(app_id: str, app_secret: str, open_browser: bool = True) -> dict:
         timeout=HTTP_TIMEOUT,
     )
     if res.status_code != 200:
-        raise IgError(f"Long-lived token exchange failed: {res.text[:300]}")
+        raise IgError(f"Long-lived token exchange failed: {protocol.safe_message(res.text)}")
     long_lived = res.json()
 
     me = httpx.get(

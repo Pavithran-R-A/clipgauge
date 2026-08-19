@@ -16,7 +16,7 @@ const STEPS: [string, string][] = [
   ['Open developers.facebook.com', 'Log in with the Facebook account you use — it must have two-factor auth enabled.'],
   ['Create App', 'My Apps → Create App. Pick "Other" use case → type "Business". You can skip connecting a business portfolio.'],
   ['Add the Instagram product', 'On the app dashboard, find "Instagram" → Set up. Choose "API setup with Instagram login".'],
-  ['Set the redirect URI', 'In Instagram → API setup → Business login settings, add: http://localhost:8137/callback'],
+  ['Set the redirect URI', 'In Instagram → API setup → Business login settings, add the loopback callback shown by ClipGauge when you connect. A fresh local port is selected for each attempt.'],
   ['Copy App ID + App Secret', 'Instagram → API setup shows the Instagram App ID and App Secret. Paste them below.'],
   ['Connect', 'Hit connect — your browser opens Meta’s consent screen. Approve, and you’re done. The app stays in Development Mode forever; that’s the point.']
 ]

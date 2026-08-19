@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -89,13 +90,8 @@ def _overlay_dir(job_dir: Path) -> Path:
 
 
 def pexels_key() -> str | None:
-    secrets_path = config.home_dir() / "secrets.json"
-    if secrets_path.exists():
-        try:
-            return json.loads(secrets_path.read_text()).get("pexels_api_key")
-        except (json.JSONDecodeError, OSError):
-            return None
-    return None
+    key = os.environ.get("PUBLIKCLIP_PEXELS_API_KEY")
+    return key.strip() if key and key.strip() else None
 
 
 def fetch_pexels(query: str, job_dir: Path) -> str | None:
@@ -137,7 +133,7 @@ def fetch_gemini(query: str, job_dir: Path) -> str | None:
     try:
         res = httpx.post(
             llm_mod.GEMINI_URL.format(model=GEMINI_IMAGE_MODEL),
-            params={"key": key},
+            headers={"x-goog-api-key": key},
             json={
                 "contents": [{"parts": [{"text": f"A clean, punchy illustrative photo for a video overlay: {query}. No text in the image."}]}],
                 "generationConfig": {"responseModalities": ["IMAGE"]},

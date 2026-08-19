@@ -4,9 +4,9 @@ One interface: generate_json(prompt, schema, images) → dict, with disk
 caching keyed on (backend, model, prompt, schema) so re-runs never re-spend
 — the M2 gate requires cache hits on identical inputs.
 
-Key resolution: PUBLIKCLIP_GEMINI_API_KEY env var, then
-PUBLIKCLIP_HOME/secrets.json {"gemini_api_key": "..."} (written by the
-app's onboarding). Ollama needs no key — just a running daemon.
+Key resolution is operation-scoped: the Rust bridge injects
+PUBLIKCLIP_GEMINI_API_KEY for the one child operation. Direct CLI users may
+set the same environment variable. No plaintext secret file is read here.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 
-from .. import config
+from .. import config, protocol
 
 # The rolling alias, deliberately: Google retires pinned models for NEW api
 # keys while still advertising them in ListModels (learned live — 404 "no
@@ -36,15 +36,7 @@ class LlmError(Exception):
 
 def gemini_api_key() -> str | None:
     key = os.environ.get("PUBLIKCLIP_GEMINI_API_KEY")
-    if key:
-        return key
-    secrets_path = config.home_dir() / "secrets.json"
-    if secrets_path.exists():
-        try:
-            return json.loads(secrets_path.read_text()).get("gemini_api_key")
-        except (json.JSONDecodeError, OSError):
-            return None
-    return None
+    return key.strip() if key and key.strip() else None
 
 
 def _cache_dir() -> Path:
@@ -114,7 +106,7 @@ class GeminiClient:
             try:
                 res = httpx.post(
                     GEMINI_URL.format(model=self.model),
-                    params={"key": self._key},
+                    headers={"x-goog-api-key": self._key},
                     json=body,
                     timeout=LLM_TIMEOUT,
                 )
@@ -130,7 +122,7 @@ class GeminiClient:
                         detail = res.json()["error"]["message"]
                     except Exception:  # noqa: BLE001
                         detail = "rate limited"
-                    last_err = LlmError(f"Gemini 429: {detail}")
+                    last_err = LlmError(f"Gemini 429: {protocol.safe_message(detail)}")
                     if "credit" in detail.lower() or "billing" in detail.lower():
                         raise last_err
                     time.sleep(4 * (attempt + 1))
@@ -145,7 +137,7 @@ class GeminiClient:
                 raise
             except (httpx.HTTPError, KeyError, json.JSONDecodeError, IndexError) as err:
                 last_err = err
-        raise LlmError(f"Gemini call failed after retries: {last_err}")
+        raise LlmError(f"Gemini call failed after retries: {protocol.safe_message(str(last_err))}")
 
 
 class OllamaClient:
@@ -154,6 +146,8 @@ class OllamaClient:
     def __init__(self, model: str | None = None):
         try:
             res = httpx.get(f"{OLLAMA_URL}/api/tags", timeout=5.0)
+            if len(res.content) > 1024 * 1024:
+                raise LlmError("Ollama health response was unexpectedly large.")
             res.raise_for_status()
         except httpx.HTTPError as err:
             raise LlmError(

@@ -60,8 +60,8 @@ export default function KeyModal({ onClose }: Props) {
         </header>
         <p className="ig-intro">
           Gemini scores your moments at full quality (~<span className="mono">$0.15</span>/hr
-          of source). The key lives in <span className="mono">~/.publikclip/secrets.json</span>,
-          chmod 600, and never goes anywhere but Google.{' '}
+          of source). The key is stored in your operating system’s credential vault and is
+          supplied only to the operation that needs it.{' '}
           {hasKey && <strong>A key is currently saved{saved ? ' — updated ✓' : ''}.</strong>}
         </p>
         <div className="ig-form">

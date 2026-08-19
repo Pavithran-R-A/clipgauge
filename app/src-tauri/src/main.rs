@@ -7,6 +7,7 @@ mod artifact;
 mod diagnostics;
 mod path_security;
 mod process_manager;
+mod secrets;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -275,6 +276,7 @@ fn stream_pipeline(
     key: String,
 ) {
     let mut command = quiet_command(program);
+    secrets::apply_operation_env(&mut command);
     process_manager::configure_process_group(&mut command);
     let child = command
         .env("PUBLIKCLIP_HOME", home_dir())
@@ -455,36 +457,13 @@ fn list_job_dirs() -> Result<Vec<Value>, String> {
 
 #[tauri::command]
 fn save_gemini_key(key: String) -> Result<bool, String> {
-    let home = home_dir();
-    fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-    let path = home.join("secrets.json");
-    let mut current: Value = fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| json!({}));
-    current["gemini_api_key"] = json!(key.trim());
-    fs::write(&path, serde_json::to_string_pretty(&current).unwrap()).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-    }
+    secrets::set(secrets::SecretName::GeminiApiKey, key.trim())?;
     Ok(true)
 }
 
 #[tauri::command]
 fn get_setup_state() -> Result<Value, String> {
-    let secrets = home_dir().join("secrets.json");
-    let has_key = fs::read_to_string(&secrets)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .map(|v| {
-            v["gemini_api_key"]
-                .as_str()
-                .map(|k| !k.is_empty())
-                .unwrap_or(false)
-        })
-        .unwrap_or(false);
+    let has_key = secrets::get(secrets::SecretName::GeminiApiKey)?.is_some();
     let onboarded = home_dir().join("onboarded").exists();
     Ok(json!({"has_gemini_key": has_key, "onboarded": onboarded}))
 }
@@ -496,16 +475,66 @@ fn mark_onboarded() -> Result<(), String> {
     fs::write(home.join("onboarded"), "1").map_err(|e| e.to_string())
 }
 
+fn loopback_json(path: &str) -> Result<Value, String> {
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::time::Duration;
+
+    let address = ("127.0.0.1", 11434)
+        .to_socket_addrs()
+        .map_err(|_| "Ollama address could not be resolved".to_string())?
+        .next()
+        .ok_or_else(|| "Ollama loopback address is unavailable".to_string())?;
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .map_err(|_| "Ollama is stopped or absent".to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(3)))
+        .map_err(|error| error.to_string())?;
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:11434\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|_| "Ollama health request could not be sent".to_string())?;
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = stream
+            .read(&mut buffer)
+            .map_err(|_| "Ollama health response timed out".to_string())?;
+        if count == 0 {
+            break;
+        }
+        if response.len() + count > 1024 * 1024 {
+            return Err("Ollama health response exceeded the 1 MiB safety limit".to_string());
+        }
+        response.extend_from_slice(&buffer[..count]);
+    }
+    let marker = b"\r\n\r\n";
+    let body_start = response
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .map(|index| index + marker.len())
+        .ok_or_else(|| "Ollama returned an invalid HTTP response".to_string())?;
+    let headers = String::from_utf8_lossy(&response[..body_start]);
+    if !headers.starts_with("HTTP/1.1 200") && !headers.starts_with("HTTP/1.0 200") {
+        return Err("Ollama health endpoint returned a non-success status".to_string());
+    }
+    serde_json::from_slice(&response[body_start..])
+        .map_err(|_| "Ollama returned malformed health JSON".to_string())
+}
+
 #[tauri::command]
 async fn check_ollama() -> Result<Value, String> {
-    let out = quiet_command("curl")
-        .args(["-s", "-m", "3", "http://localhost:11434/api/tags"])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Ok(json!({"running": false, "models": []}));
-    }
-    let parsed: Value = serde_json::from_slice(&out.stdout).unwrap_or(json!({}));
+    let parsed = match loopback_json("/api/tags") {
+        Ok(value) => value,
+        Err(message) => {
+            return Ok(
+                json!({"state": "service-stopped", "running": false, "models": [], "message": message}),
+            )
+        }
+    };
     let models: Vec<String> = parsed["models"]
         .as_array()
         .map(|arr| {
@@ -514,7 +543,12 @@ async fn check_ollama() -> Result<Value, String> {
                 .collect()
         })
         .unwrap_or_default();
-    Ok(json!({"running": true, "models": models}))
+    let state = if models.is_empty() {
+        "model-missing"
+    } else {
+        "service-healthy"
+    };
+    Ok(json!({"state": state, "running": true, "models": models}))
 }
 
 /// Sync pipeline call that returns one JSON blob (edit context, visual
@@ -526,7 +560,9 @@ async fn edit_tool(args: Vec<String>) -> Result<Value, String> {
     let mut full = base_args;
     full.push("edit".to_string());
     full.extend(args);
-    let out = quiet_command(&program)
+    let mut command = quiet_command(&program);
+    secrets::apply_operation_env(&mut command);
+    let out = command
         .env("PUBLIKCLIP_HOME", home_dir())
         .args(&full)
         .output()
@@ -593,29 +629,14 @@ fn save_clip_edits(job_id: String, edits: Value) -> Result<(), String> {
 
 #[tauri::command]
 fn save_pexels_key(key: String) -> Result<bool, String> {
-    let home = home_dir();
-    fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-    let path = home.join("secrets.json");
-    let mut current: Value = fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| json!({}));
-    current["pexels_api_key"] = json!(key.trim());
-    fs::write(&path, serde_json::to_string_pretty(&current).unwrap()).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-    }
+    secrets::set(secrets::SecretName::PexelsApiKey, key.trim())?;
     Ok(true)
 }
 
 #[tauri::command]
 fn ig_status() -> Result<Value, String> {
-    let path = home_dir().join("instagram.json");
-    let connected = fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    let connected = secrets::get(secrets::SecretName::InstagramConnection)?
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
     match connected {
         Some(v) => Ok(json!({
             "connected": true,
@@ -661,9 +682,16 @@ fn ig_failure_message(stderr: &str, stdout: &str, exit_code: Option<i32>) -> Str
 async fn ig_connect(app_id: String, app_secret: String) -> Result<String, String> {
     let (program, base_args) = pipeline_invocation();
     let args = ig_connect_args(base_args, app_id);
+    let connection_output = home_dir().join(format!(
+        ".instagram-connection-{}.json",
+        uuid::Uuid::new_v4()
+    ));
 
-    let mut child = quiet_command(&program)
+    let mut command = quiet_command(&program);
+    secrets::apply_operation_env(&mut command);
+    let mut child = command
         .env("PUBLIKCLIP_HOME", home_dir())
+        .env("PUBLIKCLIP_CONNECTION_OUTPUT", &connection_output)
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -681,8 +709,13 @@ async fn ig_connect(app_id: String, app_secret: String) -> Result<String, String
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
     if out.status.success() {
+        let persisted = fs::read_to_string(&connection_output)
+            .map_err(|error| diagnostics::redact(&error.to_string()))?;
+        secrets::set(secrets::SecretName::InstagramConnection, &persisted)?;
+        let _ = fs::remove_file(&connection_output);
         Ok(stdout)
     } else {
+        let _ = fs::remove_file(&connection_output);
         Err(ig_failure_message(&stderr, &stdout, out.status.code()))
     }
 }
@@ -695,7 +728,9 @@ async fn ig_tool(args: Vec<String>) -> Result<Value, String> {
     let mut full = base_args;
     full.push("ig".to_string());
     full.extend(args);
-    let out = quiet_command(&program)
+    let mut command = quiet_command(&program);
+    secrets::apply_operation_env(&mut command);
+    let out = command
         .env("PUBLIKCLIP_HOME", home_dir())
         .args(&full)
         .output()
@@ -755,6 +790,8 @@ fn main() {
         ])
         .setup(|app| {
             let _ = app.get_webview_window("main");
+            secrets::migrate_legacy(&home_dir()).map_err(std::io::Error::other)?;
+            secrets::migrate_instagram_file(&home_dir()).map_err(std::io::Error::other)?;
             if let Ok(mut processes) = app.state::<AppState>().processes.lock() {
                 reconcile_stale_leases(&mut processes);
             }
