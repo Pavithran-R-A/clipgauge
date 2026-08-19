@@ -974,3 +974,70 @@ body {
 .loop-pick img { width: 44px; height: 78px; object-fit: cover; border: 1px solid var(--line); flex: none; }
 .loop-pick-meta { display: flex; flex-direction: column; gap: 4px; font-size: 11px; min-width: 0; }
 .loop-pick-meta .mono { color: var(--amber); font-size: 12px; }
+
+/* ---------- accessibility and honest run status ---------- */
+:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 3px;
+}
+
+button:disabled,
+input:disabled {
+  cursor: not-allowed;
+}
+
+.source-drop {
+  border-radius: 3px;
+}
+.source-drop:focus-within {
+  box-shadow: 0 0 0 1px var(--amber-dim);
+}
+.elapsed {
+  grid-column: 2;
+  margin: 10px 0 0;
+  color: var(--dim);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
+.deck-bar[role='progressbar'] {
+  min-width: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+@media (max-width: 900px) {
+  .studio {
+    grid-template-columns: 1fr;
+  }
+  .rail {
+    min-height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .rail-jobs {
+    display: none;
+  }
+  .rail-foot {
+    margin-top: 0;
+    display: flex;
+    gap: 10px;
+  }
+  .stage-area {
+    padding: 34px 24px;
+  }
+  .input-row {
+    flex-wrap: wrap;
+  }
+  .input-row input {
+    flex-basis: 100%;
+  }
+}

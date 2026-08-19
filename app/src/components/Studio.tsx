@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import type { JobSummary } from '../types'
 import KeyModal from './KeyModal'
@@ -24,6 +24,7 @@ interface Props {
   jobs: JobSummary[]
   running: boolean
   cancelling: boolean
+  startedAt: number | null
   stages: Record<string, { fraction: number; message: string }>
   error: string | null
   notice: string | null
@@ -34,11 +35,22 @@ interface Props {
   onResume: (id: string, llm?: string) => void
 }
 
-export default function Studio({ jobs, running, cancelling, stages, error, notice, onRun, onCancel, onOpenLoop, onOpenJob, onResume }: Props) {
+export default function Studio({ jobs, running, cancelling, startedAt, stages, error, notice, onRun, onCancel, onOpenLoop, onOpenJob, onResume }: Props) {
   const [source, setSource] = useState('')
   const [llm, setLlm] = useState('gemini')
   const [captions, setCaptions] = useState('classic')
   const [showKey, setShowKey] = useState(false)
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    if (!startedAt) return
+    setNow(Date.now())
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [startedAt])
+
+  const elapsed = startedAt ? Math.max(0, Math.floor((now - startedAt) / 1000)) : 0
+  const elapsedLabel = `${String(Math.floor(elapsed / 60)).padStart(2, '0')}:${String(elapsed % 60).padStart(2, '0')}`
 
   async function chooseFile() {
     const selected = await open({
@@ -167,14 +179,21 @@ export default function Studio({ jobs, running, cancelling, stages, error, notic
         </section>
 
         {(running || Object.keys(stages).length > 0) && (
-          <section className="deck">
+          <section className="deck" aria-label="Pipeline progress" aria-live="polite">
             {STAGE_ORDER.filter((s) => stages[s] || running).map((name, i) => {
               const st = stages[name]
               const state = !st ? 'idle' : st.fraction >= 1 ? 'done' : 'live'
               return (
                 <div className={`deck-row ${state}`} key={name} style={{ animationDelay: `${i * 40}ms` }}>
                   <span className="deck-name mono">{STAGE_LABELS[name] ?? name.toUpperCase()}</span>
-                  <div className="deck-bar">
+                  <div
+                    className="deck-bar"
+                    role="progressbar"
+                    aria-label={`${STAGE_LABELS[name] ?? name} stage progress`}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={st && st.fraction >= 0 ? Math.round(Math.min(1, st.fraction) * 100) : undefined}
+                  >
                     <div
                       className={`deck-fill ${st && st.fraction < 0 ? 'indeterminate' : ''}`}
                       style={st && st.fraction >= 0 ? { width: `${Math.min(100, st.fraction * 100)}%` } : undefined}
@@ -184,6 +203,9 @@ export default function Studio({ jobs, running, cancelling, stages, error, notic
                 </div>
               )
             })}
+            <p className="elapsed mono" aria-label={`Elapsed time ${elapsedLabel}`}>
+              ELAPSED {elapsedLabel}{stages.render?.message ? ` · ${stages.render.message}` : ''}
+            </p>
           </section>
         )}
 

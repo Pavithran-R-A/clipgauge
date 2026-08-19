@@ -19,6 +19,7 @@ export default function App() {
   const [stages, setStages] = useState<Record<string, { fraction: number; message: string }>>({})
   const [running, setRunning] = useState(false)
   const [cancelling, setCancelling] = useState(false)
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null)
   const [runError, setRunError] = useState<string | null>(null)
   const [runNotice, setRunNotice] = useState<string | null>(null)
   const unlistenRef = useRef<(() => void) | null>(null)
@@ -67,6 +68,7 @@ export default function App() {
       } else if (payload.event === 'terminal') {
         setRunning(false)
         setCancelling(false)
+        setRunStartedAt(null)
         refreshJobs()
         if (payload.code === 'CANCELLED') {
           setRunError(null)
@@ -135,6 +137,7 @@ export default function App() {
           setRunNotice(`Preflight warning: ${warnings.slice(0, 2).map((check) => check.message).join(' ')}`)
         }
         setRunning(true)
+        setRunStartedAt(Date.now())
         await api.runJob(source, llm, captions)
       } catch (error) {
         setRunning(false)
@@ -179,6 +182,7 @@ export default function App() {
         }}
         onRestyle={(captions, camera) => {
           setRunning(true)
+          setRunStartedAt(Date.now())
           setCancelling(false)
           setRunError(null)
           setRunNotice(null)
@@ -196,6 +200,7 @@ export default function App() {
       jobs={jobs}
       running={running}
       cancelling={cancelling}
+      startedAt={runStartedAt}
       stages={stages}
       error={runError}
       notice={runNotice}
