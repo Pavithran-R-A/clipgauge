@@ -55,13 +55,26 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install deterministic media prerequisite
-        run: brew install ffmpeg
+        run: |
+          brew install ffmpeg-full
+          if [ -x /opt/homebrew/opt/ffmpeg-full/bin/ffmpeg ]; then
+            echo "CLIPGAUGE_FFMPEG=/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg" >> "$GITHUB_ENV"
+          elif [ -x /usr/local/opt/ffmpeg-full/bin/ffmpeg ]; then
+            echo "CLIPGAUGE_FFMPEG=/usr/local/opt/ffmpeg-full/bin/ffmpeg" >> "$GITHUB_ENV"
+          else
+            echo "ffmpeg-full binary not found" >&2
+            exit 1
+          fi
 
       - name: Resolve Python environment and runtime prerequisite
         working-directory: pipeline
         run: |
-          uv sync --dev
-          uv run python -c "from clipgauge_pipeline.render import ffmpeg_bin; assert ffmpeg_bin.resolve(), 'ffmpeg unavailable'"
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            uv sync --dev --no-install-package onnxruntime
+          else
+            uv sync --dev
+          fi
+          uv run python -c "from clipgauge_pipeline.render import ffmpeg_bin; path, captions = ffmpeg_bin.resolve(); print(path, captions); assert captions, 'caption-capable ffmpeg unavailable'"
 
       - name: Run Python tests
         working-directory: pipeline
