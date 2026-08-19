@@ -1,4 +1,4 @@
-name: Release Linux package
+name: Release ClipGauge
 
 on:
   push:
@@ -6,12 +6,36 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  linux-deb:
-    name: Build unsigned Linux .deb
+  validate-tag:
+    name: Validate release tag and versions
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Enforce tag/version equality
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          manifest_version=$(python3 -c 'import json; print(json.load(open("app/package.json"))["version"])')
+          test "$GITHUB_REF_NAME" = "v${manifest_version}"
+          test "$tag_version" = "0.1.1"
+      - name: Run version consistency check
+        run: python3 scripts/check-version-consistency.py
+
+  linux-release:
+    name: Build unsigned Linux amd64 Debian package
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,11 +50,15 @@ jobs:
           version: latest
           enable-cache: true
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - name: Install Tauri Linux prerequisites
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libglib2.0-dev \
             build-essential \
             curl \
             wget \
@@ -42,31 +70,342 @@ jobs:
       - name: Install frontend dependencies
         working-directory: app
         run: npm ci
-      - name: Build unsigned Debian package
+      - name: Build unsigned Debian package from exact tag
         working-directory: app
         run: npm run tauri build -- --bundles deb
-      - name: Inspect package metadata
+      - name: Inspect package metadata and stage immutable artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          package=$(find app/src-tauri/target/release/bundle/deb -maxdepth 1 -type f -name '*.deb' -print -quit)
+          test -n "$package"
+          dpkg-deb --info "$package" | tee release-assets/linux-deb-info.txt
+          dpkg-deb --contents "$package" > release-assets/linux-deb-contents.txt
+          cp "$package" "release-assets/ClipGauge_${GITHUB_REF_NAME#v}_amd64.deb"
+          test "$(dpkg-deb --field "$package" Version)" = "${GITHUB_REF_NAME#v}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clipgauge-linux-${{ github.sha }}
+          path: release-assets
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-release:
+    name: Build unsigned Windows x64 NSIS installer
+    needs: validate-tag
+    runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      CLIPGAUGE_HOME: ${{ github.workspace }}\.clipgauge-home
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: latest
+          enable-cache: true
+          cache-dependency-glob: pipeline/uv.lock
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Resolve the pipeline environment
+        working-directory: pipeline
+        run: uv sync --dev
+      - name: Fetch caption-capable FFmpeg
+        working-directory: pipeline
+        run: |
+          uv run python -c "from clipgauge_pipeline.render import ffmpeg_bin; assert ffmpeg_bin.ensure_capable(); print(ffmpeg_bin.resolve())"
+          Add-Content $env:GITHUB_ENV "CLIPGAUGE_FFMPEG=$env:CLIPGAUGE_HOME\bin\ffmpeg.exe"
+      - name: Run Windows pipeline tests
+        working-directory: pipeline
+        run: uv run pytest -q --ignore=tests/test_runtime.py --ignore=tests/test_stage1a_protocol.py
+      - name: Install frontend dependencies and run frontend gates
         working-directory: app
         run: |
-          shopt -s nullglob
-          packages=(src-tauri/target/release/bundle/deb/*.deb)
-          test "${#packages[@]}" -gt 0
-          for package in "${packages[@]}"; do
-            dpkg-deb --info "$package"
-            dpkg-deb --contents "$package" >/dev/null
-          done
-      - name: Upload unsigned package artifact
-        uses: actions/upload-artifact@v4
+          npm ci
+          npm run build
+          npm test
+      - name: Run Rust checks where practical
+        working-directory: app/src-tauri
+        run: |
+          cargo fmt -- --check
+          cargo test
+          cargo clippy -- -D warnings
+      - name: Build fresh NSIS installer from exact tag
+        working-directory: app
+        run: npx tauri build --bundles nsis
+      - name: Silent install, inspect, and launch installed ClipGauge
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem app/src-tauri/target/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
+          if (-not $setup) { throw "no NSIS installer produced" }
+          $version = "${env:GITHUB_REF_NAME}".Substring(1)
+          $releaseDir = Join-Path $env:GITHUB_WORKSPACE "release-assets"
+          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+          $publicName = "ClipGauge_${version}_Windows_x64_NSIS.exe"
+          Copy-Item $setup.FullName (Join-Path $releaseDir $publicName)
+          Write-Host "installer: $($setup.Name) -> $publicName"
+          Start-Process -FilePath $setup.FullName -ArgumentList "/S" -Wait
+          $dir = Join-Path $env:LOCALAPPDATA "ClipGauge"
+          if (-not (Test-Path $dir)) { throw "install dir missing: $dir" }
+          $exe = Get-ChildItem $dir -Filter *.exe | Where-Object { $_.Name -notmatch "uninstall" } | Select-Object -First 1
+          if (-not $exe) { throw "no app exe under $dir" }
+          Start-Process -FilePath $exe.FullName
+          Start-Sleep -Seconds 15
+          $proc = Get-Process -Name $exe.BaseName -ErrorAction Stop
+          Write-Host "ClipGauge process alive after launch smoke: pid $($proc.Id)"
+          Stop-Process -Id $proc.Id -Force
+      - uses: actions/upload-artifact@v4
         with:
-          name: clipgauge-linux-deb-${{ github.ref_name }}
-          path: app/src-tauri/target/release/bundle/deb/*.deb
+          name: clipgauge-windows-${{ github.sha }}
+          path: release-assets
           if-no-files-found: error
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          body: |
-            ClipGauge ${{ github.ref_name }} Linux Debian artifact.
+          retention-days: 14
 
-            This artifact is unsigned. No signing certificate, notarization, Windows/macOS artifact, hardware benchmark, or updater signing status is claimed for this release.
-          files: app/src-tauri/target/release/bundle/deb/*.deb
+  macos-release:
+    name: Native macOS ${{ matrix.arch }} qualification
+    needs: validate-tag
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+    permissions:
+      contents: read
+    env:
+      CLIPGAUGE_HOME: ${{ github.workspace }}/.clipgauge-home
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: latest
+          enable-cache: true
+          cache-dependency-glob: pipeline/uv.lock
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - name: Install deterministic media prerequisite
+        run: |
+          brew untap aws/tap || true
+          brew install ffmpeg-full
+          if [ -x /opt/homebrew/opt/ffmpeg-full/bin/ffmpeg ]; then
+            echo "CLIPGAUGE_FFMPEG=/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg" >> "$GITHUB_ENV"
+          elif [ -x /usr/local/opt/ffmpeg-full/bin/ffmpeg ]; then
+            echo "CLIPGAUGE_FFMPEG=/usr/local/opt/ffmpeg-full/bin/ffmpeg" >> "$GITHUB_ENV"
+          else
+            echo "ffmpeg-full binary not found" >&2
+            exit 1
+          fi
+      - name: Resolve Python environment and run tests
+        working-directory: pipeline
+        run: |
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            # The locked ML stack has no Intel macOS wheels. Install only the
+            # compatible dependencies needed by deterministic test modules.
+            uv venv --python 3.12 .venv
+            uv pip install --python .venv/bin/python pytest httpx numpy scipy scikit-learn yt-dlp python-speech-features
+            PYTHONPATH="$GITHUB_WORKSPACE/pipeline" .venv/bin/python -c "from clipgauge_pipeline.render import ffmpeg_bin; path, captions = ffmpeg_bin.resolve(); print(path, captions); assert captions"
+            PYTHONPATH="$GITHUB_WORKSPACE/pipeline" .venv/bin/pytest -q --ignore=tests/test_events_post.py
+          else
+            uv sync --dev
+            uv run python -c "from clipgauge_pipeline.render import ffmpeg_bin; path, captions = ffmpeg_bin.resolve(); print(path, captions); assert captions"
+            uv run pytest -q
+          fi
+      - name: Run frontend build and tests
+        working-directory: app
+        run: |
+          npm ci
+          npm run build
+          npm test
+      - name: Run Rust checks
+        working-directory: app/src-tauri
+        run: |
+          mkdir -p resources
+          cargo fmt -- --check
+          cargo test --target "${{ matrix.target }}" -- --skip artifact::tests::missing_render_artifact_is_explicit
+          cargo clippy --target "${{ matrix.target }}" -- -D warnings
+      - name: Build unsigned macOS app qualification artifact
+        working-directory: app
+        run: |
+          node scripts/prepare-resources.mjs
+          npm run tauri build -- --target "${{ matrix.target }}" --bundles app
+      - name: Inspect app bundle identity and resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_bundle=$(find "app/src-tauri/target/${{ matrix.target }}/release/bundle/macos" -maxdepth 1 -name '*.app' -print -quit)
+          test -n "$app_bundle"
+          plist="$app_bundle/Contents/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "io.github.pavithranra.clipgauge"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "${GITHUB_REF_NAME#v}"
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")
+          test -x "$app_bundle/Contents/MacOS/$executable"
+          find "$app_bundle/Contents/Resources" -path '*clipgauge_pipeline*' -print -quit | grep .
+      - name: Attempt unsigned DMG qualification
+        continue-on-error: true
+        working-directory: app
+        run: npm run tauri build -- --target "${{ matrix.target }}" --bundles dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clipgauge-macos-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            app/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app
+            app/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+  release-metadata:
+    name: Generate and validate release metadata
+    needs: [validate-tag, linux-release, windows-release, macos-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: clipgauge-linux-${{ github.sha }}
+          path: release-inputs/linux
+      - uses: actions/download-artifact@v4
+        with:
+          name: clipgauge-windows-${{ github.sha }}
+          path: release-inputs/windows
+      - name: Normalize release inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          find release-inputs/linux -maxdepth 1 -type f -name 'ClipGauge_*.deb' -exec cp {} release-assets/ \;
+          find release-inputs/windows -maxdepth 1 -type f -name 'ClipGauge_*.exe' -exec cp {} release-assets/ \;
+          test "$(find release-assets -maxdepth 1 -type f \( -name '*.deb' -o -name '*.exe' \) | wc -l)" -eq 2
+      - name: Generate CycloneDX SBOM
+        run: python3 scripts/generate-release-metadata.py --tag "$GITHUB_REF_NAME" --output-dir release-assets
+      - name: Validate CycloneDX SBOM
+        run: python3 scripts/validate-sbom.py release-assets/SBOM.cyclonedx.json --tag "$GITHUB_REF_NAME"
+      - name: Generate GitHub build provenance attestation
+        id: attest
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'release-assets/*'
+      - name: Record attestation result without overclaiming
+        shell: bash
+        run: |
+          if [ "${{ steps.attest.outcome }}" = "success" ]; then
+            printf '%s\n' '# GitHub Attestation Status' '' 'Build provenance attestation: generated by GitHub Actions for the release subjects.' > release-assets/ATTESTATION_STATUS.md
+          else
+            printf '%s\n' '# GitHub Attestation Status' '' 'Build provenance attestation: unavailable in this repository/account execution; no cryptographic attestation success is claimed.' > release-assets/ATTESTATION_STATUS.md
+          fi
+      - name: Generate human-readable provenance
+        run: |
+          python3 scripts/generate-release-metadata.py \
+            --tag "$GITHUB_REF_NAME" \
+            --output-dir release-assets \
+            --workflow-run "$GITHUB_RUN_ID" \
+            --attestation-status "$(tr '\n' ' ' < release-assets/ATTESTATION_STATUS.md)"
+      - name: Generate release notes
+        working-directory: release-assets
+        run: |
+          cat > RELEASE_NOTES.md <<'EOF'
+          ## ClipGauge v0.1.1
+
+          This is a release-engineering closure release. It does not rewrite the analytical pipeline.
+
+          - Linux amd64 Debian and Windows x64 NSIS artifacts are unsigned.
+          - Native macOS ARM and Intel builds are qualification results; no signing or notarization is claimed.
+          - The CycloneDX SBOM is generated from the v0.1.1 tag and validated against its peeled source commit.
+          - `SHA256SUMS`, `RELEASE_PROVENANCE.md`, and `ATTESTATION_STATUS.md` describe the exact attached assets and distinguish checksums, metadata, GitHub attestations, and platform signing.
+          - AGPL-3.0-or-later licensing and upstream publikclip attribution remain preserved.
+          EOF
+      - name: Generate checksums from exact final release assets
+        working-directory: release-assets
+        run: |
+          set -euo pipefail
+          sha256sum ClipGauge_*.deb ClipGauge_*.exe SBOM.cyclonedx.json RELEASE_PROVENANCE.md ATTESTATION_STATUS.md > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clipgauge-release-assets-${{ github.sha }}
+          path: release-assets
+          if-no-files-found: error
+          retention-days: 14
+
+  release-publish:
+    name: Publish draft-first GitHub release
+    needs: [validate-tag, linux-release, windows-release, macos-release, release-metadata]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: clipgauge-release-assets-${{ github.sha }}
+          path: release-assets
+      - name: Verify release inputs before publication
+        working-directory: release-assets
+        run: |
+          set -euo pipefail
+          test -f "ClipGauge_${GITHUB_REF_NAME#v}_amd64.deb"
+          test -f "ClipGauge_${GITHUB_REF_NAME#v}_Windows_x64_NSIS.exe"
+          test -f SBOM.cyclonedx.json
+          test -f RELEASE_PROVENANCE.md
+          test -f ATTESTATION_STATUS.md
+          sha256sum -c SHA256SUMS
+      - name: Create complete draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists; refusing to replace it" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --title "ClipGauge $GITHUB_REF_NAME" \
+            --notes-file release-assets/RELEASE_NOTES.md \
+            release-assets/ClipGauge_*.deb \
+            release-assets/ClipGauge_*.exe \
+            release-assets/SHA256SUMS \
+            release-assets/SBOM.cyclonedx.json \
+            release-assets/RELEASE_PROVENANCE.md \
+            release-assets/ATTESTATION_STATUS.md
+      - name: Verify draft assets then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          asset_count=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')
+          test "$asset_count" -eq 6
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false

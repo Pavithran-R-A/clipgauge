@@ -52,6 +52,14 @@ jobs:
         working-directory: app
         run: npm test
 
+  version-consistency:
+    name: Version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check authoritative release versions
+        run: python3 scripts/check-version-consistency.py
+
   rust:
     name: Rust format, tests, and clippy
     runs-on: ubuntu-latest

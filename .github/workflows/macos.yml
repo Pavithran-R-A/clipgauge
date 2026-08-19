@@ -1,0 +1,150 @@
+name: macOS qualification
+
+on:
+  push:
+    branches: [main, "release/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-qualification-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-macos:
+    name: macOS ${{ matrix.arch }} qualification
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+    env:
+      CLIPGAUGE_HOME: ${{ github.workspace }}/.clipgauge-home
+      CLIPGAUGE_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: latest
+          enable-cache: true
+          cache-dependency-glob: pipeline/uv.lock
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+
+      - name: Install deterministic media prerequisite
+        run: |
+          brew untap aws/tap || true
+          brew install ffmpeg-full
+          if [ -x /opt/homebrew/opt/ffmpeg-full/bin/ffmpeg ]; then
+            echo "CLIPGAUGE_FFMPEG=/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg" >> "$GITHUB_ENV"
+          elif [ -x /usr/local/opt/ffmpeg-full/bin/ffmpeg ]; then
+            echo "CLIPGAUGE_FFMPEG=/usr/local/opt/ffmpeg-full/bin/ffmpeg" >> "$GITHUB_ENV"
+          else
+            echo "ffmpeg-full binary not found" >&2
+            exit 1
+          fi
+
+      - name: Resolve Python environment and runtime prerequisite
+        working-directory: pipeline
+        run: |
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            # The locked ML stack has no Intel macOS wheels. Install only the
+            # compatible dependencies needed by deterministic test modules.
+            uv venv --python 3.12 .venv
+            uv pip install --python .venv/bin/python pytest httpx numpy scipy scikit-learn yt-dlp python-speech-features
+            PYTHONPATH="$GITHUB_WORKSPACE/pipeline" .venv/bin/python -c "from clipgauge_pipeline.render import ffmpeg_bin; path, captions = ffmpeg_bin.resolve(); print(path, captions); assert captions, 'caption-capable ffmpeg unavailable'"
+          else
+            uv sync --dev
+            uv run python -c "from clipgauge_pipeline.render import ffmpeg_bin; path, captions = ffmpeg_bin.resolve(); print(path, captions); assert captions, 'caption-capable ffmpeg unavailable'"
+          fi
+
+      - name: Run Python deterministic tests
+        working-directory: pipeline
+        run: |
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            # events/dsp imports librosa at module import time; that optional
+            # ML/audio path is unavailable on Intel macOS and is excluded
+            # explicitly. All other deterministic tests run natively.
+            PYTHONPATH="$GITHUB_WORKSPACE/pipeline" .venv/bin/pytest -q --ignore=tests/test_events_post.py
+          else
+            uv run pytest -q
+          fi
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Run frontend build and tests
+        working-directory: app
+        run: |
+          npm run build
+          npm test
+
+      - name: Prepare resource directory for Rust checks
+        working-directory: app/src-tauri
+        run: mkdir -p resources
+
+      - name: Run Rust formatting, tests, and clippy
+        working-directory: app/src-tauri
+        run: |
+          cargo fmt -- --check
+          cargo test --target "${{ matrix.target }}" -- --skip artifact::tests::missing_render_artifact_is_explicit
+          cargo clippy --target "${{ matrix.target }}" -- -D warnings
+
+      - name: Stage trusted resources and build unsigned macOS app
+        working-directory: app
+        run: |
+          node scripts/prepare-resources.mjs
+          npm run tauri build -- --target "${{ matrix.target }}" --bundles app
+
+      - name: Inspect unsigned app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_bundle=$(find "app/src-tauri/target/${{ matrix.target }}/release/bundle/macos" -maxdepth 1 -name '*.app' -print -quit)
+          test -n "$app_bundle"
+          plist="$app_bundle/Contents/Info.plist"
+          test -f "$plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "io.github.pavithranra.clipgauge"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "0.1.1"
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")
+          test -x "$app_bundle/Contents/MacOS/$executable"
+          find "$app_bundle/Contents/Resources" -path '*clipgauge_pipeline*' -print -quit | grep .
+          printf 'validated_app=%s\n' "$app_bundle" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attempt unsigned DMG qualification
+        working-directory: app
+        continue-on-error: true
+        run: npm run tauri build -- --target "${{ matrix.target }}" --bundles dmg
+
+      - name: Upload macOS qualification artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: clipgauge-macos-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            app/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app
+            app/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          if-no-files-found: error
