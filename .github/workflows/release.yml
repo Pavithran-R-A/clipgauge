@@ -134,6 +134,10 @@ jobs:
           npm ci
           npm run build
           npm test
+      - name: Prepare Tauri resource directory for Rust checks
+        working-directory: app/src-tauri
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force resources | Out-Null
       - name: Run Rust checks where practical
         working-directory: app/src-tauri
         run: |
