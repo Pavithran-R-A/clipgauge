@@ -1,9 +1,10 @@
 # Vendored code provenance
 
-publikclip is AGPL-3.0-or-later. It adapts code, models, and fonts from the
-following projects. Vendored files carry an attribution header pointing back
-here. "Adapted" = algorithm/constants faithfully ported into our structures;
-"Vendored" = file taken near-verbatim.
+ClipGauge is AGPL-3.0-or-later and is a modified derivative of publikclip. It adapts
+code, models, and fonts from the following projects. Vendored files carry an
+attribution header pointing back here. "Adapted" = algorithm/constants faithfully
+ported into our structures; "Vendored" = file taken near-verbatim. See
+[ORIGIN.md](ORIGIN.md) for the upstream baseline and modification record.
 
 ## Code
 

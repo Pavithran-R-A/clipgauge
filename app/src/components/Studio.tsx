@@ -32,11 +32,12 @@ interface Props {
   onRun: (source: string, llm: string, captions: string) => void
   onCancel: () => void
   onOpenLoop: () => void
+  onOpenAbout: () => void
   onOpenJob: (id: string) => void
   onResume: (id: string, llm?: string) => void
 }
 
-export default function Studio({ jobs, running, cancelling, startedAt, stages, error, notice, onRun, onCancel, onOpenLoop, onOpenJob, onResume }: Props) {
+export default function Studio({ jobs, running, cancelling, startedAt, stages, error, notice, onRun, onCancel, onOpenLoop, onOpenAbout, onOpenJob, onResume }: Props) {
   const [source, setSource] = useState('')
   const [llm, setLlm] = useState('gemini')
   const [captions, setCaptions] = useState('classic')
@@ -146,6 +147,9 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
           </button>
           <button className="btn-ghost" onClick={makeSupportBundle}>
             support bundle
+          </button>
+          <button className="btn-ghost" onClick={onOpenAbout}>
+            about / licenses
           </button>
         </footer>
       </aside>
