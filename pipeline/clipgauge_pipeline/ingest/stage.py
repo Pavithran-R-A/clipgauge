@@ -106,7 +106,7 @@ class IngestStage(Stage):
             raise StageError(str(err)) from err
         if not info.has_audio:
             raise StageError(
-                "This video has no audio track. publikclip needs speech to find moments."
+                "This video has no audio track. ClipGauge needs speech to find moments."
             )
 
         if info.vfr:

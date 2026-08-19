@@ -1,6 +1,6 @@
 """Model weight registry + verified downloader.
 
-All weights land in PUBLIKCLIP_HOME/models/<name>. Managed entries require a
+All weights land in CLIPGAUGE_HOME/models/<name>. Managed entries require a
 concrete SHA-256 pin and are installed through a staged, bounded download.
 Whisper weights are fetched internally by faster-whisper and remain outside
 this explicit registry boundary.

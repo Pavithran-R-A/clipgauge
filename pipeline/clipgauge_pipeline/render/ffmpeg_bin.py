@@ -2,7 +2,7 @@
 
 Caption burning needs an ffmpeg built with libass, and (as this very
 machine demonstrates) Homebrew's slimmed `ffmpeg` formula ships without it.
-Resolution order: PUBLIKCLIP_FFMPEG env → bundled sidecar binary (packaged
+Resolution order: CLIPGAUGE_FFMPEG env → bundled sidecar binary (packaged
 app) → Homebrew ffmpeg-full keg → PATH. The first candidate that actually
 has the `subtitles` filter wins; if none do, the plain PATH binary is
 returned with `has_subtitles=False` so the caller can degrade (render
@@ -28,7 +28,7 @@ _KEG_CANDIDATES = [
 
 # Static macOS builds with libass (ffmpeg.martin-riedl.de). Used only when
 # no capable ffmpeg exists on the machine — downloaded once into
-# PUBLIKCLIP_HOME/bin so end users never touch Homebrew.
+# CLIPGAUGE_HOME/bin so end users never touch Homebrew.
 # FFmpeg source is authoritative, but this packaged binary is supplied by
 # BtbN. The tag and SHA-256 are recorded in runtime-manifest.json.
 _STATIC_WINDOWS = (
@@ -55,11 +55,11 @@ def _has_subtitles_filter(binary: str) -> bool:
 def resolve() -> tuple[str, bool]:
     """(ffmpeg_path, has_subtitles)."""
     candidates: list[str] = []
-    env = os.environ.get("PUBLIKCLIP_FFMPEG")
+    env = os.environ.get("CLIPGAUGE_FFMPEG")
     if env:
         candidates.append(env)
     candidates.append(str(config.bin_dir() / f"ffmpeg{_EXE}"))  # our downloaded static
-    bundled = os.environ.get("PUBLIKCLIP_BUNDLED_FFMPEG")  # set by the app shell
+    bundled = os.environ.get("CLIPGAUGE_BUNDLED_FFMPEG")  # set by the app shell
     if bundled:
         candidates.append(bundled)
     if platform.system() == "Darwin":
@@ -146,7 +146,7 @@ def _ensure_capable_windows(progress) -> bool:
 
 def ensure_capable(progress=None) -> bool:
     """If no libass ffmpeg exists anywhere, download a static build once
-    into PUBLIKCLIP_HOME/bin (macOS arm64/x86_64, Windows x64), then
+    into CLIPGAUGE_HOME/bin (macOS arm64/x86_64, Windows x64), then
     re-resolve. Returns whether caption burning is available afterwards."""
     if supports_captions():
         return True

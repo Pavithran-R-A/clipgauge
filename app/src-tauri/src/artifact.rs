@@ -82,7 +82,7 @@ pub fn job_results(home: &Path, job_id: &str) -> Result<Value, String> {
 }
 
 fn safe_stem(title: Option<&String>) -> String {
-    let raw = title.cloned().unwrap_or_else(|| "publikclip".into());
+    let raw = title.cloned().unwrap_or_else(|| "clipgauge".into());
     let safe = raw
         .chars()
         .map(|c| {
@@ -99,7 +99,7 @@ fn safe_stem(title: Option<&String>) -> String {
         .take(60)
         .collect::<String>();
     if safe.is_empty() {
-        "publikclip".into()
+        "clipgauge".into()
     } else {
         safe
     }

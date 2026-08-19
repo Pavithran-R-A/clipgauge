@@ -1,8 +1,8 @@
-"""publikclip CLI.
+"""ClipGauge CLI.
 
 Doubles as the desktop app's sidecar: with --jsonl every progress event and
-the final result are emitted as one JSON object per stdout line, so the
-Tauri shell just spawns `publikclip --jsonl run <source>` and streams.
+the final result are emitted as one JSON object per stdout line, so the Tauri shell spawns `clipgauge --jsonl run <source>` and streams.
+
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from .jobs import queue
 
 def _stages() -> list[queue.Stage]:
     # Grows per milestone: ingest → asr → diarize → events → candidates →
-    # score → camera → render. Stage imports are deferred so `publikclip
+    # score → camera → render. Stage imports are deferred so `clipgauge
     # jobs` doesn't pay the torch import tax.
     from .asr.stage import AsrStage
     from .camera.stage import CameraStage
@@ -330,7 +330,7 @@ def cmd_ig(args: argparse.Namespace) -> int:
     # Human/legacy commands.
     conn = instagram.load_connection()
     if args.ig_cmd in ("media", "pull") and conn is None:
-        print("Not connected. Run: publikclip ig connect --app-id ... --app-secret ...", file=sys.stderr)
+        print("Not connected. Run: clipgauge ig connect --app-id ... --app-secret ...", file=sys.stderr)
         return 2
     if conn is not None:
         conn = instagram.refresh_if_needed(conn)
@@ -345,7 +345,7 @@ def cmd_ig(args: argparse.Namespace) -> int:
     if args.ig_cmd == "pull":
         rows = calibration.tracked()
         if not rows:
-            print("No linked clips yet. Post an exported clip, then: publikclip ig link ...")
+            print("No linked clips yet. Post an exported clip, then: clipgauge ig link ...")
             return 0
         for row in rows:
             if not row["ig_media_id"]:
@@ -371,7 +371,7 @@ def cmd_ig(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="publikclip")
+    parser = argparse.ArgumentParser(prog="clipgauge")
     parser.add_argument("--jsonl", action="store_true", help="machine-readable progress on stdout")
     sub = parser.add_subparsers(dest="cmd", required=True)
 

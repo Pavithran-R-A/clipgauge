@@ -112,8 +112,8 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
       )}
       <aside className="rail">
         <header className="rail-brand">
-          <span className="rail-logo">publikclip</span>
-          <span className="rail-sub">the clipper that shows its work</span>
+          <span className="rail-logo">ClipGauge</span>
+          <span className="rail-sub">local AI video clipper</span>
         </header>
         <div className="rail-jobs">
           <p className="rail-label">SESSIONS</p>

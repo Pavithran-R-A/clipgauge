@@ -6,9 +6,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from publikclip_pipeline import runtime
-from publikclip_pipeline.models import registry
-from publikclip_pipeline.models import specs  # noqa: F401 - registers concrete specs
+from clipgauge_pipeline import runtime
+from clipgauge_pipeline.models import registry
+from clipgauge_pipeline.models import specs  # noqa: F401 - registers concrete specs
 
 
 class FakeResponse:

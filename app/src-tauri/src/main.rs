@@ -1,5 +1,5 @@
-// publikclip desktop shell. The pipeline is a Python sidecar speaking JSONL
-// on stdout (`publikclip --jsonl ...`); this shell spawns it, forwards every
+// ClipGauge desktop shell. The pipeline is a Python sidecar speaking JSONL
+// on stdout (`clipgauge --jsonl ...`); this shell spawns it, forwards every
 // event to the frontend, and exposes small filesystem/settings commands.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -34,9 +34,72 @@ impl AppState {
 
 fn home_dir() -> PathBuf {
     // The desktop owns one stable root. Direct Python CLI tests may still use
-    // PUBLIKCLIP_HOME, but packaged Rust commands never accept an arbitrary
+    // CLIPGAUGE_HOME, but packaged Rust commands never accept an arbitrary
     // user-provided root that could escape the asset scope.
-    dirs_home().join(".publikclip")
+    dirs_home().join(".clipgauge")
+}
+
+fn copy_legacy_tree(source: &Path, destination: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(source).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "legacy migration refuses symlink: {}",
+            source.display()
+        ));
+    }
+    if metadata.is_dir() {
+        fs::create_dir_all(destination).map_err(|error| error.to_string())?;
+        for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            copy_legacy_tree(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+    if !metadata.is_file() {
+        return Err(format!(
+            "legacy migration refuses non-file: {}",
+            source.display()
+        ));
+    }
+    if destination.exists() {
+        let existing = fs::read(destination).map_err(|error| error.to_string())?;
+        let incoming = fs::read(source).map_err(|error| error.to_string())?;
+        if existing != incoming {
+            return Err(format!(
+                "legacy migration collision at {}",
+                destination.display()
+            ));
+        }
+        return Ok(());
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::copy(source, destination).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn migrate_legacy_data_from(legacy: &Path, destination: &Path) -> Result<(), String> {
+    let marker = destination.join("migrations/legacy-publikclip-v1.done");
+    if marker.exists() {
+        return Ok(());
+    }
+    if legacy == destination || !legacy.exists() {
+        fs::create_dir_all(marker.parent().unwrap()).map_err(|error| error.to_string())?;
+        fs::write(marker, b"no legacy root found").map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    copy_legacy_tree(legacy, destination)?;
+    fs::create_dir_all(marker.parent().unwrap()).map_err(|error| error.to_string())?;
+    fs::write(marker, b"legacy root copied; source preserved").map_err(|error| error.to_string())
+}
+
+fn migrate_legacy_data() -> Result<(), String> {
+    let destination = home_dir();
+    let legacy = std::env::var_os("PUBLIKCLIP_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dirs_home().join(".publikclip"));
+    migrate_legacy_data_from(&legacy, &destination)
 }
 
 fn dirs_home() -> PathBuf {
@@ -80,14 +143,14 @@ fn pipeline_invocation() -> (String, Vec<String>) {
                 "--directory".to_string(),
                 pipeline_dir.to_string_lossy().to_string(),
                 "run".to_string(),
-                "publikclip".to_string(),
+                "clipgauge".to_string(),
             ],
         )
     } else {
         // Packaged: bundled uv + pipeline source under the platform's
         // resource layout — macOS keeps them in the .app's Resources dir,
         // Windows (NSIS) lands them in resources\ next to the exe. The venv
-        // bootstraps into PUBLIKCLIP_HOME on first run (uv handles Python
+        // bootstraps into CLIPGAUGE_HOME on first run (uv handles Python
         // 3.12 download + deps; the onboarding screen owns expectations).
         let exe_dir = std::env::current_exe()
             .ok()
@@ -109,7 +172,7 @@ fn pipeline_invocation() -> (String, Vec<String>) {
                 "--directory".to_string(),
                 resources.join("pipeline").to_string_lossy().to_string(),
                 "run".to_string(),
-                "publikclip".to_string(),
+                "clipgauge".to_string(),
             ],
         )
     }
@@ -270,7 +333,7 @@ fn preflight(llm: String) -> Result<Value, String> {
     let mut command = quiet_command(&program);
     secrets::apply_operation_env(&mut command);
     let output = command
-        .env("PUBLIKCLIP_HOME", home_dir())
+        .env("CLIPGAUGE_HOME", home_dir())
         .args(&args)
         .output()
         .map_err(|error| diagnostics::redact(&error.to_string()))?;
@@ -448,7 +511,7 @@ fn stream_pipeline(
     secrets::apply_operation_env(&mut command);
     process_manager::configure_process_group(&mut command);
     let child = command
-        .env("PUBLIKCLIP_HOME", home_dir())
+        .env("CLIPGAUGE_HOME", home_dir())
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -748,7 +811,7 @@ async fn edit_tool(args: Vec<String>) -> Result<Value, String> {
     let mut command = quiet_command(&program);
     secrets::apply_operation_env(&mut command);
     let out = command
-        .env("PUBLIKCLIP_HOME", home_dir())
+        .env("CLIPGAUGE_HOME", home_dir())
         .args(&full)
         .output()
         .map_err(|e| e.to_string())?;
@@ -890,8 +953,8 @@ async fn ig_connect(app_id: String, app_secret: String) -> Result<String, String
     let mut command = quiet_command(&program);
     secrets::apply_operation_env(&mut command);
     let mut child = command
-        .env("PUBLIKCLIP_HOME", home_dir())
-        .env("PUBLIKCLIP_CONNECTION_OUTPUT", &connection_output)
+        .env("CLIPGAUGE_HOME", home_dir())
+        .env("CLIPGAUGE_CONNECTION_OUTPUT", &connection_output)
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -920,7 +983,7 @@ async fn ig_connect(app_id: String, app_secret: String) -> Result<String, String
     }
 }
 
-/// One-shot `publikclip ig <args...>` call returning the CLI's JSON line
+/// One-shot `clipgauge ig <args...>` call returning the CLI's JSON line
 /// (sync / overview / link / unlink / reject — same contract as edit_tool).
 #[tauri::command]
 async fn ig_tool(args: Vec<String>) -> Result<Value, String> {
@@ -931,7 +994,7 @@ async fn ig_tool(args: Vec<String>) -> Result<Value, String> {
     let mut command = quiet_command(&program);
     secrets::apply_operation_env(&mut command);
     let out = command
-        .env("PUBLIKCLIP_HOME", home_dir())
+        .env("CLIPGAUGE_HOME", home_dir())
         .args(&full)
         .output()
         .map_err(|e| e.to_string())?;
@@ -993,6 +1056,7 @@ fn main() {
         ])
         .setup(|app| {
             let _ = app.get_webview_window("main");
+            migrate_legacy_data().map_err(std::io::Error::other)?;
             secrets::migrate_legacy(&home_dir()).map_err(std::io::Error::other)?;
             secrets::migrate_instagram_file(&home_dir()).map_err(std::io::Error::other)?;
             if let Ok(mut processes) = app.state::<AppState>().processes.lock() {
@@ -1001,7 +1065,7 @@ fn main() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running publikclip");
+        .expect("error while running ClipGauge");
 }
 
 #[cfg(test)]
@@ -1009,7 +1073,9 @@ mod tests {
     use std::fs;
     use std::io::Read;
 
-    use super::{generate_support_bundle_at, ig_connect_args, ig_failure_message};
+    use super::{
+        generate_support_bundle_at, ig_connect_args, ig_failure_message, migrate_legacy_data_from,
+    };
 
     #[test]
     fn meta_secret_is_not_part_of_child_arguments() {
@@ -1050,6 +1116,44 @@ mod tests {
         assert!(!contents.contains("AIzaKnownSecret"));
         assert!(!contents.contains("oauth-known"));
         assert!(!contents.contains("private words"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_migration_is_retryable_and_preserves_source_on_collision() {
+        let root = std::env::temp_dir().join(format!(
+            "clipgauge-migration-{}",
+            super::diagnostics::diagnostic_id()
+        ));
+        let legacy = root.join("legacy");
+        let destination = root.join("new");
+        fs::create_dir_all(legacy.join("jobs/job-1")).unwrap();
+        fs::write(legacy.join("jobs/job-1/checkpoint.json"), b"old-data").unwrap();
+        migrate_legacy_data_from(&legacy, &destination).unwrap();
+        assert_eq!(
+            fs::read(destination.join("jobs/job-1/checkpoint.json")).unwrap(),
+            b"old-data"
+        );
+        assert!(legacy.join("jobs/job-1/checkpoint.json").exists());
+        assert!(destination
+            .join("migrations/legacy-publikclip-v1.done")
+            .exists());
+
+        let collision_root = root.join("collision");
+        let collision_legacy = collision_root.join("legacy");
+        let collision_destination = collision_root.join("new");
+        fs::create_dir_all(&collision_legacy).unwrap();
+        fs::create_dir_all(&collision_destination).unwrap();
+        fs::write(collision_legacy.join("settings.json"), b"source").unwrap();
+        fs::write(collision_destination.join("settings.json"), b"different").unwrap();
+        assert!(migrate_legacy_data_from(&collision_legacy, &collision_destination).is_err());
+        assert!(!collision_destination
+            .join("migrations/legacy-publikclip-v1.done")
+            .exists());
+        assert_eq!(
+            fs::read(collision_legacy.join("settings.json")).unwrap(),
+            b"source"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

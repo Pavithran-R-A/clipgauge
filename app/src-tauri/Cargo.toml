@@ -1,7 +1,7 @@
 [package]
-name = "publikclip-app"
+name = "clipgauge-app"
 version = "0.1.0"
-description = "publikclip — long video in, scored vertical clips out"
+description = "ClipGauge — local AI video clipper"
 license = "AGPL-3.0-or-later"
 edition = "2021"
 

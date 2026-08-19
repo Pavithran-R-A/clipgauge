@@ -1,7 +1,7 @@
 [project]
-name = "publikclip-pipeline"
+name = "clipgauge-pipeline"
 version = "0.1.0"
-description = "publikclip processing pipeline: long video in, scored vertical clips out"
+description = "ClipGauge — local AI video clipper"
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-publikclip = "publikclip_pipeline.cli:main"
+clipgauge = "clipgauge_pipeline.cli:main"
 
 [dependency-groups]
 dev = [
@@ -32,7 +32,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["publikclip_pipeline"]
+packages = ["clipgauge_pipeline"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

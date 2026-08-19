@@ -90,7 +90,7 @@ def _overlay_dir(job_dir: Path) -> Path:
 
 
 def pexels_key() -> str | None:
-    key = os.environ.get("PUBLIKCLIP_PEXELS_API_KEY")
+    key = os.environ.get("CLIPGAUGE_PEXELS_API_KEY")
     return key.strip() if key and key.strip() else None
 
 

@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "publikclip",
+  "productName": "ClipGauge",
   "version": "0.1.0",
-  "identifier": "com.publikhq.publikclip",
+  "identifier": "io.github.pavithranra.clipgauge",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1430",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "publikclip",
+        "title": "ClipGauge — Local AI Video Clipper",
         "width": 1200,
         "height": 800,
         "minWidth": 900,
@@ -25,10 +25,10 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$HOME/.publikclip/jobs/*/clips/**",
-          "$HOME/.publikclip/jobs/*/media*.mp4",
-          "$HOME/.publikclip/jobs/*/overlays/**",
-          "$HOME/.publikclip/ig_thumbs/**"
+          "$HOME/.clipgauge/jobs/*/clips/**",
+          "$HOME/.clipgauge/jobs/*/media*.mp4",
+          "$HOME/.clipgauge/jobs/*/overlays/**",
+          "$HOME/.clipgauge/ig_thumbs/**"
         ]
       }
     }
@@ -39,12 +39,11 @@
       "dmg"
     ],
     "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico",
-      "icons/icon.png"
+      "icons/clipgauge-32.png",
+      "icons/clipgauge-64.png",
+      "icons/clipgauge-128.png",
+      "icons/clipgauge-256.png",
+      "icons/clipgauge-512.png"
     ],
     "resources": [
       "resources"

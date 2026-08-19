@@ -2,7 +2,7 @@
 
 Ported from JeremySNR/clip-forge src/main/pipeline/ytdlp.ts (MIT — see
 VENDORED-LICENSES.md): the standalone binary (not the pip package) is
-downloaded to PUBLIKCLIP_HOME/bin on first use so the built-in self-updater
+downloaded to CLIPGAUGE_HOME/bin on first use so the built-in self-updater
 keeps working — sites change their players constantly and a stale yt-dlp is
 the most common cause of extractor failures. On any yt-dlp failure we run
 `-U` once per process and retry once (withSelfUpdateRetry pattern).

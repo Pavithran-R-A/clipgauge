@@ -32,7 +32,7 @@ export default function Onboarding({ onDone }: Props) {
       <div className="grain" />
       {step === 0 && (
         <section className="ob-step" key="s0">
-          <p className="ob-kicker">publikclip</p>
+          <p className="ob-kicker">ClipGauge</p>
           <h1 className="ob-title">
             THE CLIPPER
             <br />
@@ -108,7 +108,7 @@ export default function Onboarding({ onDone }: Props) {
           <h2 className="ob-h2">First run downloads the models</h2>
           <p className="ob-body">
             About <span className="mono">2.5 GB</span> of open speech and audio models,
-            fetched once into <span className="mono">~/.publikclip</span>. An hour-long
+            fetched once into <span className="mono">~/.clipgauge</span>. An hour-long
             podcast then takes a while on-device — the progress bar never lies to you,
             and every stage checkpoints, so you can quit and resume anytime.
           </p>

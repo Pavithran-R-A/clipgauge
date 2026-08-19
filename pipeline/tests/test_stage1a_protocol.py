@@ -5,14 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from publikclip_pipeline import cli
-from publikclip_pipeline.ingest.ytdlp import YtDlpError
-from publikclip_pipeline.jobs import queue
+from clipgauge_pipeline import cli
+from clipgauge_pipeline.ingest.ytdlp import YtDlpError
+from clipgauge_pipeline.jobs import queue
 
 
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path, monkeypatch):
-    monkeypatch.setenv("PUBLIKCLIP_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CLIPGAUGE_HOME", str(tmp_path / "home"))
 
 
 def _events(capsys):
@@ -139,7 +139,7 @@ def test_success_has_exactly_one_terminal_event(monkeypatch, capsys):
 
 
 def test_real_ingest_translates_fake_ytdlp_failure(monkeypatch, tmp_path, capsys):
-    from publikclip_pipeline.ingest import stage as ingest_stage
+    from clipgauge_pipeline.ingest import stage as ingest_stage
 
     fake = tmp_path / "yt-dlp-fake"
     fake.write_text("#!/bin/sh\nprintf 'ERROR: video unavailable after extractor failure\\n' >&2\nexit 1\n")
@@ -156,7 +156,7 @@ def test_real_ingest_translates_fake_ytdlp_failure(monkeypatch, tmp_path, capsys
 
 
 def test_disposable_fake_ytdlp_failure_is_cleaned(monkeypatch, tmp_path):
-    from publikclip_pipeline.ingest import ytdlp
+    from clipgauge_pipeline.ingest import ytdlp
 
     fake = tmp_path / "yt-dlp-fake"
     fake.write_text("#!/bin/sh\nprintf 'ERROR: video unavailable\n' >&2\nexit 1\n")

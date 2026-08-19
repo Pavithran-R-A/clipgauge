@@ -1,14 +1,14 @@
 """Paths and settings.
 
-Everything lives under PUBLIKCLIP_HOME (default ~/.publikclip):
+Everything lives under CLIPGAUGE_HOME (default ~/.clipgauge):
 
-    ~/.publikclip/
+    ~/.clipgauge/
       db.sqlite3          job + stage bookkeeping
       bin/                managed binaries (yt-dlp)
       models/             downloaded model weights
       jobs/<job_id>/      per-job artifacts (media, audio, stage checkpoints)
 
-The desktop app points PUBLIKCLIP_HOME at its own app-data dir; the CLI uses
+The desktop app points CLIPGAUGE_HOME at its own app-data dir; the CLI uses
 the default. Artifacts on disk are the source of truth — the DB only records
 what should exist so a stage can decide whether to skip itself on resume.
 """
@@ -20,8 +20,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-def home_dir() -> Path:
+def legacy_home_dir() -> Path:
+    """Read-only source root for the one-time upstream data migration."""
     return Path(os.environ.get("PUBLIKCLIP_HOME", str(Path.home() / ".publikclip")))
+
+
+def home_dir() -> Path:
+    return Path(os.environ.get("CLIPGAUGE_HOME", str(Path.home() / ".clipgauge")))
 
 
 def jobs_dir() -> Path:

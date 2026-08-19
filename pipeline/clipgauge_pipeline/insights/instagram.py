@@ -62,7 +62,7 @@ class IgError(Exception):
 
 
 def load_connection() -> dict | None:
-    raw = os.environ.get("PUBLIKCLIP_INSTAGRAM_CONNECTION_JSON")
+    raw = os.environ.get("CLIPGAUGE_INSTAGRAM_CONNECTION_JSON")
     if not raw:
         return None
     try:
@@ -73,7 +73,7 @@ def load_connection() -> dict | None:
 
 
 def save_connection(data: dict) -> None:
-    bridge = os.environ.get("PUBLIKCLIP_CONNECTION_OUTPUT")
+    bridge = os.environ.get("CLIPGAUGE_CONNECTION_OUTPUT")
     if not bridge:
         raise IgError("Instagram credential storage is available only through the desktop vault bridge.")
     path = __import__("pathlib").Path(bridge)
@@ -118,7 +118,7 @@ def _wait_for_callback(
             body = (
                 "<html><body style='font-family:sans-serif;background:#0e0f12;color:#ece9e2;"
                 "display:grid;place-items:center;height:100vh'><div><h2>"
-                + ("publikclip is connected." if result.code else "Connection failed.")
+                + ("ClipGauge is connected." if result.code else "Connection failed.")
                 + "</h2><p>You can close this tab.</p></div></body></html>"
             )
             self.wfile.write(body.encode())

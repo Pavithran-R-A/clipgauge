@@ -35,11 +35,11 @@ describe('desktop security configuration', () => {
 
   it('scopes assets to media directories rather than whole application state', () => {
     const scope = config.app.security.assetProtocol.scope
-    expect(scope).toContain('$HOME/.publikclip/jobs/*/clips/**')
-    expect(scope).toContain('$HOME/.publikclip/jobs/*/media*.mp4')
-    expect(scope).toContain('$HOME/.publikclip/jobs/*/overlays/**')
-    expect(scope).toContain('$HOME/.publikclip/ig_thumbs/**')
-    expect(scope).not.toContain('$HOME/.publikclip/**')
+    expect(scope).toContain('$HOME/.clipgauge/jobs/*/clips/**')
+    expect(scope).toContain('$HOME/.clipgauge/jobs/*/media*.mp4')
+    expect(scope).toContain('$HOME/.clipgauge/jobs/*/overlays/**')
+    expect(scope).toContain('$HOME/.clipgauge/ig_thumbs/**')
+    expect(scope).not.toContain('$HOME/.clipgauge/**')
     expect(scope.join('\n')).not.toMatch(/secrets|instagram\.json|diagnostics|models|bin/)
   })
 

@@ -62,13 +62,13 @@ pub fn get(name: SecretName) -> Result<Option<String>, String> {
 
 pub fn apply_operation_env(command: &mut std::process::Command) {
     if let Ok(Some(value)) = get(SecretName::GeminiApiKey) {
-        command.env("PUBLIKCLIP_GEMINI_API_KEY", value);
+        command.env("CLIPGAUGE_GEMINI_API_KEY", value);
     }
     if let Ok(Some(value)) = get(SecretName::PexelsApiKey) {
-        command.env("PUBLIKCLIP_PEXELS_API_KEY", value);
+        command.env("CLIPGAUGE_PEXELS_API_KEY", value);
     }
     if let Ok(Some(value)) = get(SecretName::InstagramConnection) {
-        command.env("PUBLIKCLIP_INSTAGRAM_CONNECTION_JSON", value);
+        command.env("CLIPGAUGE_INSTAGRAM_CONNECTION_JSON", value);
     }
 }
 

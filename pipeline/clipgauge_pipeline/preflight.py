@@ -128,7 +128,7 @@ def run(selected_llm: str = "gemini") -> dict:
         _check(checks, "runtime-manifest", "blocked", str(error), "Repair or reinstall the signed application bundle.")
     _ffmpeg(checks)
     if selected_llm == "gemini":
-        _check(checks, "gemini", "ready" if os.environ.get("PUBLIKCLIP_GEMINI_API_KEY") else "blocked", "Gemini credential is available for this operation." if os.environ.get("PUBLIKCLIP_GEMINI_API_KEY") else "No Gemini credential is available to this operation.", "Save a Gemini key in Settings or choose Ollama mode.")
+        _check(checks, "gemini", "ready" if os.environ.get("CLIPGAUGE_GEMINI_API_KEY") else "blocked", "Gemini credential is available for this operation." if os.environ.get("CLIPGAUGE_GEMINI_API_KEY") else "No Gemini credential is available to this operation.", "Save a Gemini key in Settings or choose Ollama mode.")
     _ollama(checks, selected_llm)
     states = {item["state"] for item in checks}
     overall = "blocked" if "blocked" in states else "warning" if "warning" in states else "ready"

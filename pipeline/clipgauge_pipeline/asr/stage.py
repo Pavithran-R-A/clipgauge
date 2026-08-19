@@ -29,7 +29,7 @@ BATCH_SIZE = 8
 
 
 def _point_caches_at_home() -> None:
-    """All model caches live under PUBLIKCLIP_HOME so 'delete the app data
+    """All model caches live under CLIPGAUGE_HOME so 'delete the app data
     dir' is a complete uninstall."""
     hf_home = config.models_dir() / "hf"
     hf_home.mkdir(parents=True, exist_ok=True)
@@ -109,7 +109,7 @@ class AsrStage(Stage):
         word_count = sum(len(s["words"]) for s in segments)
         if word_count == 0:
             raise StageError(
-                "No speech was found in this video. publikclip needs dialogue to find moments."
+                "No speech was found in this video. ClipGauge needs dialogue to find moments."
             )
 
         total = transcribe_secs + align_secs

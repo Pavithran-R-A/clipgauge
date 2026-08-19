@@ -5,7 +5,7 @@ caching keyed on (backend, model, prompt, schema) so re-runs never re-spend
 — the M2 gate requires cache hits on identical inputs.
 
 Key resolution is operation-scoped: the Rust bridge injects
-PUBLIKCLIP_GEMINI_API_KEY for the one child operation. Direct CLI users may
+CLIPGAUGE_GEMINI_API_KEY for the one child operation. Direct CLI users may
 set the same environment variable. No plaintext secret file is read here.
 """
 
@@ -35,7 +35,7 @@ class LlmError(Exception):
 
 
 def gemini_api_key() -> str | None:
-    key = os.environ.get("PUBLIKCLIP_GEMINI_API_KEY")
+    key = os.environ.get("CLIPGAUGE_GEMINI_API_KEY")
     return key.strip() if key and key.strip() else None
 
 
@@ -74,7 +74,7 @@ class GeminiClient:
         if not key:
             raise LlmError(
                 "No Gemini API key found. Add one in Settings (or set "
-                "PUBLIKCLIP_GEMINI_API_KEY), or switch to Ollama mode."
+                "CLIPGAUGE_GEMINI_API_KEY), or switch to Ollama mode."
             )
         self._key = key
 

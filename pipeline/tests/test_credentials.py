@@ -8,9 +8,9 @@ import urllib.parse
 import httpx
 import pytest
 
-from publikclip_pipeline.edits import visuals
-from publikclip_pipeline.insights import instagram
-from publikclip_pipeline.scoring import llm
+from clipgauge_pipeline.edits import visuals
+from clipgauge_pipeline.insights import instagram
+from clipgauge_pipeline.scoring import llm
 
 
 class FakeResponse:
@@ -30,7 +30,7 @@ class FakeResponse:
 
 def test_gemini_uses_header_and_never_query_string(monkeypatch, tmp_path):
     secret = "AIzaTestSecretValue123456"
-    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", secret)
+    monkeypatch.setenv("CLIPGAUGE_GEMINI_API_KEY", secret)
     monkeypatch.setattr(llm, "_cache_dir", lambda: tmp_path)
     seen = {}
 
@@ -48,7 +48,7 @@ def test_gemini_uses_header_and_never_query_string(monkeypatch, tmp_path):
 
 def test_gemini_error_details_are_redacted(monkeypatch, tmp_path):
     secret = "AIzaSecretInProviderBody123456"
-    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", secret)
+    monkeypatch.setenv("CLIPGAUGE_GEMINI_API_KEY", secret)
     monkeypatch.setattr(llm, "_cache_dir", lambda: tmp_path)
     monkeypatch.setattr(time, "sleep", lambda _seconds: None)
     response = FakeResponse({"error": {"message": f"quota detail includes {secret}"}}, status_code=429)
@@ -59,18 +59,18 @@ def test_gemini_error_details_are_redacted(monkeypatch, tmp_path):
 
 
 def test_gemini_key_does_not_fall_back_to_plaintext_file(monkeypatch, tmp_path):
-    monkeypatch.delenv("PUBLIKCLIP_GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("CLIPGAUGE_GEMINI_API_KEY", raising=False)
     monkeypatch.setattr(llm.config, "home_dir", lambda: tmp_path)
     (tmp_path / "secrets.json").write_text(json.dumps({"gemini_api_key": "file-secret"}))
     assert llm.gemini_api_key() is None
 
 
 def test_visual_pexels_key_is_environment_scoped(monkeypatch, tmp_path):
-    monkeypatch.delenv("PUBLIKCLIP_PEXELS_API_KEY", raising=False)
+    monkeypatch.delenv("CLIPGAUGE_PEXELS_API_KEY", raising=False)
     monkeypatch.setattr(visuals.config, "home_dir", lambda: tmp_path)
     (tmp_path / "secrets.json").write_text(json.dumps({"pexels_api_key": "file-secret"}))
     assert visuals.pexels_key() is None
-    monkeypatch.setenv("PUBLIKCLIP_PEXELS_API_KEY", "env-secret")
+    monkeypatch.setenv("CLIPGAUGE_PEXELS_API_KEY", "env-secret")
     assert visuals.pexels_key() == "env-secret"
 
 
@@ -99,6 +99,6 @@ def test_instagram_callback_binds_ephemeral_loopback_port_and_accepts_one_callba
 
 
 def test_instagram_save_connection_requires_rust_bridge(monkeypatch):
-    monkeypatch.delenv("PUBLIKCLIP_CONNECTION_OUTPUT", raising=False)
+    monkeypatch.delenv("CLIPGAUGE_CONNECTION_OUTPUT", raising=False)
     with pytest.raises(instagram.IgError, match="desktop vault bridge"):
         instagram.save_connection({"access_token": "secret"})

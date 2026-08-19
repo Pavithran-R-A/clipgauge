@@ -1,6 +1,6 @@
 import json
 
-from publikclip_pipeline import preflight
+from clipgauge_pipeline import preflight
 
 
 def test_preflight_aggregates_blocked_state(monkeypatch, tmp_path):
@@ -13,7 +13,7 @@ def test_preflight_aggregates_blocked_state(monkeypatch, tmp_path):
     monkeypatch.setattr(preflight, "_models", lambda checks, manifest: None)
     monkeypatch.setattr(preflight, "_ffmpeg", lambda checks: checks.append({"name": "ffmpeg", "state": "ready", "message": "ok"}))
     monkeypatch.setattr(preflight, "_ollama", lambda checks, selected: None)
-    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("CLIPGAUGE_GEMINI_API_KEY", "test-key")
     result = preflight.run("gemini")
     assert result["state"] == "blocked"
 
@@ -28,7 +28,7 @@ def test_preflight_warning_is_not_blocked(monkeypatch, tmp_path):
     monkeypatch.setattr(preflight, "_models", lambda checks, manifest: None)
     monkeypatch.setattr(preflight, "_ffmpeg", lambda checks: checks.append({"name": "ffmpeg", "state": "ready", "message": "ok"}))
     monkeypatch.setattr(preflight, "_ollama", lambda checks, selected: None)
-    monkeypatch.setenv("PUBLIKCLIP_GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("CLIPGAUGE_GEMINI_API_KEY", "test-key")
     result = preflight.run("gemini")
     assert result["state"] == "warning"
 
