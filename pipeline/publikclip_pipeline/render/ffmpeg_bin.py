@@ -19,7 +19,7 @@ import zipfile
 from functools import lru_cache
 from pathlib import Path
 
-from .. import config
+from .. import config, runtime
 
 _KEG_CANDIDATES = [
     "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
@@ -29,15 +29,13 @@ _KEG_CANDIDATES = [
 # Static macOS builds with libass (ffmpeg.martin-riedl.de). Used only when
 # no capable ffmpeg exists on the machine — downloaded once into
 # PUBLIKCLIP_HOME/bin so end users never touch Homebrew.
-_STATIC_BASE = "https://ffmpeg.martin-riedl.de/redirect/latest/macos/{arch}/release/{tool}.zip"
-
-# Static Windows build with libass: BtbN's GPL build ships ffmpeg.exe and
-# ffprobe.exe (with the subtitles filter) in one zip under a stable
-# latest-release URL. ~80 MB once, into PUBLIKCLIP_HOME/bin.
+# FFmpeg source is authoritative, but this packaged binary is supplied by
+# BtbN. The tag and SHA-256 are recorded in runtime-manifest.json.
 _STATIC_WINDOWS = (
-    "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/"
-    "ffmpeg-master-latest-win64-gpl.zip"
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/"
+    "autobuild-2026-08-18-15-03/ffmpeg-N-126207-g21bbd98e7b-win64-gpl.zip"
 )
+_STATIC_WINDOWS_SHA256 = "0dfc1c04a5b8c15e56e3e2245d3b0a1fb5f22242591e1b2c4a1cb6fa0cd0230b"
 
 _EXE = ".exe" if platform.system() == "Windows" else ""
 
@@ -96,44 +94,25 @@ def supports_captions() -> bool:
     return resolve()[1]
 
 
-def _download(url: str, dest: Path) -> bool:
-    import httpx
-
+def _download(url: str, dest: Path, expected_sha256: str, progress=None) -> bool:
     try:
-        with httpx.stream("GET", url, follow_redirects=True, timeout=300.0) as res:
-            if res.status_code != 200:
-                return False
-            with open(dest, "wb") as fh:
-                for chunk in res.iter_bytes():
-                    fh.write(chunk)
+        runtime.download_verified(
+            url,
+            dest,
+            expected_sha256=expected_sha256,
+            max_bytes=512 * 1024 * 1024,
+            timeout=300.0,
+            progress=progress,
+        )
         return True
-    except (httpx.HTTPError, OSError):
+    except runtime.RuntimeIntegrityError:
         return False
 
 
 def _ensure_capable_macos(progress) -> bool:
-    arch = "arm64" if platform.machine() == "arm64" else "amd64"
-    for tool in ("ffmpeg", "ffprobe"):
-        dest = config.bin_dir() / tool
-        if dest.exists() and (_has_subtitles_filter(str(dest)) if tool == "ffmpeg" else True):
-            continue
-        if progress:
-            progress(-1, f"Downloading {tool} (one-time, caption support)…")
-        zpath = dest.with_suffix(".zip")
-        try:
-            if not _download(_STATIC_BASE.format(arch=arch, tool=tool), zpath):
-                return False
-            with zipfile.ZipFile(zpath) as zf:
-                for name in zf.namelist():
-                    if name.rstrip("/").endswith(tool):
-                        dest.write_bytes(zf.read(name))
-                        break
-            dest.chmod(0o755)
-        except (OSError, zipfile.BadZipFile):
-            return False
-        finally:
-            zpath.unlink(missing_ok=True)
-    return True
+    if progress:
+        progress(-1, "No pinned macOS FFmpeg archive is configured; using a verified system binary if available.")
+    return False
 
 
 def _ensure_capable_windows(progress) -> bool:
@@ -150,13 +129,14 @@ def _ensure_capable_windows(progress) -> bool:
         progress(-1, "Downloading ffmpeg (one-time, caption support)…")
     zpath = config.bin_dir() / "ffmpeg-static.zip"
     try:
-        if not _download(_STATIC_WINDOWS, zpath):
+        if not _download(_STATIC_WINDOWS, zpath, _STATIC_WINDOWS_SHA256, progress=lambda f, m: progress(f, m) if progress else None):
             return False
-        with zipfile.ZipFile(zpath) as zf:
-            for name in zf.namelist():
-                base = name.rsplit("/", 1)[-1]
-                if base in wanted and "/bin/" in name:
-                    wanted[base].write_bytes(zf.read(name))
+        runtime.extract_zip_selected_verified(
+            zpath,
+            config.bin_dir(),
+            expected_basenames=set(wanted),
+            member_modes={name: 0o755 for name in wanted},
+        )
     except (OSError, zipfile.BadZipFile):
         return False
     finally:

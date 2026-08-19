@@ -1,0 +1,123 @@
+{
+  "manifest_version": 1,
+  "updated_at": "2026-08-19",
+  "trust_assumptions": [
+    "Pinned URLs are immutable release assets, versioned records, or content-addressed upstream revisions.",
+    "Hashes were retrieved from authoritative release metadata or calculated from complete staged downloads.",
+    "A verified last-known-good installation is never removed before a replacement passes validation.",
+    "Model licenses remain subject to the upstream record and are not inferred by ClipGauge."
+  ],
+  "runtimes": {
+    "yt-dlp": {
+      "version": "2026.07.04",
+      "provenance": "https://github.com/yt-dlp/yt-dlp/releases/tag/2026.07.04",
+      "license": "ISC/MIT and bundled third-party licenses; see upstream THIRD_PARTY_LICENSES.txt",
+      "assets": {
+        "yt-dlp_linux": {
+          "platform": "linux",
+          "architecture": "x86_64",
+          "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.07.04/yt-dlp_linux",
+          "sha256": "6bbb3d314cde4febe36e5fa1d55462e29c974f63444e707871834f6d8cc210ae",
+          "size": 39924536
+        },
+        "yt-dlp_linux_aarch64": {
+          "platform": "linux",
+          "architecture": "aarch64",
+          "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.07.04/yt-dlp_linux_aarch64",
+          "sha256": "b6ce97646773070d7a7ffd6bbbdcaecb47c48483909c54c915bf08a7a9b5e0b1"
+        },
+        "yt-dlp.exe": {
+          "platform": "windows",
+          "architecture": "x86_64",
+          "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.07.04/yt-dlp.exe",
+          "sha256": "52fe3c26dcf71fbdc85b528589020bb0b8e383155cfa81b64dd447bbe35e24b8"
+        },
+        "yt-dlp_macos": {
+          "platform": "macos",
+          "architecture": "x86_64/arm64",
+          "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.07.04/yt-dlp_macos",
+          "sha256": "498bd0dae17855c599d371d68ec5bafc439a9d8640e838be25c765a9792f261b"
+        }
+      }
+    },
+    "ffmpeg": {
+      "version": "autobuild-2026-08-18-15-03 / N-126207-g21bbd98e7b",
+      "provenance": "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-08-18-15-03",
+      "license": "GPL build; see BtbN archive and FFmpeg licensing notices",
+      "assets": {
+        "win64-gpl": {
+          "platform": "windows",
+          "architecture": "x86_64",
+          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-18-15-03/ffmpeg-N-126207-g21bbd98e7b-win64-gpl.zip",
+          "sha256": "0dfc1c04a5b8c15e56e3e2245d3b0a1fb5f22242591e1b2c4a1cb6fa0cd0230b"
+        }
+      },
+      "macos": {
+        "status": "not-managed",
+        "reason": "No pinned compiled archive with authoritative checksum was selected; use a verified system binary or captions degrade safely."
+      }
+    }
+  },
+  "models": {
+    "laughter-jrgillick/best.pth.tar": {
+      "version": "5d5e0327916959d832d95ffbef5f484efc93d799",
+      "platform": "all",
+      "architecture": "all",
+      "url": "https://raw.githubusercontent.com/jrgillick/laughter-detection/5d5e0327916959d832d95ffbef5f484efc93d799/checkpoints/in_use/resnet_with_augmentation/best.pth.tar",
+      "sha256": "bfe450e41926a4e9de2abf007c9a13fa8420439eaa1383e986563c565f5ef206",
+      "size": 9805316,
+      "license": "Upstream repository license; verify before redistribution",
+      "provenance": "https://github.com/jrgillick/laughter-detection/tree/5d5e0327916959d832d95ffbef5f484efc93d799"
+    },
+    "panns-cnn14-decisionlevelmax/Cnn14_DecisionLevelMax.pth": {
+      "version": "Zenodo record 3987831",
+      "platform": "all",
+      "architecture": "all",
+      "url": "https://zenodo.org/records/3987831/files/Cnn14_DecisionLevelMax_mAP%3D0.385.pth?download=1",
+      "sha256": "dd3b4043a87d4ec13df8082c0fcfee3fb5084151808e47e060987a95eabdd142",
+      "size": 327428481,
+      "license": "Zenodo record license; verify before redistribution",
+      "provenance": "https://zenodo.org/records/3987831"
+    },
+    "campplus/campplus_cn_common.bin": {
+      "version": "e4b6ede7ce16997aff4ae69fbca1f0175e2afede",
+      "platform": "all",
+      "architecture": "all",
+      "url": "https://huggingface.co/funasr/campplus/resolve/e4b6ede7ce16997aff4ae69fbca1f0175e2afede/campplus_cn_common.bin",
+      "sha256": "3388cf5fd3493c9ac9c69851d8e7a8badcfb4f3dc631020c4961371646d5ada8",
+      "size": 28036335,
+      "license": "Hugging Face repository license; verify before redistribution",
+      "provenance": "https://huggingface.co/funasr/campplus/tree/e4b6ede7ce16997aff4ae69fbca1f0175e2afede"
+    },
+    "ultraface/ultraface-rfb-320.onnx": {
+      "version": "7a935022a2396eb5b24f67b588945133dcb511fc",
+      "platform": "all",
+      "architecture": "all",
+      "url": "https://raw.githubusercontent.com/JeremySNR/clip-forge/7a935022a2396eb5b24f67b588945133dcb511fc/resources/models/ultraface-rfb-320.onnx",
+      "sha256": "34cd7e60aeff28744c657de7a3dc64e872d506741de66987f3426f2b79f88017",
+      "size": 1270727,
+      "license": "Upstream repository license; verify before redistribution",
+      "provenance": "https://github.com/JeremySNR/clip-forge/tree/7a935022a2396eb5b24f67b588945133dcb511fc"
+    },
+    "lr-asd/frontend.onnx": {
+      "version": "7a935022a2396eb5b24f67b588945133dcb511fc",
+      "platform": "all",
+      "architecture": "all",
+      "url": "https://raw.githubusercontent.com/JeremySNR/clip-forge/7a935022a2396eb5b24f67b588945133dcb511fc/resources/models/lr-asd-frontend.onnx",
+      "sha256": "f7c055612cd6f1f2da3ab8257567ab68a6b0d69b5e436699a5cf65334dd79461",
+      "size": 2529511,
+      "license": "Upstream repository license; verify before redistribution",
+      "provenance": "https://github.com/JeremySNR/clip-forge/tree/7a935022a2396eb5b24f67b588945133dcb511fc"
+    },
+    "lr-asd/backend.onnx": {
+      "version": "7a935022a2396eb5b24f67b588945133dcb511fc",
+      "platform": "all",
+      "architecture": "all",
+      "url": "https://raw.githubusercontent.com/JeremySNR/clip-forge/7a935022a2396eb5b24f67b588945133dcb511fc/resources/models/lr-asd-backend.onnx",
+      "sha256": "9453caa09998027995664fd5a3b1fab4ad0de30a92c6beba8c29c3619de510a9",
+      "size": 834401,
+      "license": "Upstream repository license; verify before redistribution",
+      "provenance": "https://github.com/JeremySNR/clip-forge/tree/7a935022a2396eb5b24f67b588945133dcb511fc"
+    }
+  }
+}

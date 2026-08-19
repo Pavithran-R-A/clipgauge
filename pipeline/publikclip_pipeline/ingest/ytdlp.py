@@ -27,7 +27,9 @@ from typing import Callable
 
 import httpx
 
-from .. import config
+from .. import config, runtime
+
+_MANIFEST = Path(__file__).resolve().parents[2] / "runtime-manifest.json"
 
 ProgressFn = Callable[[float, str], None]  # (fraction 0..1 or -1, message)
 
@@ -42,6 +44,8 @@ def _binary_name() -> str:
         return "yt-dlp.exe"
     if system == "Darwin":
         return "yt-dlp_macos"
+    if platform.machine().lower() in {"aarch64", "arm64"}:
+        return "yt-dlp_linux_aarch64"
     return "yt-dlp_linux"
 
 
@@ -50,29 +54,37 @@ def binary_path() -> Path:
 
 
 def ensure_ytdlp(progress: ProgressFn) -> Path:
-    """Download the official standalone binary on first use (~30 MB)."""
+    """Install only the platform asset pinned by runtime-manifest.json."""
+    name = _binary_name()
+    try:
+        manifest = runtime.load_manifest(_MANIFEST)
+        asset = manifest["runtimes"]["yt-dlp"]["assets"][name]
+        expected = asset["sha256"]
+        url = asset["url"]
+    except (KeyError, TypeError) as exc:
+        raise YtDlpError("The pinned yt-dlp runtime manifest is incomplete.") from exc
     path = binary_path()
     if path.exists():
-        return path
-    progress(-1, "Downloading yt-dlp (one-time setup)…")
+        try:
+            if runtime.sha256_file(path).lower() == expected.lower():
+                path.chmod(0o755)
+                return path
+        except OSError:
+            pass
+    progress(-1, f"Downloading yt-dlp {manifest['runtimes']['yt-dlp']['version']}…")
     config.ensure_home()
-    url = f"https://github.com/yt-dlp/yt-dlp/releases/latest/download/{_binary_name()}"
-    tmp = path.with_suffix(".download")
-    with httpx.stream("GET", url, follow_redirects=True, timeout=config.HTTP_TIMEOUT) as res:
-        if res.status_code != 200:
-            raise YtDlpError(
-                f"Could not download yt-dlp (HTTP {res.status_code}). Check your connection."
-            )
-        total = int(res.headers.get("content-length", 0))
-        seen = 0
-        with open(tmp, "wb") as fh:
-            for chunk in res.iter_bytes():
-                fh.write(chunk)
-                seen += len(chunk)
-                if total:
-                    progress(min(1.0, seen / total) * 0.15, "Downloading yt-dlp (one-time setup)…")
-    tmp.chmod(0o755)
-    tmp.replace(path)
+    try:
+        runtime.download_verified(
+            url,
+            path,
+            expected_sha256=expected,
+            max_bytes=128 * 1024 * 1024,
+            timeout=config.HTTP_TIMEOUT,
+            progress=lambda f, message: progress(f * 0.15, message),
+            mode=0o755,
+        )
+    except runtime.RuntimeIntegrityError as exc:
+        raise YtDlpError(f"Could not install verified yt-dlp: {exc}") from exc
     return path
 
 
@@ -156,19 +168,8 @@ _self_updated_this_run = False
 
 
 def _with_self_update_retry(bin_path: Path, progress: ProgressFn, fn: Callable[[], str]) -> str:
-    global _self_updated_this_run
-    try:
-        return fn()
-    except YtDlpError as original:
-        if _self_updated_this_run:
-            raise
-        _self_updated_this_run = True
-        progress(-1, "Updating yt-dlp…")
-        try:
-            _run(bin_path, ["-U"])
-        except YtDlpError:
-            raise original from None  # updater failed; the original error is the story
-        return fn()
+    """Run the pinned binary once; in-process self-updates are forbidden."""
+    return fn()
 
 
 @dataclass

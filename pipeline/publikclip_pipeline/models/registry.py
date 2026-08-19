@@ -1,21 +1,18 @@
-"""Model weight registry + downloader.
+"""Model weight registry + verified downloader.
 
-All weights land in PUBLIKCLIP_HOME/models/<name>. Downloads resume (Range)
-and verify sha256 when one is pinned. The registry grows per milestone —
-M1 adds the audio models, M3 the vision ONNX models. Entries with a
-sha256 of None are verified by size-only until first release pinning.
+All weights land in PUBLIKCLIP_HOME/models/<name>. Managed entries require a
+concrete SHA-256 pin and are installed through a staged, bounded download.
+Whisper weights are fetched internally by faster-whisper and remain outside
+this explicit registry boundary.
 """
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-import httpx
-
-from .. import config
+from .. import config, runtime
 
 ProgressFn = Callable[[float, str], None]
 
@@ -27,6 +24,8 @@ class ModelSpec:
     url: str
     sha256: str | None = None
     approx_mb: int = 0
+    revision: str = "unversioned"
+    license: str = "See upstream source"
 
 
 REGISTRY: dict[str, ModelSpec] = {}
@@ -46,40 +45,28 @@ def is_present(spec: ModelSpec) -> bool:
 
 
 def ensure(spec: ModelSpec, progress: ProgressFn) -> Path:
-    """Download with resume; verify sha256 when pinned."""
+    """Download, verify, and atomically install one pinned model artifact."""
+    if not spec.sha256:
+        raise RuntimeError(
+            f"Model {spec.name} has no release SHA-256 pin; refusing an unverified download."
+        )
     dest = model_path(spec)
     if dest.exists():
-        return dest
+        try:
+            if runtime.sha256_file(dest).lower() == spec.sha256.lower():
+                return dest
+        except OSError:
+            pass
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".part")
-    offset = tmp.stat().st_size if tmp.exists() else 0
-    headers = {"Range": f"bytes={offset}-"} if offset else {}
     label = f"Downloading {spec.name}" + (f" (~{spec.approx_mb} MB)" if spec.approx_mb else "")
-    with httpx.stream(
-        "GET", spec.url, headers=headers, follow_redirects=True, timeout=config.HTTP_TIMEOUT
-    ) as res:
-        if res.status_code == 200 and offset:
-            offset = 0  # server ignored Range; start over
-            tmp.unlink(missing_ok=True)
-        elif res.status_code not in (200, 206):
-            raise RuntimeError(f"Model download failed for {spec.name}: HTTP {res.status_code}")
-        total = int(res.headers.get("content-length", 0)) + offset
-        seen = offset
-        with open(tmp, "ab") as fh:
-            for chunk in res.iter_bytes():
-                fh.write(chunk)
-                seen += len(chunk)
-                if total:
-                    progress(seen / total, label)
-    if spec.sha256:
-        digest = hashlib.sha256()
-        with open(tmp, "rb") as fh:
-            for block in iter(lambda: fh.read(1 << 20), b""):
-                digest.update(block)
-        if digest.hexdigest() != spec.sha256:
-            tmp.unlink(missing_ok=True)
-            raise RuntimeError(
-                f"Checksum mismatch for {spec.name} — download corrupted, please retry."
-            )
-    tmp.replace(dest)
-    return dest
+    try:
+        return runtime.download_verified(
+            spec.url,
+            dest,
+            expected_sha256=spec.sha256,
+            max_bytes=max(2 * 1024 * 1024 * 1024, (spec.approx_mb or 1) * 1024 * 1024 * 3),
+            timeout=config.HTTP_TIMEOUT,
+            progress=lambda fraction, _: progress(fraction, label),
+        )
+    except runtime.RuntimeIntegrityError as exc:
+        raise RuntimeError(f"Model {spec.name} failed verification: {exc}") from exc
