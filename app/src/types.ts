@@ -83,6 +83,35 @@ export interface JobResults {
   candidates: { count: number; effective_weights: Record<string, number>; heatmap_present: boolean } | null
 }
 
+export interface ClipEditOverlay {
+  id: string
+  query: string
+  source: 'pexels' | 'gemini' | 'upload'
+  image_path: string
+  start: number
+  end: number
+  x: number
+  y: number
+  scale: number
+  animation: 'none' | 'pop' | 'ping'
+  phrase: string
+}
+
+export interface ClipEdit {
+  start: number
+  end: number
+  caption_preset?: 'classic' | 'bold' | 'karaoke' | null
+  camera_mode?: 'cut' | 'pan' | 'locked' | null
+  remove_dead_space: boolean
+  disabled_cuts: number[]
+  overlays: ClipEditOverlay[]
+}
+
+export interface SaveClipEditsInput {
+  clip: number
+  edit: ClipEdit
+}
+
 export interface JobSummary {
   id: string
   title: string | null

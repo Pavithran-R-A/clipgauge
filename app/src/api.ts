@@ -1,5 +1,5 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
-import type { JobResults, JobSummary, LoopOverview, SetupState, SyncSummary } from './types'
+import type { JobResults, JobSummary, LoopOverview, SaveClipEditsInput, SetupState, SyncSummary } from './types'
 
 export const api = {
   runJob: (source: string, llm: string, captions: string) =>
@@ -12,7 +12,8 @@ export const api = {
   saveGeminiKey: (key: string) => invoke<boolean>('save_gemini_key', { key }),
   setupState: () => invoke<SetupState>('get_setup_state'),
   markOnboarded: () => invoke<void>('mark_onboarded'),
-  checkOllama: () => invoke<{ running: boolean; models: string[] }>('check_ollama'),
+  checkOllama: () => invoke<{ state: 'service-stopped' | 'model-missing' | 'service-healthy'; running: boolean; models: string[]; message?: string }>('check_ollama'),
+  saveClipEdits: (jobId: string, input: SaveClipEditsInput) => invoke<void>('save_clip_edits', { jobId, input }),
   exportClip: (jobId: string, clip: number, title?: string) =>
     invoke<string>('export_clip', { jobId, clip, title }),
   igStatus: () => invoke<{ connected: boolean; username?: string }>('ig_status'),

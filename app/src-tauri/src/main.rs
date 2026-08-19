@@ -5,6 +5,7 @@
 
 mod artifact;
 mod diagnostics;
+mod edit_schema;
 mod path_security;
 mod process_manager;
 mod secrets;
@@ -610,21 +611,36 @@ fn run_edit_render(
 }
 
 #[tauri::command]
-fn save_clip_edits(job_id: String, edits: Value) -> Result<(), String> {
+fn save_clip_edits(job_id: String, input: edit_schema::SaveClipEditsInput) -> Result<(), String> {
     let dir = validate_job_id(&job_id)?;
+    let score_path = dir.join("score.json");
+    let score: Value = serde_json::from_str(
+        &fs::read_to_string(&score_path)
+            .map_err(|_| "score checkpoint is unavailable".to_string())?,
+    )
+    .map_err(|_| "score checkpoint is malformed".to_string())?;
+    let incoming = edit_schema::validate(&dir, &input, &score)?;
     let path = dir.join("clip_edits.json");
-    // Merge: the app sends one clip's state at a time; other clips' edits
-    // must survive.
     let mut current: Value = fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| json!({}));
-    if let (Some(obj), Some(new)) = (current.as_object_mut(), edits.as_object()) {
-        for (k, v) in new {
-            obj.insert(k.clone(), v.clone());
-        }
+    let current_obj = current
+        .as_object_mut()
+        .ok_or_else(|| "existing clip edits are malformed".to_string())?;
+    let incoming_obj = incoming
+        .as_object()
+        .ok_or_else(|| "validated clip edits are malformed".to_string())?;
+    for (key, value) in incoming_obj {
+        current_obj.insert(key.clone(), value.clone());
     }
-    fs::write(&path, serde_json::to_string_pretty(&current).unwrap()).map_err(|e| e.to_string())
+    let temp = path.with_extension("json.tmp");
+    fs::write(
+        &temp,
+        serde_json::to_vec_pretty(&current).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    fs::rename(&temp, &path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
