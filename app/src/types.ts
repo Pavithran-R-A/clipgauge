@@ -119,6 +119,20 @@ export interface JobSummary {
   rendered: boolean
 }
 
+export interface PreflightCheck {
+  name: string
+  state: 'ready' | 'warning' | 'blocked'
+  message: string
+  remediation?: string
+  details?: Record<string, unknown>
+}
+
+export interface PreflightResult {
+  state: 'ready' | 'warning' | 'blocked'
+  selected_llm: string
+  checks: PreflightCheck[]
+}
+
 export interface SetupState {
   has_gemini_key: boolean
   onboarded: boolean

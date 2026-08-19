@@ -1,7 +1,8 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
-import type { JobResults, JobSummary, LoopOverview, SaveClipEditsInput, SetupState, SyncSummary } from './types'
+import type { JobResults, JobSummary, LoopOverview, PreflightResult, SaveClipEditsInput, SetupState, SyncSummary } from './types'
 
 export const api = {
+  preflight: (llm: string) => invoke<PreflightResult>('preflight', { llm }),
   runJob: (source: string, llm: string, captions: string) =>
     invoke<void>('run_job', { source, llm, captions }),
   resumeJob: (jobId: string, llm?: string, captions?: string, camera?: string) =>

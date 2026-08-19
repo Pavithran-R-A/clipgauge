@@ -116,6 +116,30 @@ fn pipeline_invocation() -> (String, Vec<String>) {
 }
 
 #[tauri::command]
+fn preflight(llm: String) -> Result<Value, String> {
+    if !matches!(llm.as_str(), "gemini" | "ollama") {
+        return Err("unsupported LLM mode".to_string());
+    }
+    let (program, mut args) = pipeline_invocation();
+    args.push("preflight".to_string());
+    args.push("--llm".to_string());
+    args.push(llm);
+    let mut command = quiet_command(&program);
+    secrets::apply_operation_env(&mut command);
+    let output = command
+        .env("PUBLIKCLIP_HOME", home_dir())
+        .args(&args)
+        .output()
+        .map_err(|error| diagnostics::redact(&error.to_string()))?;
+    let line = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with('{'))
+        .ok_or_else(|| "preflight returned no JSON result".to_string())?;
+    serde_json::from_str(line).map_err(|error| diagnostics::redact(&error.to_string()))
+}
+
+#[tauri::command]
 fn run_job(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -786,6 +810,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            preflight,
             run_job,
             resume_job,
             cancel_job,

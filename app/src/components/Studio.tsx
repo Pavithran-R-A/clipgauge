@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { open } from '@tauri-apps/plugin-dialog'
 import type { JobSummary } from '../types'
 import KeyModal from './KeyModal'
 
@@ -38,6 +39,22 @@ export default function Studio({ jobs, running, cancelling, stages, error, notic
   const [llm, setLlm] = useState('gemini')
   const [captions, setCaptions] = useState('classic')
   const [showKey, setShowKey] = useState(false)
+
+  async function chooseFile() {
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'mkv', 'webm', 'avi'] }]
+    })
+    if (typeof selected === 'string') setSource(selected)
+  }
+
+  function dropFile(event: React.DragEvent<HTMLDivElement>) {
+    event.preventDefault()
+    if (running) return
+    const file = event.dataTransfer.files[0] as (File & { path?: string }) | undefined
+    if (file?.path) setSource(file.path)
+  }
 
   return (
     <div className="studio">
@@ -80,7 +97,12 @@ export default function Studio({ jobs, running, cancelling, stages, error, notic
           <h1 className="input-heading">
             FEED IT<span className="amber"> AN HOUR.</span>
           </h1>
-          <div className="input-row">
+          <div
+            className="input-row source-drop"
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={dropFile}
+            aria-label="Video source drop area"
+          >
             <input
               value={source}
               onChange={(e) => setSource(e.target.value)}
@@ -88,6 +110,14 @@ export default function Studio({ jobs, running, cancelling, stages, error, notic
               placeholder="YouTube URL or a path to a video file"
               disabled={running}
             />
+            <button
+              className="btn-secondary"
+              onClick={chooseFile}
+              disabled={running}
+              aria-label="Choose a local video file"
+            >
+              CHOOSE FILE
+            </button>
             <button
               className="btn-primary"
               onClick={() => onRun(source.trim(), llm, captions)}

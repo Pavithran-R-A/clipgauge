@@ -81,6 +81,21 @@ def _preflight_terminal(jsonl: bool, job_id: str | None, code: str, message: str
     return 2
 
 
+def cmd_preflight(args: argparse.Namespace) -> int:
+    from . import preflight
+
+    try:
+        payload = preflight.run(args.llm or "gemini")
+    except Exception as err:  # noqa: BLE001 — preflight must return an actionable JSON result
+        payload = {
+            "state": "blocked",
+            "selected_llm": args.llm or "gemini",
+            "checks": [{"name": "preflight", "state": "blocked", "message": protocol.safe_message(str(err)), "remediation": "Repair the local installation and retry."}],
+        }
+    print(json.dumps(payload), flush=True)
+    return 0 if payload["state"] != "blocked" else 2
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     source = args.source
     source_type = "url" if source.startswith(("http://", "https://")) else "file"
@@ -359,6 +374,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="publikclip")
     parser.add_argument("--jsonl", action="store_true", help="machine-readable progress on stdout")
     sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_preflight = sub.add_parser("preflight", help="check local runtime readiness")
+    p_preflight.add_argument("--llm", choices=["gemini", "ollama"], default=None)
+    p_preflight.set_defaults(fn=cmd_preflight)
 
     p_run = sub.add_parser("run", help="process a YouTube URL or local video file")
     p_run.add_argument("source")

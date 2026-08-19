@@ -115,14 +115,31 @@ export default function App() {
 
   const startRun = useCallback(
     async (source: string, llm: string, captions: string) => {
-      setRunning(true)
+      setRunning(false)
       setCancelling(false)
       setRunError(null)
       setRunNotice(null)
       setStages({})
       setResults(null)
       setActiveJob(null)
-      await api.runJob(source, llm, captions)
+      try {
+        const preflight = await api.preflight(llm)
+        const blocked = preflight.checks.filter((check) => check.state === 'blocked')
+        const warnings = preflight.checks.filter((check) => check.state === 'warning')
+        if (preflight.state === 'blocked' || blocked.length) {
+          const first = blocked[0]
+          setRunError(`${first?.message ?? 'This run is blocked by local readiness checks.'}${first?.remediation ? ` ${first.remediation}` : ''}`)
+          return
+        }
+        if (warnings.length) {
+          setRunNotice(`Preflight warning: ${warnings.slice(0, 2).map((check) => check.message).join(' ')}`)
+        }
+        setRunning(true)
+        await api.runJob(source, llm, captions)
+      } catch (error) {
+        setRunning(false)
+        setRunError(String(error))
+      }
     },
     []
   )
