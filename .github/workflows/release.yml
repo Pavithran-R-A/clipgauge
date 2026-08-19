@@ -1,0 +1,72 @@
+name: Release Linux package
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  linux-deb:
+    name: Build unsigned Linux .deb
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: latest
+          enable-cache: true
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+      - name: Build unsigned Debian package
+        working-directory: app
+        run: npm run tauri build -- --bundles deb
+      - name: Inspect package metadata
+        working-directory: app
+        run: |
+          shopt -s nullglob
+          packages=(src-tauri/target/release/bundle/deb/*.deb)
+          test "${#packages[@]}" -gt 0
+          for package in "${packages[@]}"; do
+            dpkg-deb --info "$package"
+            dpkg-deb --contents "$package" >/dev/null
+          done
+      - name: Upload unsigned package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clipgauge-linux-deb-${{ github.ref_name }}
+          path: app/src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ClipGauge ${{ github.ref_name }} Linux Debian artifact.
+
+            This artifact is unsigned. No signing certificate, notarization, Windows/macOS artifact, hardware benchmark, or updater signing status is claimed for this release.
+          files: app/src-tauri/target/release/bundle/deb/*.deb
