@@ -1,0 +1,19 @@
+title = "ClipGauge secret scanning policy"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Deterministic non-secret values used only by redaction and credential-security tests"
+regexTarget = "match"
+regexes = [
+  '''AIzaTestSecretValue123456''',
+  '''AIzaSecretInProviderBody123456''',
+  '''AIzaKnownSecret''',
+  '''AIzaTestSecret''',
+  '''AIza-test''',
+  '''oauth-known''',
+  '''meta-token''',
+  '''pexels-secret''',
+  '''ig-secret'''
+]

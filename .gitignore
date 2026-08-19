@@ -16,7 +16,8 @@ app/src-tauri/target/
 app/dist/
 
 # Local data — never commit media, models, or job artifacts
-.publikclip/
+.clipgauge/
+.publikclip/ # legacy migration source
 *.mp4
 *.wav
 *.mkv
