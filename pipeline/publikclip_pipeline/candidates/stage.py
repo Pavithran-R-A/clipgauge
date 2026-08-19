@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ..jobs.queue import Stage, StageContext, StageError
+from ..jobs.queue import Stage, StageContext, StageError, _atomic_write_json
 
 
 def detect_scenes(media_path: str, progress=None) -> list[float]:
@@ -56,7 +56,8 @@ class CandidatesStage(Stage):
             scene_times = detect_scenes(ingest["media_path"])
         except Exception:  # noqa: BLE001 — scenes are a minor channel; degrade
             scene_times = []
-        (ctx.job_dir / "scenes.json").write_text(json.dumps(scene_times))
+        scenes_path = ctx.job_dir / "scenes.json"
+        _atomic_write_json(scenes_path, scene_times)
 
         ctx.emit(0.6, "Building interest curve…")
         channels = {
@@ -80,8 +81,10 @@ class CandidatesStage(Stage):
             )
 
         # Persist the curve for the review UI's timeline visualization.
-        (ctx.job_dir / "interest_curve.json").write_text(
-            json.dumps({"per_sec": np.round(curve, 4).tolist()})
+        interest_curve_path = ctx.job_dir / "interest_curve.json"
+        _atomic_write_json(
+            interest_curve_path,
+            {"per_sec": np.round(curve, 4).tolist()},
         )
 
         return {
@@ -90,4 +93,8 @@ class CandidatesStage(Stage):
             "effective_weights": effective_weights,
             "scene_count": len(scene_times),
             "heatmap_present": bool(ingest.get("heatmap")),
+            "artifact_paths": {
+                "scenes_path": str(scenes_path),
+                "interest_curve_path": str(interest_curve_path),
+            },
         }

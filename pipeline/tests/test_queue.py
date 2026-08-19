@@ -118,6 +118,56 @@ def test_stage_error_marks_job_failed():
     assert "politely" in (fetched.error or "")
 
 
+def test_checkpoint_contains_relative_descriptors_and_manifest():
+    job = queue.create_job("file", "/tmp/x.mp4", _settings_json())
+    stage = ArtifactStage()
+    queue.run_stages(job, [stage], _noop_progress)
+    envelope = json.loads(queue.checkpoint_path(job, stage.name).read_text())
+    assert envelope["artifacts"][0]["relative_path"] == "artifact.bin"
+    assert not envelope["artifacts"][0]["relative_path"].startswith("/")
+    manifest = json.loads((job.dir / "artifact-manifest.json").read_text())
+    assert manifest["stages"]["artifact"]["artifacts"][0]["role"] == "path"
+
+
+def test_changed_artifact_content_invalidates_even_when_size_is_unchanged():
+    job = queue.create_job("file", "/tmp/x.mp4", _settings_json())
+    stage = ArtifactStage()
+    queue.run_stages(job, [stage], _noop_progress)
+    (job.dir / "artifact.bin").write_bytes(b"else")
+    queue.run_stages(job, [stage], _noop_progress)
+    assert stage.runs == 2
+
+
+def test_malformed_checkpoint_emits_structured_recovery_message():
+    job = queue.create_job("file", "/tmp/x.mp4", _settings_json())
+    stage = CountingStage()
+    queue.run_stages(job, [stage], _noop_progress)
+    queue.checkpoint_path(job, stage.name).write_text(
+        json.dumps({"stage": stage.name, "schema_version": stage.schema_version, "data": {"runs": 1}})
+    )
+    messages = []
+    queue.run_stages(job, [stage], lambda s, f, m: messages.append((s, m)))
+    assert stage.runs == 2
+    assert any("CHECKPOINT_DESCRIPTOR_MISSING" in message for _, message in messages)
+
+
+def test_outside_root_artifact_fails_closed_with_typed_error(tmp_path):
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"not managed")
+
+    class OutsideStage(queue.Stage):
+        name = "outside"
+        schema_version = 1
+
+        def run(self, ctx):
+            return {"path": str(outside)}
+
+    job = queue.create_job("file", "/tmp/x.mp4", _settings_json())
+    with pytest.raises(queue.StageError) as exc:
+        queue.run_stages(job, [OutsideStage()], _noop_progress)
+    assert exc.value.code == "ARTIFACT_OUTSIDE_MANAGED_ROOT"
+
+
 def test_failure_then_resume_skips_completed_stages():
     job = queue.create_job("file", "/tmp/x.mp4", _settings_json())
     counting = CountingStage()

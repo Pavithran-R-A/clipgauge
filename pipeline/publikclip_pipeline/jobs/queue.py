@@ -16,6 +16,7 @@ half-checkpoint that resume would trust.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 import uuid
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .. import config, protocol
+from . import artifacts
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -137,9 +139,31 @@ def set_job_status(job_id: str, status: str, error: str | None = None, title: st
 
 
 def _atomic_write_json(path: Path, payload: Any) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1))
-    tmp.replace(path)
+    """Write critical JSON through a durable temp file and atomic replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    encoded = json.dumps(payload, ensure_ascii=False, indent=1).encode("utf-8")
+    try:
+        with tmp.open("wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def checkpoint_path(job: Job, stage: str) -> Path:
@@ -147,13 +171,16 @@ def checkpoint_path(job: Job, stage: str) -> Path:
 
 
 def write_checkpoint(job: Job, stage: str, schema_version: int, data: dict) -> None:
+    prepared, descriptors = artifacts.prepare(job.dir, data, stage)
     envelope = {
         "stage": stage,
         "schema_version": schema_version,
         "created_at": time.time(),
-        "data": data,
+        "data": prepared,
+        "artifacts": descriptors,
     }
     _atomic_write_json(checkpoint_path(job, stage), envelope)
+    artifacts.update_manifest(job.dir, stage, schema_version, descriptors, _atomic_write_json)
     with _connect() as conn:
         conn.execute(
             "INSERT INTO stage_runs (job_id, stage, status, schema_version, started_at, finished_at)"
@@ -165,20 +192,30 @@ def write_checkpoint(job: Job, stage: str, schema_version: int, data: dict) -> N
         )
 
 
-def read_checkpoint(job: Job, stage: str, schema_version: int) -> dict | None:
-    """Return the stage's data dict iff a checkpoint with the expected
-    schema_version exists and parses. Anything else means 're-run me'."""
+def read_checkpoint_detailed(
+    job: Job, stage: str, schema_version: int
+) -> tuple[dict | None, artifacts.ArtifactError | None]:
+    """Read and validate one checkpoint, returning a structured recovery reason."""
     path = checkpoint_path(job, stage)
     if not path.exists():
-        return None
+        return None, None
     try:
-        envelope = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
-    if envelope.get("schema_version") != schema_version:
-        return None
-    data = envelope.get("data")
-    return data if isinstance(data, dict) else None
+        envelope = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return None, artifacts.ArtifactError("CHECKPOINT_CORRUPT", f"checkpoint cannot be parsed: {exc}")
+    if not isinstance(envelope, dict):
+        return None, artifacts.ArtifactError("CHECKPOINT_MALFORMED", "checkpoint root must be an object")
+    try:
+        data, _ = artifacts.validate(job.dir, envelope, stage, schema_version)
+    except artifacts.ArtifactError as exc:
+        return None, exc
+    return data, None
+
+
+def read_checkpoint(job: Job, stage: str, schema_version: int) -> dict | None:
+    """Return data only when the complete versioned artifact contract passes."""
+    data, _ = read_checkpoint_detailed(job, stage, schema_version)
+    return data
 
 
 def mark_stage(job_id: str, stage: str, status: str, schema_version: int, error: str | None = None) -> None:
@@ -276,7 +313,13 @@ def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[
     results: dict[str, dict] = {}
     set_job_status(job.id, "running")
     for stage in stages:
-        cached = read_checkpoint(job, stage.name, stage.schema_version)
+        cached, issue = read_checkpoint_detailed(job, stage.name, stage.schema_version)
+        if issue is not None:
+            progress(
+                stage.name,
+                -1.0,
+                f"Recovering checkpoint ({issue.code}): {protocol.safe_message(issue.message, limit=240)}",
+            )
         if cached is not None and stage.artifacts_ok(ctx, cached):
             results[stage.name] = cached
             progress(stage.name, 1.0, "cached")
@@ -294,7 +337,13 @@ def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[
             mark_stage(job.id, stage.name, "failed", stage.schema_version, repr(err))
             set_job_status(job.id, "failed", f"{stage.name}: {err!r}")
             raise StageExecutionError(stage.name, err) from err
-        write_checkpoint(job, stage.name, stage.schema_version, data)
+        try:
+            write_checkpoint(job, stage.name, stage.schema_version, data)
+        except artifacts.ArtifactError as err:
+            message = f"{stage.name}: {err.message}"
+            mark_stage(job.id, stage.name, "failed", stage.schema_version, message)
+            set_job_status(job.id, "failed", message)
+            raise StageError(message, code=err.code, stage=stage.name) from err
         results[stage.name] = data
         progress(stage.name, 1.0, "done")
     set_job_status(job.id, "done", None)

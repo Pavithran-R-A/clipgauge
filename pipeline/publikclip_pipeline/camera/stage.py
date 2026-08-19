@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ..jobs.queue import Stage, StageContext, StageError
+from ..jobs.queue import Stage, StageContext, StageError, _atomic_write_json
 from ..models import registry, specs
 
 
@@ -65,18 +65,17 @@ class CameraStage(Stage):
                 start, end, src_w, src_h, ctx.settings,
             )
             out_path = ctx.job_dir / f"trajectory_{i:02d}.json"
-            out_path.write_text(
-                json.dumps(
-                    {
-                        "clip_start": start,
-                        "clip_end": end,
-                        "fps": traj.fps,
-                        "frames": traj.frames,
-                        "cuts": traj.cuts,
-                        "punches": traj.punches,
-                        "meta": traj.meta,
-                    }
-                )
+            _atomic_write_json(
+                out_path,
+                {
+                    "clip_start": start,
+                    "clip_end": end,
+                    "fps": traj.fps,
+                    "frames": traj.frames,
+                    "cuts": traj.cuts,
+                    "punches": traj.punches,
+                    "meta": traj.meta,
+                },
             )
             trajectories[str(i)] = str(out_path)
             stats.append(

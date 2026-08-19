@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 
 from .. import config
+from ..jobs import queue
 from ..captions import ass as ass_mod
 from ..render import ffmpeg_bin, renderer
 from . import store
@@ -245,7 +246,10 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
     out_dir = job_dir / "clips"
     out_dir.mkdir(exist_ok=True)
     ass_path = out_dir / f"clip_{clip_idx:02d}.ass"
-    ass_path.write_text(ass_mod.build_ass(cap_words, clip_events_out, preset_name=preset, emoji_ok=emoji_ok))
+    queue._atomic_write_text(
+        ass_path,
+        ass_mod.build_ass(cap_words, clip_events_out, preset_name=preset, emoji_ok=emoji_ok),
+    )
 
     # --- build the graph ----------------------------------------------------
     emit(-1, "Rendering clip…")
@@ -261,7 +265,7 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
     graph = trims + [f"{concat_in}concat=n={n}:v=1:a=1[vc][ac]"]
 
     cmd_path = out_dir / f"clip_{clip_idx:02d}.cmd"
-    cmd_path.write_text("\n".join(renderer.sendcmd_lines(boxes, fps)) + "\n")
+    queue._atomic_write_text(cmd_path, "\n".join(renderer.sendcmd_lines(boxes, fps)) + "\n")
     vchain = (
         f"[vc]sendcmd=f={renderer._q(cmd_path)},"  # noqa: SLF001
         f"crop@c=w={boxes[0][0]}:h={boxes[0][1]}:x={boxes[0][2]}:y={boxes[0][3]},"
@@ -325,7 +329,8 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
                 break
         else:
             outputs.append(entry)
-        tmp = render_ckpt_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(ckpt))
-        tmp.replace(render_ckpt_path)
+        job = queue.get_job(job_dir.name)
+        if job is None:
+            raise RuntimeError("job metadata is missing; edited output cannot be committed safely")
+        queue.write_checkpoint(job, "render", int(ckpt["schema_version"]), ckpt["data"])
     return entry

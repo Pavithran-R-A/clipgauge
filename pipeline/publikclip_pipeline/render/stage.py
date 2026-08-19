@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ..jobs.queue import Stage, StageContext, StageError
+from ..jobs.queue import Stage, StageContext, StageError, _atomic_write_text
 
 
 class RenderStage(Stage):
@@ -87,8 +87,9 @@ class RenderStage(Stage):
                 if e["end"] > start and e["start"] < end and e["type"] != "pause"
             ]
             ass_path = out_dir / f"clip_{i:02d}.ass"
-            ass_path.write_text(
-                ass_mod.build_ass(words, clip_events, preset_name=preset, emoji_ok=emoji_ok)
+            _atomic_write_text(
+                ass_path,
+                ass_mod.build_ass(words, clip_events, preset_name=preset, emoji_ok=emoji_ok),
             )
 
             out_path = out_dir / f"clip_{i:02d}.mp4"

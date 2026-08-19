@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 from .. import config
-from ..jobs.queue import Stage, StageContext, StageError
+from ..jobs.queue import Stage, StageContext, StageError, _atomic_write_json
 from ..models import registry, specs
 from ..render import ffmpeg_bin
 
@@ -162,7 +162,7 @@ class EventsStage(Stage):
         curves["arousal_source"] = arousal_source
 
         curves_path = ctx.job_dir / "curves.json"
-        curves_path.write_text(json.dumps(curves))
+        _atomic_write_json(curves_path, curves)
 
         by_type: dict[str, int] = {}
         for event in timeline:
