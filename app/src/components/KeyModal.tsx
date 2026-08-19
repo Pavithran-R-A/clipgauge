@@ -53,9 +53,9 @@ export default function KeyModal({ onClose }: Props) {
 
   return (
     <div className="modal-scrim" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="key-modal-title" onClick={(e) => e.stopPropagation()}>
         <header className="modal-head">
-          <p className="audit-kicker">THE BRAIN</p>
+          <p id="key-modal-title" className="audit-kicker">THE BRAIN</p>
           <button className="btn-ghost" onClick={onClose}>close ✕</button>
         </header>
         <p className="ig-intro">

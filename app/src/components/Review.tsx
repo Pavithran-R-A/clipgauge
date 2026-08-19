@@ -269,6 +269,44 @@ export default function Review({ results, onBack, onRestyle }: Props) {
               </>
             )}
 
+            {pair.clip.ledger && (
+              <>
+                <p className="audit-label">WHY THIS CLIP</p>
+                <div className="ledger ledger-explain" data-testid="clip-ledger">
+                  <div className="ledger-row">
+                    <span className="ledger-factor mono">{Math.round(pair.clip.ledger.score)}</span>
+                    <div>
+                      <span className="ledger-rule">COMPOSITE SCORE</span>
+                      <span className="ledger-reason">Highest platform composite: {pair.clip.best_platform}</span>
+                    </div>
+                  </div>
+                  <div className="ledger-row">
+                    <span className="ledger-factor mono">{Math.round(pair.clip.ledger.composition.curve_score)}</span>
+                    <div>
+                      <span className="ledger-rule">SIGNAL COMPOSITION</span>
+                      <span className="ledger-reason">
+                        arousal {Math.round(pair.clip.ledger.composition.arousal_pct * 100)}% ·{' '}
+                        {pair.clip.ledger.composition.heatmap_pct === null
+                          ? 'no replay heatmap'
+                          : `replay ${Math.round(pair.clip.ledger.composition.heatmap_pct * 100)}%`} ·{' '}
+                        {pair.clip.ledger.composition.visual_evidence ? 'visual evidence present' : 'visual evidence unavailable'}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="ledger-row">
+                    <span className="ledger-factor mono">v{pair.clip.ledger.provenance.scoring_config_version}</span>
+                    <div>
+                      <span className="ledger-rule">PROVENANCE</span>
+                      <span className="ledger-reason">
+                        {pair.clip.ledger.provenance.model} · {pair.clip.ledger.provenance.llm_mode} ·{' '}
+                        {pair.clip.ledger.provenance.arousal_source}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+
             <p className="audit-label">SIGNALS</p>
             <div className="signals">
               {pair.clip.signals_fired.map((signal) => (

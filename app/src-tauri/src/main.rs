@@ -12,7 +12,7 @@ mod secrets;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -116,6 +116,149 @@ fn pipeline_invocation() -> (String, Vec<String>) {
 }
 
 #[tauri::command]
+fn privacy_summary(llm: String) -> Result<Value, String> {
+    if !matches!(llm.as_str(), "gemini" | "ollama") {
+        return Err("unsupported LLM mode".to_string());
+    }
+    let llm_data = if llm == "ollama" {
+        json!({
+            "mode": "ollama",
+            "device": ["transcript text", "local audio/video", "local score inputs"],
+            "network": ["source URL download when a URL is provided", "pinned runtime/model downloads when absent", "optional Pexels visual queries"],
+            "provider": "Ollama is contacted only on loopback; no transcript is sent to a cloud LLM by this mode"
+        })
+    } else {
+        json!({
+            "mode": "gemini",
+            "device": ["source media remains in the managed local job directory"],
+            "network": ["source URL download when a URL is provided", "pinned runtime/model downloads when absent", "Gemini receives transcript slices, scoring context, and sampled finalist frames", "optional Pexels visual queries"],
+            "provider": "Gemini is contacted with an operation-scoped vault credential; the API key is not included in requests as a query parameter"
+        })
+    };
+    Ok(json!({
+        "local_first": true,
+        "telemetry": "disabled by default",
+        "llm": llm_data,
+        "instagram": "Meta requests occur only when the optional Instagram connection and sync features are used",
+        "source": "ClipGauge runtime behavior"
+    }))
+}
+
+fn sanitized_job_metadata(root: &Path) -> Value {
+    let mut jobs = Vec::new();
+    if let Ok(entries) = fs::read_dir(root.join("jobs")) {
+        for entry in entries.flatten() {
+            let id = entry.file_name().to_string_lossy().to_string();
+            if !path_security::valid_job_id(&id) {
+                continue;
+            }
+            let Ok(dir) = path_security::resolve_job_dir(root, &id) else {
+                continue;
+            };
+            let mut stages = Vec::new();
+            for stage in [
+                "ingest",
+                "asr",
+                "diarize",
+                "events",
+                "candidates",
+                "score",
+                "camera",
+                "render",
+            ] {
+                let path = dir.join(format!("{stage}.json"));
+                if let Ok(metadata) = fs::metadata(path) {
+                    stages.push(json!({"stage": stage, "bytes": metadata.len()}));
+                }
+            }
+            jobs.push(json!({"id": id, "stages": stages}));
+            if jobs.len() >= 50 {
+                break;
+            }
+        }
+    }
+    json!({"jobs": jobs})
+}
+
+fn generate_support_bundle_at(root: &Path, job_id: Option<String>) -> Result<String, String> {
+    if let Some(id) = &job_id {
+        let _ = path_security::resolve_job_dir(root, id)?;
+    }
+    let directory = root.join("support");
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let bundle_id = diagnostics::diagnostic_id();
+    let path = directory.join(format!("support-{bundle_id}.zip"));
+    let temp = path.with_extension("zip.tmp");
+    let file = fs::File::create(&temp).map_err(|error| error.to_string())?;
+    let mut archive = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let report = json!({
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "os": std::env::consts::OS,
+        "architecture": std::env::consts::ARCH,
+        "protocol_version": 1,
+        "bundle_id": bundle_id,
+        "job_id": job_id,
+        "jobs": sanitized_job_metadata(root),
+        "exclusions": ["API keys", "OAuth tokens", "raw transcripts", "source media", "arbitrary filesystem contents"],
+    });
+    archive
+        .start_file("report.json", options)
+        .map_err(|error| error.to_string())?;
+    archive
+        .write_all(serde_json::to_string_pretty(&report).unwrap().as_bytes())
+        .map_err(|error| error.to_string())?;
+    archive
+        .start_file("README.txt", options)
+        .map_err(|error| error.to_string())?;
+    archive.write_all(b"ClipGauge support bundle. This archive contains sanitized metadata and redacted diagnostic tails only.\n").map_err(|error| error.to_string())?;
+    if let Ok(entries) = fs::read_dir(root.join("diagnostics")) {
+        for entry in entries.flatten().take(8) {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("log") {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let redacted = diagnostics::redact(&text);
+            let safe_lines = redacted
+                .lines()
+                .filter(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    !lower.contains("transcript") && !line.contains("S0:") && !line.contains("S1:")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let tail: String = safe_lines
+                .chars()
+                .rev()
+                .take(64 * 1024)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            let name = format!("diagnostics/{}", entry.file_name().to_string_lossy());
+            archive
+                .start_file(name, options)
+                .map_err(|error| error.to_string())?;
+            archive
+                .write_all(tail.as_bytes())
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    archive.finish().map_err(|error| error.to_string())?;
+    fs::rename(&temp, &path).map_err(|error| error.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn generate_support_bundle(job_id: Option<String>) -> Result<String, String> {
+    generate_support_bundle_at(&home_dir(), job_id)
+}
+
+#[tauri::command]
 fn preflight(llm: String) -> Result<Value, String> {
     if !matches!(llm.as_str(), "gemini" | "ollama") {
         return Err("unsupported LLM mode".to_string());
@@ -131,7 +274,8 @@ fn preflight(llm: String) -> Result<Value, String> {
         .args(&args)
         .output()
         .map_err(|error| diagnostics::redact(&error.to_string()))?;
-    let line = String::from_utf8_lossy(&output.stdout)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
         .lines()
         .rev()
         .find(|line| line.trim_start().starts_with('{'))
@@ -466,6 +610,19 @@ fn list_job_dirs() -> Result<Vec<Value>, String> {
             let dir = entry.path();
             let has_render = dir.join("render.json").exists();
             let has_ingest = dir.join("ingest.json").exists();
+            let lifecycle = fs::read_to_string(dir.join("lifecycle.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+            let lifecycle_state = lifecycle
+                .as_ref()
+                .and_then(|value| value["state"].as_str())
+                .unwrap_or(if has_render { "COMPLETED" } else { "RESUMABLE" });
+            let last_stage = lifecycle.as_ref().and_then(|value| value["stage"].as_str());
+            let resume_safe = !has_render
+                && matches!(
+                    lifecycle_state,
+                    "RESUMABLE" | "INTERRUPTED" | "CANCELLED" | "FAILED"
+                );
             let title = fs::read_to_string(dir.join("ingest.json"))
                 .ok()
                 .and_then(|s| serde_json::from_str::<Value>(&s).ok())
@@ -473,6 +630,9 @@ fn list_job_dirs() -> Result<Vec<Value>, String> {
             out.push(json!({
                 "id": id, "title": title,
                 "ingested": has_ingest, "rendered": has_render,
+                "lifecycle_state": lifecycle_state,
+                "last_stage": last_stage,
+                "resume_safe": resume_safe,
             }));
         }
     }
@@ -811,6 +971,8 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             preflight,
+            privacy_summary,
+            generate_support_bundle,
             run_job,
             resume_job,
             cancel_job,
@@ -844,7 +1006,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{ig_connect_args, ig_failure_message};
+    use std::fs;
+    use std::io::Read;
+
+    use super::{generate_support_bundle_at, ig_connect_args, ig_failure_message};
 
     #[test]
     fn meta_secret_is_not_part_of_child_arguments() {
@@ -852,6 +1017,40 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--app-secret-stdin"));
         assert!(!args.iter().any(|arg| arg == "super-secret"));
         assert!(!args.iter().any(|arg| arg == "--app-secret"));
+    }
+
+    #[test]
+    fn support_bundle_excludes_known_secrets() {
+        let root = std::env::temp_dir().join(format!(
+            "clipgauge-support-{}",
+            super::diagnostics::diagnostic_id()
+        ));
+        fs::create_dir_all(root.join("diagnostics")).unwrap();
+        fs::write(
+            root.join("diagnostics/sample.log"),
+            "key=AIzaKnownSecret Authorization: Bearer oauth-known transcript=private words",
+        )
+        .unwrap();
+        let bundle = generate_support_bundle_at(&root, None).unwrap();
+        let file = fs::File::open(bundle).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut report = String::new();
+        archive
+            .by_name("report.json")
+            .unwrap()
+            .read_to_string(&mut report)
+            .unwrap();
+        let mut diagnostic = String::new();
+        archive
+            .by_name("diagnostics/sample.log")
+            .unwrap()
+            .read_to_string(&mut diagnostic)
+            .unwrap();
+        let contents = format!("{report}{diagnostic}");
+        assert!(!contents.contains("AIzaKnownSecret"));
+        assert!(!contents.contains("oauth-known"));
+        assert!(!contents.contains("private words"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

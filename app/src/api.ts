@@ -1,8 +1,10 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
-import type { JobResults, JobSummary, LoopOverview, PreflightResult, SaveClipEditsInput, SetupState, SyncSummary } from './types'
+import type { JobResults, JobSummary, LoopOverview, PreflightResult, PrivacySummary, SaveClipEditsInput, SetupState, SyncSummary } from './types'
 
 export const api = {
   preflight: (llm: string) => invoke<PreflightResult>('preflight', { llm }),
+  privacySummary: (llm: string) => invoke<PrivacySummary>('privacy_summary', { llm }),
+  generateSupportBundle: (jobId?: string) => invoke<string>('generate_support_bundle', { jobId }),
   runJob: (source: string, llm: string, captions: string) =>
     invoke<void>('run_job', { source, llm, captions }),
   resumeJob: (jobId: string, llm?: string, captions?: string, camera?: string) =>

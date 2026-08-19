@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
-import type { JobSummary } from '../types'
+import { api } from '../api'
+import type { JobSummary, PrivacySummary } from '../types'
 import KeyModal from './KeyModal'
 
 const STAGE_ORDER = [
@@ -40,6 +41,8 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
   const [llm, setLlm] = useState('gemini')
   const [captions, setCaptions] = useState('classic')
   const [showKey, setShowKey] = useState(false)
+  const [privacy, setPrivacy] = useState<PrivacySummary | null>(null)
+  const [supportMessage, setSupportMessage] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
@@ -51,6 +54,24 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
 
   const elapsed = startedAt ? Math.max(0, Math.floor((now - startedAt) / 1000)) : 0
   const elapsedLabel = `${String(Math.floor(elapsed / 60)).padStart(2, '0')}:${String(elapsed % 60).padStart(2, '0')}`
+
+  async function showPrivacy() {
+    try {
+      setPrivacy(await api.privacySummary(llm))
+    } catch (error) {
+      setSupportMessage(`Privacy summary unavailable: ${String(error)}`)
+    }
+  }
+
+  async function makeSupportBundle() {
+    setSupportMessage('Generating a redacted support bundle…')
+    try {
+      const path = await api.generateSupportBundle()
+      setSupportMessage(`Support bundle saved locally: ${path}`)
+    } catch (error) {
+      setSupportMessage(`Support bundle failed: ${String(error)}`)
+    }
+  }
 
   async function chooseFile() {
     const selected = await open({
@@ -72,6 +93,23 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
     <div className="studio">
       <div className="grain" />
       {showKey && <KeyModal onClose={() => setShowKey(false)} />}
+      {privacy && (
+        <div className="modal-scrim" onClick={() => setPrivacy(null)}>
+          <div className="modal privacy-modal" role="dialog" aria-modal="true" aria-labelledby="privacy-title" onClick={(event) => event.stopPropagation()}>
+            <header className="modal-head">
+              <p id="privacy-title" className="audit-kicker">PRIVACY ACTIVITY</p>
+              <button className="btn-ghost" onClick={() => setPrivacy(null)}>close</button>
+            </header>
+            <p className="ig-intro">ClipGauge is local-first, but this mode still performs the network operations listed below. Telemetry is {privacy.telemetry}.</p>
+            <p className="audit-label">LEAVES THIS DEVICE</p>
+            <ul className="privacy-list">{privacy.llm.network.map((item) => <li key={item}>{item}</li>)}</ul>
+            <p className="audit-label">STAYS LOCAL</p>
+            <ul className="privacy-list">{privacy.llm.device.map((item) => <li key={item}>{item}</li>)}</ul>
+            <p className="ig-message">{privacy.llm.provider}</p>
+            <p className="ig-message">{privacy.instagram}</p>
+          </div>
+        </div>
+      )}
       <aside className="rail">
         <header className="rail-brand">
           <span className="rail-logo">publikclip</span>
@@ -90,7 +128,9 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
             >
               <span className={`led ${job.rendered ? 'led-on' : 'led-half'}`} />
               <span className="rail-job-title">{job.title ?? job.id}</span>
-              <span className="rail-job-hint">{job.rendered ? 'open' : 'resume'}</span>
+              <span className="rail-job-hint">
+                {job.rendered ? 'open' : job.resume_safe === false ? 'inspect' : `resume${job.last_stage ? ` · ${job.last_stage}` : ''}`}
+              </span>
             </button>
           ))}
         </div>
@@ -100,6 +140,12 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
           </button>
           <button className="btn-ghost" onClick={onOpenLoop}>
             ⟳ instagram loop
+          </button>
+          <button className="btn-ghost" onClick={showPrivacy}>
+            privacy activity
+          </button>
+          <button className="btn-ghost" onClick={makeSupportBundle}>
+            support bundle
           </button>
         </footer>
       </aside>
@@ -213,6 +259,12 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
           <section className="status-block" role="status">
             <span className="led led-half" />
             {notice}
+          </section>
+        )}
+        {supportMessage && (
+          <section className="status-block" role="status">
+            <span className="led led-half" />
+            {supportMessage}
           </section>
         )}
         {error && (

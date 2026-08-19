@@ -49,9 +49,9 @@ export default function IgModal({ onClose }: Props) {
 
   return (
     <div className="modal-scrim" onClick={onClose}>
-      <div className="modal ig-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal ig-modal" role="dialog" aria-modal="true" aria-labelledby="ig-modal-title" onClick={(e) => e.stopPropagation()}>
         <header className="modal-head">
-          <p className="audit-kicker">THE FEEDBACK LOOP</p>
+          <p id="ig-modal-title" className="audit-kicker">THE FEEDBACK LOOP</p>
           <button className="btn-ghost" onClick={onClose}>close ✕</button>
         </header>
 

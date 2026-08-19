@@ -32,6 +32,28 @@ export interface MusicBrief {
   alternatives: { genre: string; mood: string; bpm_range: string }[]
 }
 
+export interface ClipLedger {
+  score: number
+  composition: {
+    subscores: Record<string, number>
+    curve_score: number
+    arousal_pct: number
+    heatmap_pct: number | null
+    visual_evidence: boolean
+  }
+  platform_scores: Record<string, number>
+  adjustments: Adjustment[]
+  signals_fired: string[]
+  signals_missing: string[]
+  provenance: {
+    llm_mode: string
+    model: string
+    scoring_config_version: number
+    arousal_source: string
+    visual_pass: boolean
+  }
+}
+
 export interface Clip {
   start: number
   end: number
@@ -49,6 +71,7 @@ export interface Clip {
   curve_score: number
   music: MusicBrief | null
   t1_raw?: Record<string, unknown>
+  ledger?: ClipLedger
 }
 
 export type ArtifactStatus =
@@ -117,6 +140,9 @@ export interface JobSummary {
   title: string | null
   ingested: boolean
   rendered: boolean
+  lifecycle_state?: string
+  last_stage?: string | null
+  resume_safe?: boolean
 }
 
 export interface PreflightCheck {
@@ -125,6 +151,19 @@ export interface PreflightCheck {
   message: string
   remediation?: string
   details?: Record<string, unknown>
+}
+
+export interface PrivacySummary {
+  local_first: boolean
+  telemetry: string
+  llm: {
+    mode: string
+    device: string[]
+    network: string[]
+    provider: string
+  }
+  instagram: string
+  source: string
 }
 
 export interface PreflightResult {

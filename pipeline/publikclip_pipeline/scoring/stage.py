@@ -209,6 +209,27 @@ class ScoreStage(Stage):
             entry["signals_fired"] = fired
             entry["signals_missing"] = missing
             entry["confidence"] = "standard" if client.backend == "gemini" else "local-estimate"
+            entry["ledger"] = {
+                "score": entry["score"],
+                "composition": {
+                    "subscores": entry["subscores"],
+                    "curve_score": entry["curve_score"],
+                    "arousal_pct": entry["arousal_pct"],
+                    "heatmap_pct": entry["heatmap_pct"],
+                    "visual_evidence": visual is not None,
+                },
+                "platform_scores": entry["platform_scores"],
+                "adjustments": entry["adjustments"],
+                "signals_fired": fired,
+                "signals_missing": missing,
+                "provenance": {
+                    "llm_mode": llm_mode,
+                    "model": client.model,
+                    "scoring_config_version": scoring_config["version"],
+                    "arousal_source": arousal_source,
+                    "visual_pass": supports_vision,
+                },
+            }
 
             prior_mood = music_brief.mood_prior(window_events, entry["arousal_pct"])
             try:

@@ -1041,3 +1041,16 @@ input:disabled {
     flex-basis: 100%;
   }
 }
+
+.privacy-list {
+  margin: 0 0 18px;
+  padding-left: 20px;
+  color: var(--dim);
+  line-height: 1.65;
+}
+.privacy-list li::marker {
+  color: var(--amber);
+}
+.privacy-modal {
+  max-width: 640px;
+}
