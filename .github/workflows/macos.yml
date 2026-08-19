@@ -56,6 +56,7 @@ jobs:
 
       - name: Install deterministic media prerequisite
         run: |
+          brew untap aws/tap || true
           brew install ffmpeg-full
           if [ -x /opt/homebrew/opt/ffmpeg-full/bin/ffmpeg ]; then
             echo "CLIPGAUGE_FFMPEG=/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg" >> "$GITHUB_ENV"
