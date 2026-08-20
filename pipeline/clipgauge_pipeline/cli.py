@@ -13,6 +13,7 @@ import sys
 
 from . import config, protocol
 from .jobs import queue
+from .scoring import providers as providers_mod
 
 
 def _stages() -> list[queue.Stage]:
@@ -81,15 +82,34 @@ def _preflight_terminal(jsonl: bool, job_id: str | None, code: str, message: str
     return 2
 
 
+def _profile_from_args(args: argparse.Namespace) -> providers_mod.ProviderProfile:
+    kind = args.provider or args.llm or "gemini"
+    return providers_mod.preset_profile(kind, model=args.model, endpoint=args.endpoint)
+
+
+def _apply_profile(settings: config.Settings, profile: providers_mod.ProviderProfile) -> None:
+    settings.llm_mode = profile.kind
+    settings.provider_profile_id = profile.id
+    settings.provider_kind = profile.kind
+    settings.provider_model = profile.model
+    settings.provider_endpoint_identity = profile.endpoint_identity
+    settings.provider_capabilities = profile.capabilities.to_dict()
+    settings.provider_auth_strategy = profile.auth_strategy
+    settings.provider_locality = profile.locality
+    settings.provider_metadata = dict(profile.metadata)
+    settings.provider_schema_version = profile.schema_version
+
+
 def cmd_preflight(args: argparse.Namespace) -> int:
     from . import preflight
 
     try:
-        payload = preflight.run(args.llm or "gemini")
+        profile = _profile_from_args(args)
+        payload = preflight.run(profile)
     except Exception as err:  # noqa: BLE001 — preflight must return an actionable JSON result
         payload = {
             "state": "blocked",
-            "selected_llm": args.llm or "gemini",
+            "selected_llm": args.provider or args.llm or "gemini",
             "checks": [{"name": "preflight", "state": "blocked", "message": protocol.safe_message(str(err)), "remediation": "Repair the local installation and retry."}],
         }
     print(json.dumps(payload), flush=True)
@@ -100,8 +120,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     source = args.source
     source_type = "url" if source.startswith(("http://", "https://")) else "file"
     settings = config.Settings()
-    if args.llm:
-        settings.llm_mode = args.llm
+    try:
+        _apply_profile(settings, _profile_from_args(args))
+    except Exception as err:  # noqa: BLE001 — profile validation is a pre-job boundary
+        return _preflight_terminal(args.jsonl, None, "PROVIDER_PROFILE_INVALID", protocol.safe_message(str(err)), False)
     if args.captions:
         settings.caption_preset = args.captions
     if args.camera:
@@ -117,10 +139,13 @@ def cmd_resume(args: argparse.Namespace) -> int:
     job = queue.get_job(args.job_id)
     if job is None:
         return _preflight_terminal(args.jsonl, args.job_id, "JOB_NOT_FOUND", "The requested job could not be found in the managed job store.")
-    if args.llm or args.captions or args.camera:
+    if args.llm or args.provider or args.model or args.endpoint or args.captions or args.camera:
         settings = config.Settings.from_json(json.loads(job.settings_json))
-        if args.llm:
-            settings.llm_mode = args.llm
+        if args.llm or args.provider or args.model or args.endpoint:
+            try:
+                _apply_profile(settings, _profile_from_args(args))
+            except Exception as err:  # noqa: BLE001
+                return _preflight_terminal(args.jsonl, args.job_id, "PROVIDER_PROFILE_INVALID", protocol.safe_message(str(err)), False)
         if args.captions:
             settings.caption_preset = args.captions
         if args.camera:
@@ -376,19 +401,28 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_preflight = sub.add_parser("preflight", help="check local runtime readiness")
-    p_preflight.add_argument("--llm", choices=["gemini", "ollama"], default=None)
+    p_preflight.add_argument("--llm", choices=["gemini", "ollama"], default=None, help=argparse.SUPPRESS)
+    p_preflight.add_argument("--provider", default=None, help="provider preset or custom kind")
+    p_preflight.add_argument("--model", default=None, help="provider model identifier")
+    p_preflight.add_argument("--endpoint", default=None, help="custom provider base URL")
     p_preflight.set_defaults(fn=cmd_preflight)
 
     p_run = sub.add_parser("run", help="process a YouTube URL or local video file")
     p_run.add_argument("source")
-    p_run.add_argument("--llm", choices=["gemini", "ollama"], default=None)
+    p_run.add_argument("--llm", choices=["gemini", "ollama"], default=None, help=argparse.SUPPRESS)
+    p_run.add_argument("--provider", default=None, help="provider preset or custom kind")
+    p_run.add_argument("--model", default=None, help="provider model identifier")
+    p_run.add_argument("--endpoint", default=None, help="custom provider base URL")
     p_run.add_argument("--captions", default=None, help="caption preset name")
     p_run.add_argument("--camera", choices=["cut", "pan", "locked"], default=None)
     p_run.set_defaults(fn=cmd_run)
 
     p_resume = sub.add_parser("resume", help="resume a job from its checkpoints")
     p_resume.add_argument("job_id")
-    p_resume.add_argument("--llm", choices=["gemini", "ollama"], default=None)
+    p_resume.add_argument("--llm", choices=["gemini", "ollama"], default=None, help=argparse.SUPPRESS)
+    p_resume.add_argument("--provider", default=None, help="provider preset or custom kind")
+    p_resume.add_argument("--model", default=None, help="provider model identifier")
+    p_resume.add_argument("--endpoint", default=None, help="custom provider base URL")
     p_resume.add_argument("--captions", default=None, help="caption preset name")
     p_resume.add_argument("--camera", choices=["cut", "pan", "locked"], default=None)
     p_resume.set_defaults(fn=cmd_resume)

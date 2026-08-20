@@ -112,6 +112,9 @@ class Settings:
     provider_model: str | None = None
     provider_endpoint_identity: str | None = None
     provider_capabilities: dict[str, Any] = field(default_factory=dict)
+    provider_auth_strategy: str = "none"
+    provider_locality: str = "cloud"
+    provider_metadata: dict[str, Any] = field(default_factory=dict)
     provider_schema_version: int = 0
     caption_preset: str = "classic"
     laughter_specialist: bool = False
@@ -125,6 +128,9 @@ class Settings:
                 "model": self.provider_model,
                 "endpoint_identity": self.provider_endpoint_identity or "",
                 "capabilities": dict(self.provider_capabilities),
+                "auth_strategy": self.provider_auth_strategy,
+                "locality": self.provider_locality,
+                "metadata": dict(self.provider_metadata),
             }
         return _legacy_provider_snapshot(self.llm_mode, self.provider_model)
 
@@ -142,6 +148,9 @@ class Settings:
             "provider_model": snapshot["model"],
             "provider_endpoint_identity": snapshot["endpoint_identity"],
             "provider_capabilities": dict(snapshot.get("capabilities", {})),
+            "provider_auth_strategy": snapshot.get("auth_strategy", "none"),
+            "provider_locality": snapshot.get("locality", "cloud"),
+            "provider_metadata": dict(snapshot.get("metadata", {})),
             "provider_schema_version": int(snapshot.get("schema_version", 1)),
             "caption_preset": self.caption_preset,
             "laughter_specialist": self.laughter_specialist,
@@ -174,6 +183,9 @@ class Settings:
             provider_model=str(snapshot["model"]),
             provider_endpoint_identity=str(snapshot.get("endpoint_identity", "")),
             provider_capabilities=dict(snapshot.get("capabilities", {})),
+            provider_auth_strategy=str(snapshot.get("auth_strategy", "none")),
+            provider_locality=str(snapshot.get("locality", "cloud")),
+            provider_metadata=dict(snapshot.get("metadata", {})),
             provider_schema_version=int(snapshot.get("schema_version", 1)),
             caption_preset=data.get("caption_preset", "classic"),
             laughter_specialist=data.get("laughter_specialist", False),

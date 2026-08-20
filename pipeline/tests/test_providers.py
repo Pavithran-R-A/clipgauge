@@ -9,6 +9,11 @@ from clipgauge_pipeline import config
 from clipgauge_pipeline.scoring import providers
 
 
+@pytest.fixture(autouse=True)
+def isolated_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLIPGAUGE_HOME", str(tmp_path / ".clipgauge"))
+
+
 def profile(kind: str = "custom", **overrides) -> providers.ProviderProfile:
     values = {
         "schema_version": 1,

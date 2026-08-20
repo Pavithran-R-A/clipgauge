@@ -14,6 +14,7 @@ from . import config, protocol, runtime
 from .ingest import ytdlp
 from .models import registry, specs  # noqa: F401 - register concrete models
 from .render import ffmpeg_bin
+from .scoring import providers as providers_mod
 
 MANIFEST = Path(__file__).resolve().parents[1] / "runtime-manifest.json"
 MIN_FREE_BYTES = 1 * 1024 * 1024 * 1024
@@ -105,7 +106,48 @@ def _ollama(checks: list[dict], selected: str) -> None:
         _check(checks, "ollama", "blocked", "Ollama is stopped or unavailable on loopback.", "Start Ollama locally or switch the run to Gemini mode.")
 
 
-def run(selected_llm: str = "gemini") -> dict:
+def _provider(checks: list[dict], profile: providers_mod.ProviderProfile) -> None:
+    if not profile.enabled:
+        _check(checks, "provider", "blocked", "The selected provider profile is disabled.", "Enable the profile in Settings.", provider=profile.kind)
+        return
+    if profile.auth_strategy != "none" and not providers_mod.secret_from_environment(profile):
+        _check(
+            checks,
+            "provider-credential",
+            "blocked",
+            f"No credential is available for {profile.display_name}.",
+            "Save the provider credential in Settings or choose a local provider.",
+            provider=profile.kind,
+        )
+        return
+    if profile.kind == "ollama":
+        try:
+            response = httpx.get(profile.endpoint_identity.rstrip("/") + "/api/tags", timeout=3.0)
+            if len(response.content) > 1024 * 1024:
+                raise ValueError("health response exceeded 1 MiB")
+            response.raise_for_status()
+            models = [item.get("name") for item in response.json().get("models", []) if item.get("name")]
+            if not models:
+                _check(checks, "provider", "blocked", "Ollama is running but has no local models.", "Start Ollama and pull a supported model, then retry.", provider=profile.kind, models=[])
+            else:
+                _check(checks, "provider", "ready", "Ollama is running with local models.", provider=profile.kind, models=models)
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            _check(checks, "provider", "blocked", "Ollama is stopped or unavailable on loopback.", "Start Ollama locally or choose another provider.", provider=profile.kind)
+        return
+    _check(
+        checks,
+        "provider",
+        "ready" if profile.locality == "local" else "warning",
+        f"{profile.display_name} is configured for this operation.",
+        "Run Test Connection to verify the selected model and capabilities." if profile.locality != "local" else None,
+        provider=profile.kind,
+        model=profile.model,
+        endpoint=profile.endpoint_identity,
+        capabilities=profile.capabilities.to_dict(),
+    )
+
+
+def run(selected_llm: providers_mod.ProviderProfile | str = "gemini") -> dict:
     checks: list[dict] = []
     system = platform.system()
     machine = platform.machine()
@@ -127,9 +169,20 @@ def run(selected_llm: str = "gemini") -> dict:
     except runtime.RuntimeIntegrityError as error:
         _check(checks, "runtime-manifest", "blocked", str(error), "Repair or reinstall the signed application bundle.")
     _ffmpeg(checks)
-    if selected_llm == "gemini":
-        _check(checks, "gemini", "ready" if os.environ.get("CLIPGAUGE_GEMINI_API_KEY") else "blocked", "Gemini credential is available for this operation." if os.environ.get("CLIPGAUGE_GEMINI_API_KEY") else "No Gemini credential is available to this operation.", "Save a Gemini key in Settings or choose Ollama mode.")
-    _ollama(checks, selected_llm)
+    profile = providers_mod.legacy_profile(selected_llm) if isinstance(selected_llm, str) else selected_llm
+    _provider(checks, profile)
     states = {item["state"] for item in checks}
     overall = "blocked" if "blocked" in states else "warning" if "warning" in states else "ready"
-    return {"state": overall, "checks": checks, "selected_llm": selected_llm}
+    return {
+        "state": overall,
+        "checks": checks,
+        "selected_llm": profile.kind,
+        "provider": {
+            "id": profile.id,
+            "kind": profile.kind,
+            "model": profile.model,
+            "endpoint_identity": profile.endpoint_identity,
+            "capabilities": profile.capabilities.to_dict(),
+            "locality": profile.locality,
+        },
+    }

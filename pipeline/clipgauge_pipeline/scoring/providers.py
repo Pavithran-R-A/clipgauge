@@ -297,13 +297,14 @@ class ProviderAdapter:
             try:
                 data = json.loads(cache_file.read_text())
                 validate_json_schema(data, request.schema)
+                degraded = ["vision_unavailable"] if request.images and self.profile.capabilities.vision is False else []
                 result = InferenceResult(
                     data=data,
                     provider_profile_id=self.profile.id,
                     provider_kind=self.profile.kind,
                     model=self.model,
-                    capabilities_used={"cache": True},
-                    degraded_signals=[],
+                    capabilities_used={"cache": True, "vision": bool(request.images) and self.profile.capabilities.vision is True},
+                    degraded_signals=degraded,
                     structured_level=self.structured_level(),
                     latency_ms=0,
                     cache_hit=True,
@@ -770,6 +771,71 @@ def profile_from_snapshot(snapshot: dict[str, Any]) -> ProviderProfile:
         enabled=bool(snapshot.get("enabled", True)),
         timeout_seconds=float(snapshot.get("timeout_seconds", defaults.timeout_seconds)),
         metadata=dict(snapshot.get("metadata") or {}),
+    )
+
+
+def preset_profile(
+    kind: str,
+    *,
+    model: str | None = None,
+    endpoint: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> ProviderProfile:
+    kind = kind.strip().lower()
+    if kind in {"gemini", "ollama"}:
+        base = legacy_profile(kind, model)
+        if endpoint or metadata:
+            return ProviderProfile(
+                schema_version=base.schema_version,
+                id=base.id,
+                kind=base.kind,
+                display_name=base.display_name,
+                base_url=endpoint or base.base_url,
+                model=model or base.model,
+                auth_strategy=base.auth_strategy,
+                secret_ref=base.secret_ref,
+                capabilities=base.capabilities,
+                locality=base.locality,
+                metadata=metadata or {},
+            )
+        return base
+    defaults: dict[str, tuple[str, str, str]] = {
+        "openrouter": ("OpenRouter", "https://openrouter.ai/api/v1", "openrouter/free"),
+        "groq": ("Groq", "https://api.groq.com/openai/v1", "openai/gpt-oss-20b"),
+        "cloudflare": ("Cloudflare Workers AI", "", "@cf/meta/llama-3.1-8b-instruct"),
+        "huggingface": ("Hugging Face", "https://router.huggingface.co/v1", "Qwen/Qwen3-32B"),
+        "cerebras": ("Cerebras", "https://api.cerebras.ai/v1", "gpt-oss-120b"),
+        "custom": ("Custom OpenAI-compatible", "", ""),
+    }
+    if kind not in defaults:
+        raise ValueError(f"unknown provider kind: {kind}")
+    display, default_endpoint, default_model = defaults[kind]
+    selected_endpoint = endpoint or default_endpoint
+    if not selected_endpoint:
+        raise ValueError(f"provider {kind} requires an explicit endpoint")
+    selected_model = model or default_model
+    if not selected_model:
+        raise ValueError(f"provider {kind} requires a model")
+    caps = CapabilitySet(
+        structured_json=None,
+        json_schema=None,
+        vision=None,
+        model_listing=True,
+        local=False,
+        cloud=True,
+    )
+    return ProviderProfile(
+        schema_version=1,
+        id=f"preset-{kind}",
+        kind=kind,
+        display_name=display,
+        base_url=selected_endpoint,
+        model=selected_model,
+        auth_strategy="bearer",
+        secret_ref=f"provider:{kind}",
+        capabilities=caps,
+        locality="cloud",
+        metadata=metadata or {},
     )
 
 
