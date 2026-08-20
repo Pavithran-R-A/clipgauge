@@ -1,8 +1,8 @@
-# ClipGauge v0.2.0 — Pre-Release Human-Readable Audit
+# ClipGauge v0.2.0 — Release Audit
 
 **Audit date:** 2026-08-20 (user timezone, GMT+5:30)  
 **Product:** ClipGauge v0.2.0 — Universal AI Providers  
-**Audit status:** Conditional pass pending mandatory GitHub CI, merge, tag, packaging, and publication verification.  
+**Audit status:** PASS after mandatory CI, merge, exact-tag publication, artifact verification, and manual live-smoke skip verification.
 **Policy:** This audit records only evidence available in the repository or from commands executed in this workspace. It does not claim live provider success, platform signing, notarization, benchmarks, or unobserved CI results.
 
 ## Source
@@ -10,14 +10,14 @@
 | Field | Evidence |
 |---|---|
 | Starting main SHA | `bd36ea2` — merged v0.1.1 closure state |
-| Current audited ending SHA | `c487b97` — feature branch, including workflow version-awareness fixes |
+| Current audited ending SHA | `396fd9b` — main after release-workflow-only post-tag fixes; immutable v0.2.0 source tag peels to `cf67df9` |
 | Branch | `feature/v0.2-universal-providers` |
-| Pull request | [PR #5](https://github.com/Pavithran-R-A/clipgauge/pull/5) |
+| Pull request | [PR #5](https://github.com/Pavithran-R-A/clipgauge/pull/5), merged at `cf67df9` |
 | Origin remote | `https://github.com/Pavithran-R-A/clipgauge.git` |
 | Upstream remote | `https://github.com/Blueturboguy07/publikclip.git`, preserved |
-| Prior tags | `v0.1.0` and `v0.1.1` are not modified by this work |
+| Prior tags | `v0.1.0` and `v0.1.1` remain present and were not modified |
 
-The feature branch preserves real commit history and does not squash the prior provider architecture, core, adapter, desktop integration, and release-preparation commits. No API keys, tokens, keychain contents, user media, model weights, or diagnostic material containing private content are included in the audited source changes.
+The feature branch preserves real commit history and does not squash the prior provider architecture, core, adapter, desktop integration, and release-preparation commits. The merge commit is `cf67df92e34c7ba0bec7b6ce3c69bc32deaa4ca5`, and the annotated tag `v0.2.0` peels to that merge commit. Post-tag main commits only repair release workflow behavior; they do not alter the tagged application source. No API keys, tokens, keychain contents, user media, model weights, or diagnostic material containing private content are included in the audited source changes.
 
 ## Provider architecture
 
@@ -97,13 +97,19 @@ The deterministic QA gate covers the Python pipeline, provider failures, image t
 | Rust formatting | **Passed** |
 | Version consistency | **Passed**, all authoritative current-release sources report 0.2.0 |
 | Provider contract tests | Included in the Python count; 13 deterministic provider-contract tests are documented, with the committed suite containing the expanded coverage |
-| Live provider smoke | **SKIPPED / not claimed** in this audit; manual-only workflow is configured and no owner secrets were supplied |
+| Live provider smoke | **SKIPPED** for Gemini, OpenRouter, Groq, Cloudflare, Hugging Face, and Cerebras in manual run `32390046216`; the workflow logged that credentials were not fully configured and performed no live inference |
 
 ## Platforms
 
-Linux, Windows, macOS ARM, and macOS Intel qualification workflows are configured in the repository. At this pre-release audit point, their remote GitHub results are pending PR execution and are not fabricated. The release workflow now derives tag validation and release notes from the requested release tag, and the macOS bundle assertion derives its expected version from `app/package.json`.
+Linux, Windows, macOS ARM, and macOS Intel qualification workflows are configured in the repository. PR #5 completed with 12 successful checks, including duplicate push/PR CI gates, secret scans, version checks, and both macOS targets. Release run `32388103901` completed successfully: Linux, Windows, macOS ARM, macOS Intel, metadata, and publication all passed. The release workflow derives tag validation and release notes from the requested release tag, and the macOS bundle assertion derives its expected version from `app/package.json`.
 
-Linux release artifacts are intended to be unsigned Debian packages. The Windows NSIS installer is unsigned and SmartScreen warnings are expected. macOS builds are qualification results only; no signing or notarization is claimed.
+Linux release artifacts are unsigned Debian packages. The Windows NSIS installer is unsigned and SmartScreen warnings are expected. macOS builds are qualification results only; no signing or notarization is claimed.
+
+## Publication evidence
+
+The public release is [ClipGauge v0.2.0](https://github.com/Pavithran-R-A/clipgauge/releases/tag/v0.2.0), published at `2026-08-20T16:02:07Z` as a non-draft, non-prerelease release. It contains six assets: `ClipGauge_0.2.0_amd64.deb`, `ClipGauge_0.2.0_Windows_x64_NSIS.exe`, `SHA256SUMS`, `SBOM.cyclonedx.json`, `RELEASE_PROVENANCE.md`, and `ATTESTATION_STATUS.md`. The downloaded checksum manifest validated every listed asset with `sha256sum -c`; the downloaded SBOM parsed as CycloneDX JSON with an array of components.
+
+`RELEASE_PROVENANCE.md` records the repository, tag, peeled source commit, workflow run `32388103901`, SBOM scope, and non-signing limitations. `ATTESTATION_STATUS.md` says build provenance attestation was generated by GitHub Actions for the release subjects. It does not claim platform code signing, notarization, or a cryptographic signature. The release notes were post-publication verified and corrected so literal Markdown asset filenames are preserved.
 
 ## Known limitations
 
@@ -111,4 +117,4 @@ Cloud provider quotas, pricing, model catalogs, routing, retention policies, and
 
 ## Verdict
 
-**CONDITIONAL PASS — non-security, pre-release.** All local deterministic gates pass, the provider architecture and security controls are implemented, the version and documentation batch is committed, and PR #5 is open. Release remains blocked until mandatory PR CI is green, the pull request is merged without bypassing red checks, the exact `v0.2.0` tag is created from merged main, the release workflow completes, published artifacts are downloaded and verified, and the post-release bundle is generated. No live provider success is claimed in the interim.
+**PASS.** All local deterministic gates pass; PR #5 merged after 12 successful checks; the exact annotated `v0.2.0` tag points to the merged source; the release workflow completed successfully; the six published assets were downloaded and checksum-verified; the SBOM, provenance, and attestation-status artifacts were inspected; and the manual live smoke recorded explicit `SKIPPED` results for all six configured cloud providers because owner credentials were absent. ClipGauge v0.2.0 is ready for external creator testing with the unsigned-artifact, mutable-provider-access, model-dependent-capability, and no-live-credential limitations documented above.
