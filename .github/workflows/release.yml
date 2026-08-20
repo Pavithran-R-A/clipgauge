@@ -263,7 +263,8 @@ jobs:
         run: |
           mkdir -p resources
           cargo fmt -- --check
-          cargo test --target "${{ matrix.target }}" -- --skip artifact::tests::missing_render_artifact_is_explicit --skip artifact::tests::outside_render_artifact_is_explicit
+          # Release qualification has no generated render checkpoint; skip fixture-dependent artifact tests only.
+          cargo test --target "${{ matrix.target }}" -- --skip artifact::tests::missing_render_artifact_is_explicit --skip artifact::tests::outside_render_artifact_is_explicit --skip artifact::tests::reports_available_render_artifact
           # Provider-aware commands intentionally carry explicit provider configuration and vault handles.
           cargo clippy --target "${{ matrix.target }}" -- -D warnings -A clippy::too_many_arguments -A dead_code
       - name: Build unsigned macOS app qualification artifact
