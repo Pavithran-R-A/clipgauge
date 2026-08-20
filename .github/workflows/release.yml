@@ -364,7 +364,7 @@ jobs:
           - Linux amd64 Debian and Windows x64 NSIS artifacts are unsigned.
           - Native macOS ARM and Intel builds are qualification results; no signing or notarization is claimed.
           - The CycloneDX SBOM is generated from the ${RELEASE_TAG} tag and validated against its peeled source commit.
-          - `SHA256SUMS`, `RELEASE_PROVENANCE.md`, and `ATTESTATION_STATUS.md` describe the exact attached assets and distinguish checksums, metadata, GitHub attestations, and platform signing.
+          - \`SHA256SUMS\`, \`RELEASE_PROVENANCE.md\`, and \`ATTESTATION_STATUS.md\` describe the exact attached assets and distinguish checksums, metadata, GitHub attestations, and platform signing.
           - AGPL-3.0-or-later licensing and upstream publikclip attribution remain preserved.
           EOF
       - name: Generate checksums from exact final release assets
