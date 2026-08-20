@@ -36,7 +36,7 @@ jobs:
           tag_version="${RELEASE_TAG#v}"
           manifest_version=$(python3 -c 'import json; print(json.load(open("app/package.json"))["version"])')
           test "$RELEASE_TAG" = "v${manifest_version}"
-          test "$tag_version" = "0.1.1"
+          test "$tag_version" = "$manifest_version"
       - name: Run version consistency check
         run: python3 scripts/check-version-consistency.py
 
@@ -351,14 +351,16 @@ jobs:
       - name: Generate release notes
         working-directory: release-assets
         run: |
-          cat > RELEASE_NOTES.md <<'EOF'
-          ## ClipGauge v0.1.1
+          cat > RELEASE_NOTES.md <<EOF
+          ## ClipGauge ${RELEASE_TAG}
 
-          This is a release-engineering closure release. It does not rewrite the analytical pipeline.
+          ClipGauge ${RELEASE_TAG} adds universal AI-provider support while preserving the local-first desktop pipeline.
 
+          - Ollama and LM Studio are first-class local options; custom OpenAI-compatible endpoints are supported.
+          - Curated cloud presets are capability-aware and require explicit user selection; no automatic cross-provider failover is enabled.
           - Linux amd64 Debian and Windows x64 NSIS artifacts are unsigned.
           - Native macOS ARM and Intel builds are qualification results; no signing or notarization is claimed.
-          - The CycloneDX SBOM is generated from the v0.1.1 tag and validated against its peeled source commit.
+          - The CycloneDX SBOM is generated from the ${RELEASE_TAG} tag and validated against its peeled source commit.
           - `SHA256SUMS`, `RELEASE_PROVENANCE.md`, and `ATTESTATION_STATUS.md` describe the exact attached assets and distinguish checksums, metadata, GitHub attestations, and platform signing.
           - AGPL-3.0-or-later licensing and upstream publikclip attribution remain preserved.
           EOF

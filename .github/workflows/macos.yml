@@ -129,7 +129,8 @@ jobs:
           plist="$app_bundle/Contents/Info.plist"
           test -f "$plist"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = "io.github.pavithranra.clipgauge"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "0.1.1"
+          expected_version=$(node -p "require('./app/package.json').version")
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "$expected_version"
           executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")
           test -x "$app_bundle/Contents/MacOS/$executable"
           find "$app_bundle/Contents/Resources" -path '*clipgauge_pipeline*' -print -quit | grep .
