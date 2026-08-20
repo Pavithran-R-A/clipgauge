@@ -1,28 +1,34 @@
-import { invoke } from '@tauri-apps/api/core'
-import { convertFileSrc } from '@tauri-apps/api/core'
+import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import type { JobResults, JobSummary, LoopOverview, PreflightResult, PrivacySummary, SaveClipEditsInput, SetupState, SyncSummary, ProviderTestResult } from './types'
 
 function legacyMode(provider: string): string | undefined {
   return provider === 'gemini' || provider === 'ollama' ? provider : undefined
 }
 
+type ProviderOptions = {
+  model?: string
+  endpoint?: string
+  auth?: string
+  secretHeader?: string
+}
+
 export const api = {
-  preflight: (provider: string, model?: string, endpoint?: string) =>
-    invoke<PreflightResult>('preflight', { llm: legacyMode(provider), provider, model, endpoint }),
+  preflight: (provider: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
+    invoke<PreflightResult>('preflight', { llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader }),
   privacySummary: (provider: string, model?: string, endpoint?: string) =>
     invoke<PrivacySummary>('privacy_summary', { llm: legacyMode(provider), provider, model, endpoint }),
   generateSupportBundle: (jobId?: string) => invoke<string>('generate_support_bundle', { jobId }),
-  runJob: (source: string, provider: string, captions: string, model?: string, endpoint?: string) =>
-    invoke<void>('run_job', { source, llm: legacyMode(provider), provider, model, endpoint, captions }),
-  resumeJob: (jobId: string, provider?: string, captions?: string, camera?: string, model?: string, endpoint?: string) =>
-    invoke<void>('resume_job', { jobId, llm: provider ? legacyMode(provider) : undefined, provider, model, endpoint, captions, camera }),
-  testConnection: (provider: string, model?: string, endpoint?: string) =>
-    invoke<ProviderTestResult>('test_connection', { llm: legacyMode(provider), provider, model, endpoint }),
+  runJob: (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
+    invoke<void>('run_job', { source, llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader, captions }),
+  resumeJob: (jobId: string, provider?: string, captions?: string, camera?: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
+    invoke<void>('resume_job', { jobId, llm: provider ? legacyMode(provider) : undefined, provider, model, endpoint, auth, secret_header: secretHeader, captions, camera }),
+  testConnection: (provider: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
+    invoke<ProviderTestResult>('test_connection', { llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader }),
+  saveProviderKey: (profileId: string, key: string) => invoke<boolean>('save_provider_key', { profileId, key }),
   cancelJob: (jobId: string) => invoke<void>('cancel_job', { jobId }),
   jobResults: (jobId: string) => invoke<JobResults>('job_results', { jobId }),
   listJobs: () => invoke<JobSummary[]>('list_job_dirs'),
   saveGeminiKey: (key: string) => invoke<boolean>('save_gemini_key', { key }),
-  saveProviderKey: (profileId: string, key: string) => invoke<boolean>('save_provider_key', { profileId, key }),
   setupState: () => invoke<SetupState>('get_setup_state'),
   markOnboarded: () => invoke<void>('mark_onboarded'),
   checkOllama: () => invoke<{ state: 'service-stopped' | 'model-missing' | 'service-healthy'; running: boolean; models: string[]; message?: string }>('check_ollama'),
@@ -37,3 +43,5 @@ export const api = {
   igReject: (mediaId: string, jobId: string, clip: number) => invoke<{ ok: boolean }>('ig_tool', { args: ['reject', mediaId, jobId, String(clip)] }),
   fileUrl: (path: string) => convertFileSrc(path)
 }
+
+export type { ProviderOptions }

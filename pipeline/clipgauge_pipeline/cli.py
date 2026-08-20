@@ -84,7 +84,13 @@ def _preflight_terminal(jsonl: bool, job_id: str | None, code: str, message: str
 
 def _profile_from_args(args: argparse.Namespace) -> providers_mod.ProviderProfile:
     kind = args.provider or args.llm or "gemini"
-    return providers_mod.preset_profile(kind, model=args.model, endpoint=args.endpoint)
+    return providers_mod.preset_profile(
+        kind,
+        model=args.model,
+        endpoint=args.endpoint,
+        auth_strategy=args.auth,
+        secret_header_name=args.secret_header,
+    )
 
 
 def _apply_profile(settings: config.Settings, profile: providers_mod.ProviderProfile) -> None:
@@ -285,7 +291,8 @@ def cmd_edit(args: argparse.Namespace) -> int:
         ]
         settings = config.Settings.from_json(json.loads(job.settings_json))
         try:
-            suggestions = visuals.suggest(job_dir, words, settings.llm_mode, prefer=args.prefer)
+            provider = providers_mod.profile_from_snapshot(settings.provider_snapshot())
+            suggestions = visuals.suggest(job_dir, words, provider, prefer=args.prefer)
         except Exception as err:  # noqa: BLE001 — surface, don't crash the app
             print(json.dumps({"ok": False, "error": str(err)}))
             return 1
@@ -419,6 +426,8 @@ def main(argv: list[str] | None = None) -> int:
     p_preflight.add_argument("--provider", default=None, help="provider preset or custom kind")
     p_preflight.add_argument("--model", default=None, help="provider model identifier")
     p_preflight.add_argument("--endpoint", default=None, help="custom provider base URL")
+    p_preflight.add_argument("--auth", choices=["none", "bearer", "api_key_header", "custom_secret_header"], default=None)
+    p_preflight.add_argument("--secret-header", default=None, help=argparse.SUPPRESS)
     p_preflight.set_defaults(fn=cmd_preflight)
 
     p_test = sub.add_parser("provider-test", help="test a configured provider connection")
@@ -426,6 +435,8 @@ def main(argv: list[str] | None = None) -> int:
     p_test.add_argument("--provider", default=None, help="provider preset or custom kind")
     p_test.add_argument("--model", default=None, help="provider model identifier")
     p_test.add_argument("--endpoint", default=None, help="custom provider base URL")
+    p_test.add_argument("--auth", choices=["none", "bearer", "api_key_header", "custom_secret_header"], default=None)
+    p_test.add_argument("--secret-header", default=None, help=argparse.SUPPRESS)
     p_test.set_defaults(fn=cmd_provider_test)
 
     p_run = sub.add_parser("run", help="process a YouTube URL or local video file")
@@ -434,6 +445,8 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--provider", default=None, help="provider preset or custom kind")
     p_run.add_argument("--model", default=None, help="provider model identifier")
     p_run.add_argument("--endpoint", default=None, help="custom provider base URL")
+    p_run.add_argument("--auth", choices=["none", "bearer", "api_key_header", "custom_secret_header"], default=None)
+    p_run.add_argument("--secret-header", default=None, help=argparse.SUPPRESS)
     p_run.add_argument("--captions", default=None, help="caption preset name")
     p_run.add_argument("--camera", choices=["cut", "pan", "locked"], default=None)
     p_run.set_defaults(fn=cmd_run)
@@ -444,6 +457,8 @@ def main(argv: list[str] | None = None) -> int:
     p_resume.add_argument("--provider", default=None, help="provider preset or custom kind")
     p_resume.add_argument("--model", default=None, help="provider model identifier")
     p_resume.add_argument("--endpoint", default=None, help="custom provider base URL")
+    p_resume.add_argument("--auth", choices=["none", "bearer", "api_key_header", "custom_secret_header"], default=None)
+    p_resume.add_argument("--secret-header", default=None, help=argparse.SUPPRESS)
     p_resume.add_argument("--captions", default=None, help="caption preset name")
     p_resume.add_argument("--camera", choices=["cut", "pan", "locked"], default=None)
     p_resume.set_defaults(fn=cmd_resume)

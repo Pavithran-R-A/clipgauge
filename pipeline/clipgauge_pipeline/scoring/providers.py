@@ -478,7 +478,8 @@ def validate_json_schema(value: Any, schema: dict[str, Any], path: str = "$") ->
 
 
 def _retry_after(response: httpx.Response) -> float | None:
-    value = response.headers.get("retry-after")
+    headers = getattr(response, "headers", {})
+    value = headers.get("retry-after")
     try:
         return max(0.0, min(300.0, float(value))) if value else None
     except ValueError:
@@ -617,7 +618,7 @@ class GeminiAdapter(ProviderAdapter):
     def _headers(self) -> dict[str, str]:
         if not self._secret:
             raise ProviderError("AUTH_INVALID", "No Gemini API key is configured.")
-        return {"x-goog-api-key": self._secret, "content-type": "application/json"}
+        return {"x-goog-api-key": self._secret}
 
     def _infer_uncached(self, request: InferenceRequest) -> tuple[dict[str, Any], list[str], str | None]:
         parts: list[dict[str, Any]] = [{"text": request.prompt}]
@@ -779,6 +780,8 @@ def preset_profile(
     *,
     model: str | None = None,
     endpoint: str | None = None,
+    auth_strategy: str | None = None,
+    secret_header_name: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> ProviderProfile:
     kind = kind.strip().lower()
@@ -816,10 +819,21 @@ def preset_profile(
     selected_model = model or default_model
     if not selected_model:
         raise ValueError(f"provider {kind} requires a model")
+    selected_auth = auth_strategy or ("none" if kind == "custom" else "bearer")
+    selected_metadata = dict(metadata or {})
+    if secret_header_name:
+        selected_metadata["secret_header_name"] = secret_header_name
+    capability_defaults = {
+        "groq": {"structured_json": True, "json_schema": True, "vision": None},
+        "cloudflare": {"structured_json": True, "json_schema": None, "vision": None},
+        "huggingface": {"structured_json": True, "json_schema": True, "vision": None},
+        "cerebras": {"structured_json": True, "json_schema": True, "vision": False},
+    }
+    selected_caps = capability_defaults.get(kind, {"structured_json": None, "json_schema": None, "vision": None})
     caps = CapabilitySet(
-        structured_json=None,
-        json_schema=None,
-        vision=None,
+        structured_json=selected_caps["structured_json"],
+        json_schema=selected_caps["json_schema"],
+        vision=selected_caps["vision"],
         model_listing=True,
         local=False,
         cloud=True,
@@ -831,11 +845,11 @@ def preset_profile(
         display_name=display,
         base_url=selected_endpoint,
         model=selected_model,
-        auth_strategy="bearer",
+        auth_strategy=selected_auth,
         secret_ref=f"provider:{kind}",
         capabilities=caps,
         locality="cloud",
-        metadata=metadata or {},
+        metadata=selected_metadata,
     )
 
 

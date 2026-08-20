@@ -39,7 +39,7 @@ interface Props {
   stages: Record<string, { fraction: number; message: string }>
   error: string | null
   notice: string | null
-  onRun: (source: string, provider: string, captions: string, model?: string, endpoint?: string) => void
+  onRun: (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) => void
   onCancel: () => void
   onOpenLoop: () => void
   onOpenAbout: () => void
@@ -53,6 +53,8 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
   const [model, setModel] = useState(PROVIDER_DEFAULTS.gemini.model)
   const [endpoint, setEndpoint] = useState(PROVIDER_DEFAULTS.gemini.endpoint ?? '')
   const [providerKey, setProviderKey] = useState('')
+  const [auth, setAuth] = useState(provider === 'custom' ? 'none' : 'bearer')
+  const [secretHeader, setSecretHeader] = useState('x-api-key')
   const [testResult, setTestResult] = useState<ProviderTestResult | null>(null)
   const [captions, setCaptions] = useState('classic')
   const [showKey, setShowKey] = useState(false)
@@ -83,6 +85,8 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
     const defaults = PROVIDER_DEFAULTS[next] ?? PROVIDER_DEFAULTS.custom
     setModel(defaults.model)
     setEndpoint(defaults.endpoint ?? '')
+    setAuth(next === 'custom' ? 'none' : 'bearer')
+    setSecretHeader('x-api-key')
     setProviderKey('')
     setTestResult(null)
   }
@@ -90,7 +94,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
   async function testProvider() {
     setTestResult(null)
     try {
-      setTestResult(await api.testConnection(provider, model || undefined, endpoint || undefined))
+      setTestResult(await api.testConnection(provider, model || undefined, endpoint || undefined, auth, auth === 'custom_secret_header' ? secretHeader : undefined))
     } catch (error) {
       setTestResult({ state: 'FAIL', provider, message: String(error) })
     }
@@ -212,7 +216,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
             <input
               value={source}
               onChange={(e) => setSource(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && source.trim() && !running && onRun(source.trim(), provider, captions, model || undefined, endpoint || undefined)}
+              onKeyDown={(e) => e.key === 'Enter' && source.trim() && !running && onRun(source.trim(), provider, captions, model || undefined, endpoint || undefined, auth, auth === 'custom_secret_header' ? secretHeader : undefined)}
               placeholder="YouTube URL or a path to a video file"
               disabled={running}
             />
@@ -226,7 +230,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
             </button>
             <button
               className="btn-primary"
-              onClick={() => onRun(source.trim(), provider, captions, model || undefined, endpoint || undefined)}
+              onClick={() => onRun(source.trim(), provider, captions, model || undefined, endpoint || undefined, auth, auth === 'custom_secret_header' ? secretHeader : undefined)}
               disabled={running || !source.trim()}
             >
               {running ? 'WORKING' : 'CUT IT'}
@@ -266,7 +270,19 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
                   <input id="provider-endpoint" value={endpoint} onChange={(event) => setEndpoint(event.target.value)} disabled={running} placeholder="https://…/v1" />
                 </>
               )}
-              {provider !== 'ollama' && (
+              {provider === 'custom' && (
+                <>
+                  <label className="field-label" htmlFor="provider-auth">auth</label>
+                  <select id="provider-auth" value={auth} onChange={(event) => setAuth(event.target.value)} disabled={running}>
+                    <option value="none">no auth</option>
+                    <option value="bearer">bearer</option>
+                    <option value="api_key_header">x-api-key</option>
+                    <option value="custom_secret_header">custom header</option>
+                  </select>
+                  {auth === 'custom_secret_header' && <input value={secretHeader} onChange={(event) => setSecretHeader(event.target.value)} disabled={running} placeholder="secret header name" aria-label="Custom secret header name" />}
+                </>
+              )}
+              {provider !== 'ollama' && auth !== 'none' && (
                 <>
                   <label className="field-label" htmlFor="provider-key">credential</label>
                   <input id="provider-key" type="password" value={providerKey} onChange={(event) => setProviderKey(event.target.value)} disabled={running} placeholder="stored in OS vault; optional until Test Connection" autoComplete="off" />

@@ -339,6 +339,8 @@ fn append_provider_args(
     provider: Option<String>,
     model: Option<String>,
     endpoint: Option<String>,
+    auth: Option<String>,
+    secret_header: Option<String>,
 ) {
     let explicit_provider = provider.is_some();
     if let Some(kind) = provider.or(llm) {
@@ -360,6 +362,14 @@ fn append_provider_args(
         args.push("--endpoint".to_string());
         args.push(value);
     }
+    if let Some(value) = auth {
+        args.push("--auth".to_string());
+        args.push(value);
+    }
+    if let Some(value) = secret_header {
+        args.push("--secret-header".to_string());
+        args.push(value);
+    }
 }
 
 #[tauri::command]
@@ -368,10 +378,20 @@ fn preflight(
     provider: Option<String>,
     model: Option<String>,
     endpoint: Option<String>,
+    auth: Option<String>,
+    secret_header: Option<String>,
 ) -> Result<Value, String> {
     let (program, mut args) = pipeline_invocation();
     args.push("preflight".to_string());
-    append_provider_args(&mut args, llm, provider, model, endpoint);
+    append_provider_args(
+        &mut args,
+        llm,
+        provider,
+        model,
+        endpoint,
+        auth,
+        secret_header,
+    );
     let mut command = quiet_command(&program);
     secrets::apply_operation_env(&mut command);
     let output = command
@@ -394,11 +414,21 @@ fn test_connection(
     provider: Option<String>,
     model: Option<String>,
     endpoint: Option<String>,
+    auth: Option<String>,
+    secret_header: Option<String>,
 ) -> Result<Value, String> {
     let selected_provider = provider.clone();
     let (program, mut args) = pipeline_invocation();
     args.push("provider-test".to_string());
-    append_provider_args(&mut args, llm, provider, model, endpoint);
+    append_provider_args(
+        &mut args,
+        llm,
+        provider,
+        model,
+        endpoint,
+        auth,
+        secret_header,
+    );
     let mut command = quiet_command(&program);
     secrets::apply_operation_env(&mut command);
     if let Some((env_name, profile_id)) = selected_provider_env(selected_provider.as_deref()) {
@@ -427,6 +457,8 @@ fn run_job(
     provider: Option<String>,
     model: Option<String>,
     endpoint: Option<String>,
+    auth: Option<String>,
+    secret_header: Option<String>,
     captions: Option<String>,
 ) -> Result<(), String> {
     let (program, base_args) = pipeline_invocation();
@@ -439,7 +471,15 @@ fn run_job(
         args.push("run".to_string());
         args.push(source);
         let selected_provider = provider.clone();
-        append_provider_args(&mut args, llm, provider, model, endpoint);
+        append_provider_args(
+            &mut args,
+            llm,
+            provider,
+            model,
+            endpoint,
+            auth,
+            secret_header,
+        );
         if let Some(preset) = captions {
             args.push("--captions".to_string());
             args.push(preset);
@@ -465,6 +505,8 @@ fn resume_job(
     provider: Option<String>,
     model: Option<String>,
     endpoint: Option<String>,
+    auth: Option<String>,
+    secret_header: Option<String>,
     captions: Option<String>,
     camera: Option<String>,
 ) -> Result<(), String> {
@@ -479,7 +521,15 @@ fn resume_job(
         args.push("resume".to_string());
         args.push(job_id);
         let selected_provider = provider.clone();
-        append_provider_args(&mut args, llm, provider, model, endpoint);
+        append_provider_args(
+            &mut args,
+            llm,
+            provider,
+            model,
+            endpoint,
+            auth,
+            secret_header,
+        );
         if let Some(preset) = captions {
             args.push("--captions".to_string());
             args.push(preset);
