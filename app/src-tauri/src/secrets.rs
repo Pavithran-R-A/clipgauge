@@ -4,19 +4,28 @@ use std::path::Path;
 const SERVICE: &str = "io.github.pavithranra.clipgauge";
 const MIGRATION_MARKER: &str = "secret-migration-v1.done";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum SecretName {
     GeminiApiKey,
     PexelsApiKey,
     InstagramConnection,
+    ProviderAuth(String),
 }
 
 impl SecretName {
-    fn account(self) -> &'static str {
+    fn account(&self) -> String {
         match self {
-            Self::GeminiApiKey => "gemini_api_key",
-            Self::PexelsApiKey => "pexels_api_key",
-            Self::InstagramConnection => "instagram_connection",
+            Self::GeminiApiKey => "gemini_api_key".to_string(),
+            Self::PexelsApiKey => "pexels_api_key".to_string(),
+            Self::InstagramConnection => "instagram_connection".to_string(),
+            Self::ProviderAuth(profile_id) => {
+                let safe: String = profile_id
+                    .chars()
+                    .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':' | '.'))
+                    .take(120)
+                    .collect();
+                format!("provider_auth_{safe}")
+            }
         }
     }
 }
@@ -30,7 +39,7 @@ pub struct OsSecretBackend;
 
 impl SecretBackend for OsSecretBackend {
     fn get(&self, name: SecretName) -> Result<Option<String>, String> {
-        let entry = keyring::Entry::new(SERVICE, name.account())
+        let entry = keyring::Entry::new(SERVICE, &name.account())
             .map_err(|error| format!("credential store unavailable: {error}"))?;
         match entry.get_password() {
             Ok(value) if !value.is_empty() => Ok(Some(value)),
@@ -44,7 +53,7 @@ impl SecretBackend for OsSecretBackend {
         if value.trim().is_empty() {
             return Err("secret cannot be empty".to_string());
         }
-        let entry = keyring::Entry::new(SERVICE, name.account())
+        let entry = keyring::Entry::new(SERVICE, &name.account())
             .map_err(|error| format!("credential store unavailable: {error}"))?;
         entry
             .set_password(value)
@@ -60,6 +69,18 @@ pub fn get(name: SecretName) -> Result<Option<String>, String> {
     OsSecretBackend.get(name)
 }
 
+pub fn provider_auth(profile_id: &str) -> SecretName {
+    SecretName::ProviderAuth(profile_id.to_string())
+}
+
+pub fn set_provider_auth(profile_id: &str, value: &str) -> Result<(), String> {
+    set(provider_auth(profile_id), value)
+}
+
+pub fn get_provider_auth(profile_id: &str) -> Result<Option<String>, String> {
+    get(provider_auth(profile_id))
+}
+
 pub fn apply_operation_env(command: &mut std::process::Command) {
     if let Ok(Some(value)) = get(SecretName::GeminiApiKey) {
         command.env("CLIPGAUGE_GEMINI_API_KEY", value);
@@ -69,6 +90,19 @@ pub fn apply_operation_env(command: &mut std::process::Command) {
     }
     if let Ok(Some(value)) = get(SecretName::InstagramConnection) {
         command.env("CLIPGAUGE_INSTAGRAM_CONNECTION_JSON", value);
+    }
+}
+
+/// Inject only the selected provider credential for one child operation.
+/// The profile id is non-secret metadata; the credential value remains in the
+/// OS vault and is never written to normal configuration or job snapshots.
+pub fn apply_provider_operation_env(
+    command: &mut std::process::Command,
+    profile_id: &str,
+    env_name: &str,
+) {
+    if let Ok(Some(value)) = get_provider_auth(profile_id) {
+        command.env(env_name, value);
     }
 }
 
@@ -133,11 +167,11 @@ mod tests {
 
     use super::{SecretBackend, SecretName};
 
-    struct MemoryBackend(HashMap<&'static str, String>);
+    struct MemoryBackend(HashMap<String, String>);
 
     impl SecretBackend for MemoryBackend {
         fn get(&self, name: SecretName) -> Result<Option<String>, String> {
-            Ok(self.0.get(name.account()).cloned())
+            Ok(self.0.get(&name.account()).cloned())
         }
         fn set(&mut self, name: SecretName, value: &str) -> Result<(), String> {
             self.0.insert(name.account(), value.to_string());
@@ -154,6 +188,31 @@ mod tests {
         assert_eq!(
             backend.get(SecretName::GeminiApiKey).unwrap().as_deref(),
             Some("secret-value")
+        );
+    }
+
+    #[test]
+    fn provider_secret_accounts_are_profile_scoped_and_safe() {
+        let mut backend = MemoryBackend(HashMap::new());
+        backend
+            .set(
+                SecretName::ProviderAuth("custom:profile/with spaces".to_string()),
+                "value",
+            )
+            .unwrap();
+        assert_eq!(
+            backend
+                .get(SecretName::ProviderAuth(
+                    "custom:profile/with spaces".to_string()
+                ))
+                .unwrap()
+                .as_deref(),
+            Some("value")
+        );
+        assert!(
+            !SecretName::ProviderAuth("custom:profile/with spaces".to_string())
+                .account()
+                .contains('/')
         );
     }
 

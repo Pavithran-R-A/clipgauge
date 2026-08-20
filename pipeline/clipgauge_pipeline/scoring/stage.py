@@ -18,6 +18,7 @@ from ..music import brief as music_brief
 from . import constants as constants_mod
 from . import frames as frames_mod
 from . import llm as llm_mod
+from . import providers as providers_mod
 from . import rubric
 
 SELECT_COUNT = 12
@@ -64,7 +65,7 @@ def _window_pct(values: np.ndarray, grid_sec: float, start: float, end: float) -
 
 class ScoreStage(Stage):
     name = "score"
-    schema_version = 1
+    schema_version = 2
 
     def run(self, ctx: StageContext) -> dict:
         prior = ctx.prior or {}
@@ -75,11 +76,13 @@ class ScoreStage(Stage):
         if not (ingest and diarize and events and cands):
             raise StageError("Scoring needs ingest + diarize + events + candidates.")
 
-        llm_mode = ctx.settings.llm_mode
+        provider_snapshot = ctx.settings.provider_snapshot()
         try:
-            client = llm_mod.make_client(llm_mode)
-        except llm_mod.LlmError as err:
+            profile = providers_mod.profile_from_snapshot(provider_snapshot)
+            client = providers_mod.make_adapter(profile)
+        except (llm_mod.LlmError, ValueError) as err:
             raise StageError(str(err)) from err
+        llm_mode = profile.kind
 
         segments = diarize["segments"]
         timeline = events["timeline"]
@@ -167,7 +170,7 @@ class ScoreStage(Stage):
         finalists = scored[:SELECT_COUNT]
 
         # T2 visual pass + music brief on finalists only.
-        supports_vision = client.backend == "gemini"
+        supports_vision = client.profile.capabilities.vision is True
         for j, entry in enumerate(finalists):
             ctx.emit(0.6 + j / max(1, len(finalists)) * 0.35, f"Visual pass {j + 1}/{len(finalists)}…")
             visual = None
@@ -208,7 +211,12 @@ class ScoreStage(Stage):
             )
             entry["signals_fired"] = fired
             entry["signals_missing"] = missing
-            entry["confidence"] = "standard" if client.backend == "gemini" else "local-estimate"
+            provider_result = client.last_result
+            structured_level = provider_result.structured_level if provider_result else client.structured_level()
+            degraded_signals = list(provider_result.degraded_signals) if provider_result else []
+            if not supports_vision and any("visual" in item for item in missing):
+                degraded_signals.append("vision_unavailable")
+            entry["confidence"] = "standard" if structured_level == "native_schema" and not profile.capabilities.local else "local-estimate" if profile.capabilities.local else "degraded"
             entry["ledger"] = {
                 "score": entry["score"],
                 "composition": {
@@ -222,13 +230,20 @@ class ScoreStage(Stage):
                 "adjustments": entry["adjustments"],
                 "signals_fired": fired,
                 "signals_missing": missing,
-                "provenance": {
-                    "llm_mode": llm_mode,
-                    "model": client.model,
-                    "scoring_config_version": scoring_config["version"],
-                    "arousal_source": arousal_source,
-                    "visual_pass": supports_vision,
-                },
+                                    "provenance": {
+                        "llm_mode": llm_mode,
+                        "provider_profile_id": profile.id,
+                        "provider_kind": profile.kind,
+                        "model": client.model,
+                        "endpoint_identity": profile.endpoint_identity,
+                        "capabilities": profile.capabilities.to_dict(),
+                        "structured_level": structured_level,
+                        "degraded_signals": degraded_signals,
+                        "scoring_config_version": scoring_config["version"],
+                        "arousal_source": arousal_source,
+                        "visual_pass": supports_vision,
+                    },
+
             }
 
             prior_mood = music_brief.mood_prior(window_events, entry["arousal_pct"])
@@ -249,7 +264,10 @@ class ScoreStage(Stage):
 
         return {
             "llm_mode": llm_mode,
+            "provider_profile_id": profile.id,
+            "provider_kind": profile.kind,
             "model": client.model,
+            "capabilities": profile.capabilities.to_dict(),
             "clips": finalists,
             "scored_count": len(scored),
             "t2_ran": supports_vision,
