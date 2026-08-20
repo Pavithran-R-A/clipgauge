@@ -179,23 +179,35 @@ fn pipeline_invocation() -> (String, Vec<String>) {
 }
 
 #[tauri::command]
-fn privacy_summary(llm: String) -> Result<Value, String> {
-    if !matches!(llm.as_str(), "gemini" | "ollama") {
-        return Err("unsupported LLM mode".to_string());
-    }
-    let llm_data = if llm == "ollama" {
+fn privacy_summary(
+    llm: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    endpoint: Option<String>,
+) -> Result<Value, String> {
+    let selected = provider.or(llm).unwrap_or_else(|| "gemini".to_string());
+    let llm_data = if selected == "ollama" {
         json!({
-            "mode": "ollama",
+            "mode": selected.clone(),
             "device": ["transcript text", "local audio/video", "local score inputs"],
             "network": ["source URL download when a URL is provided", "pinned runtime/model downloads when absent", "optional Pexels visual queries"],
             "provider": "Ollama is contacted only on loopback; no transcript is sent to a cloud LLM by this mode"
         })
-    } else {
+    } else if selected == "gemini" {
         json!({
-            "mode": "gemini",
+            "mode": selected.clone(),
             "device": ["source media remains in the managed local job directory"],
             "network": ["source URL download when a URL is provided", "pinned runtime/model downloads when absent", "Gemini receives transcript slices, scoring context, and sampled finalist frames", "optional Pexels visual queries"],
             "provider": "Gemini is contacted with an operation-scoped vault credential; the API key is not included in requests as a query parameter"
+        })
+    } else {
+        json!({
+            "mode": selected,
+            "device": ["source media remains in the managed local job directory"],
+            "network": ["source URL download when a URL is provided", "provider endpoint receives transcript slices and scoring context", "selected frames leave the device only when the selected model advertises vision"],
+            "provider": "This selected provider is contacted outside ClipGauge; review its current privacy and retention terms before sending source-derived material",
+            "model": model,
+            "endpoint": endpoint.map(|value| value.split('/').take(3).collect::<Vec<_>>().join("/"))
         })
     };
     Ok(json!({
@@ -321,17 +333,71 @@ fn generate_support_bundle(job_id: Option<String>) -> Result<String, String> {
     generate_support_bundle_at(&home_dir(), job_id)
 }
 
-#[tauri::command]
-fn preflight(llm: String) -> Result<Value, String> {
-    if !matches!(llm.as_str(), "gemini" | "ollama") {
-        return Err("unsupported LLM mode".to_string());
+fn append_provider_args(
+    args: &mut Vec<String>,
+    llm: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    endpoint: Option<String>,
+    auth: Option<String>,
+    secret_header: Option<String>,
+) {
+    let explicit_provider = provider.is_some();
+    if let Some(kind) = provider.or(llm) {
+        args.push(
+            if explicit_provider {
+                "--provider"
+            } else {
+                "--llm"
+            }
+            .to_string(),
+        );
+        args.push(kind);
     }
+    if let Some(value) = model {
+        args.push("--model".to_string());
+        args.push(value);
+    }
+    if let Some(value) = endpoint {
+        args.push("--endpoint".to_string());
+        args.push(value);
+    }
+    if let Some(value) = auth {
+        args.push("--auth".to_string());
+        args.push(value);
+    }
+    if let Some(value) = secret_header {
+        args.push("--secret-header".to_string());
+        args.push(value);
+    }
+}
+
+#[tauri::command]
+fn preflight(
+    llm: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    endpoint: Option<String>,
+    auth: Option<String>,
+    secret_header: Option<String>,
+) -> Result<Value, String> {
+    let selected_provider = provider.clone();
     let (program, mut args) = pipeline_invocation();
     args.push("preflight".to_string());
-    args.push("--llm".to_string());
-    args.push(llm);
+    append_provider_args(
+        &mut args,
+        llm,
+        provider,
+        model,
+        endpoint,
+        auth,
+        secret_header,
+    );
     let mut command = quiet_command(&program);
     secrets::apply_operation_env(&mut command);
+    if let Some((env_name, profile_id)) = selected_provider_env(selected_provider.as_deref()) {
+        secrets::apply_provider_operation_env(&mut command, &profile_id, env_name);
+    }
     let output = command
         .env("CLIPGAUGE_HOME", home_dir())
         .args(&args)
@@ -347,11 +413,56 @@ fn preflight(llm: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
+fn test_connection(
+    llm: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    endpoint: Option<String>,
+    auth: Option<String>,
+    secret_header: Option<String>,
+) -> Result<Value, String> {
+    let selected_provider = provider.clone();
+    let (program, mut args) = pipeline_invocation();
+    args.push("provider-test".to_string());
+    append_provider_args(
+        &mut args,
+        llm,
+        provider,
+        model,
+        endpoint,
+        auth,
+        secret_header,
+    );
+    let mut command = quiet_command(&program);
+    secrets::apply_operation_env(&mut command);
+    if let Some((env_name, profile_id)) = selected_provider_env(selected_provider.as_deref()) {
+        secrets::apply_provider_operation_env(&mut command, &profile_id, env_name);
+    }
+    let output = command
+        .env("CLIPGAUGE_HOME", home_dir())
+        .args(&args)
+        .output()
+        .map_err(|error| diagnostics::redact(&error.to_string()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with('{'))
+        .ok_or_else(|| "provider test returned no JSON result".to_string())?;
+    serde_json::from_str(line).map_err(|error| diagnostics::redact(&error.to_string()))
+}
+
+#[tauri::command]
 fn run_job(
     app: AppHandle,
     state: State<'_, AppState>,
     source: String,
     llm: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    endpoint: Option<String>,
+    auth: Option<String>,
+    secret_header: Option<String>,
     captions: Option<String>,
 ) -> Result<(), String> {
     let (program, base_args) = pipeline_invocation();
@@ -363,15 +474,28 @@ fn run_job(
         args.push("--jsonl".to_string());
         args.push("run".to_string());
         args.push(source);
-        if let Some(mode) = llm {
-            args.push("--llm".to_string());
-            args.push(mode);
-        }
+        let selected_provider = provider.clone();
+        append_provider_args(
+            &mut args,
+            llm,
+            provider,
+            model,
+            endpoint,
+            auth,
+            secret_header,
+        );
         if let Some(preset) = captions {
             args.push("--captions".to_string());
             args.push(preset);
         }
-        stream_pipeline(&app, &program, &args, processes, key);
+        stream_pipeline(
+            &app,
+            &program,
+            &args,
+            processes,
+            key,
+            selected_provider.as_deref(),
+        );
     });
     Ok(())
 }
@@ -382,6 +506,11 @@ fn resume_job(
     state: State<'_, AppState>,
     job_id: String,
     llm: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    endpoint: Option<String>,
+    auth: Option<String>,
+    secret_header: Option<String>,
     captions: Option<String>,
     camera: Option<String>,
 ) -> Result<(), String> {
@@ -395,10 +524,16 @@ fn resume_job(
         args.push("--jsonl".to_string());
         args.push("resume".to_string());
         args.push(job_id);
-        if let Some(mode) = llm {
-            args.push("--llm".to_string());
-            args.push(mode);
-        }
+        let selected_provider = provider.clone();
+        append_provider_args(
+            &mut args,
+            llm,
+            provider,
+            model,
+            endpoint,
+            auth,
+            secret_header,
+        );
         if let Some(preset) = captions {
             args.push("--captions".to_string());
             args.push(preset);
@@ -407,7 +542,14 @@ fn resume_job(
             args.push("--camera".to_string());
             args.push(cam);
         }
-        stream_pipeline(&app, &program, &args, processes, key);
+        stream_pipeline(
+            &app,
+            &program,
+            &args,
+            processes,
+            key,
+            selected_provider.as_deref(),
+        );
     });
     Ok(())
 }
@@ -500,15 +642,33 @@ fn write_bridge_diagnostic(tail: &str) -> String {
     diagnostics::diagnostic_id()
 }
 
+fn selected_provider_env(provider: Option<&str>) -> Option<(&'static str, String)> {
+    let kind = provider?;
+    let env_name = match kind {
+        "gemini" => "CLIPGAUGE_GEMINI_API_KEY",
+        "openrouter" => "CLIPGAUGE_OPENROUTER_API_KEY",
+        "groq" => "CLIPGAUGE_GROQ_API_KEY",
+        "cloudflare" => "CLIPGAUGE_CLOUDFLARE_API_TOKEN",
+        "huggingface" => "CLIPGAUGE_HF_TOKEN",
+        "cerebras" => "CLIPGAUGE_CEREBRAS_API_KEY",
+        _ => "CLIPGAUGE_PROVIDER_SECRET",
+    };
+    Some((env_name, format!("preset-{kind}")))
+}
+
 fn stream_pipeline(
     app: &AppHandle,
     program: &str,
     args: &[String],
     processes: Arc<Mutex<process_manager::ProcessManager>>,
     key: String,
+    provider: Option<&str>,
 ) {
     let mut command = quiet_command(program);
     secrets::apply_operation_env(&mut command);
+    if let Some((env_name, profile_id)) = selected_provider_env(provider) {
+        secrets::apply_provider_operation_env(&mut command, &profile_id, env_name);
+    }
     process_manager::configure_process_group(&mut command);
     let child = command
         .env("CLIPGAUGE_HOME", home_dir())
@@ -710,10 +870,37 @@ fn save_gemini_key(key: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
+fn save_provider_key(profile_id: String, key: String) -> Result<bool, String> {
+    if profile_id.is_empty()
+        || profile_id.len() > 120
+        || !profile_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':' | '.'))
+    {
+        return Err("provider profile id is invalid".to_string());
+    }
+    secrets::set_provider_auth(&profile_id, key.trim())?;
+    Ok(true)
+}
+
+#[tauri::command]
 fn get_setup_state() -> Result<Value, String> {
     let has_key = secrets::get(secrets::SecretName::GeminiApiKey)?.is_some();
+    let mut provider_keys = serde_json::Map::new();
+    for kind in [
+        "openrouter",
+        "groq",
+        "cloudflare",
+        "huggingface",
+        "cerebras",
+        "custom",
+    ] {
+        let id = format!("preset-{kind}");
+        let has = secrets::get_provider_auth(&id)?.is_some();
+        provider_keys.insert(kind.to_string(), Value::Bool(has));
+    }
     let onboarded = home_dir().join("onboarded").exists();
-    Ok(json!({"has_gemini_key": has_key, "onboarded": onboarded}))
+    Ok(json!({"has_gemini_key": has_key, "onboarded": onboarded, "provider_keys": provider_keys}))
 }
 
 #[tauri::command]
@@ -852,7 +1039,7 @@ fn run_edit_render(
         args.push("render-clip".to_string());
         args.push(job_id);
         args.push(clip.to_string());
-        stream_pipeline(&app, &program, &args, processes, key);
+        stream_pipeline(&app, &program, &args, processes, key, None);
     });
     Ok(())
 }
@@ -1035,6 +1222,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             preflight,
             privacy_summary,
+            test_connection,
             generate_support_bundle,
             run_job,
             resume_job,
@@ -1042,6 +1230,7 @@ fn main() {
             job_results,
             list_job_dirs,
             save_gemini_key,
+            save_provider_key,
             get_setup_state,
             mark_onboarded,
             check_ollama,

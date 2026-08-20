@@ -50,6 +50,13 @@ fn secret_key(name: &str) -> bool {
             | "apikey"
             | "gemini_key"
             | "gemini_api_key"
+            | "openrouter_api_key"
+            | "groq_api_key"
+            | "cloudflare_api_token"
+            | "hf_token"
+            | "cerebras_api_key"
+            | "provider_secret"
+            | "x-api-key"
             | "pexels_key"
             | "pexels_api_key"
             | "access_token"
@@ -89,6 +96,14 @@ fn redact_query_token(mut token: String) -> String {
     token
 }
 
+pub fn redact_with_secrets(input: &str, secrets: &[&str]) -> String {
+    let mut result = input.to_string();
+    for secret in secrets.iter().filter(|value| !value.is_empty()) {
+        result = result.replace(secret, "[REDACTED]");
+    }
+    redact(&result)
+}
+
 pub fn redact(input: &str) -> String {
     let mut result = Vec::new();
     let mut redact_next = false;
@@ -105,7 +120,10 @@ pub fn redact(input: &str) -> String {
             result.push(token);
             redact_next = true;
             continue;
-        } else if token.starts_with("AIza") {
+        } else if ["AIza", "sk-or-v1-", "gsk_", "hf_", "cf_", "csk_"]
+            .iter()
+            .any(|prefix| token.starts_with(prefix))
+        {
             token = "[REDACTED]".to_string();
         } else if let Some((name, _value)) = token.split_once('=') {
             if secret_key(name.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_')) {
@@ -150,7 +168,7 @@ pub fn write_log(directory: &Path, id: &str, text: &str) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{diagnostic_id, redact, write_log, BoundedTail};
+    use super::{diagnostic_id, redact, redact_with_secrets, write_log, BoundedTail};
     use std::fs;
 
     #[test]
@@ -171,6 +189,13 @@ mod tests {
         assert!(!clean.contains("pexels-secret"));
         assert!(!clean.contains("meta-token"));
         assert!(!clean.contains("ig-secret"));
+    }
+
+    #[test]
+    fn custom_provider_secret_values_are_redacted_even_with_custom_header_names() {
+        let clean = redact_with_secrets("x-custom-secret=never-show-this", &["never-show-this"]);
+        assert!(!clean.contains("never-show-this"));
+        assert!(clean.contains("[REDACTED]"));
     }
 
     #[test]

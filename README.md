@@ -9,20 +9,25 @@ ClipGauge is an AGPL-3.0-or-later desktop application for turning a YouTube URL 
 | Smart camera | Uses speaker and scene signals to select and smooth vertical crop paths, with cut and punch-in decisions recorded in the clip ledger. |
 | Word-level captions | Supports multiple caption presets, karaoke highlighting, prosodic emphasis, and detected laughter markers when the local pipeline provides those signals. |
 | Explainable scoring | Shows subscores, adjustments, detector signals, and provenance instead of presenting an unauditable number. |
-| Local-first processing | Keeps source media and managed job state local by default, with Ollama available for loopback-only scoring. |
-| Optional integrations | Supports user-selected Gemini, Pexels, source URL download, and Instagram workflows. These are optional and can make network requests. |
+| Local-first processing | Keeps source media and managed job state local by default, with Ollama, LM Studio, and compatible local endpoints available for loopback inference. |
+| Universal providers | Uses one capability-aware scoring contract for Gemini, OpenRouter, Groq, Cloudflare Workers AI, Hugging Face, Cerebras, Ollama, LM Studio, and custom OpenAI-compatible endpoints. |
+| Privacy-aware inference | Shows provider, model, endpoint identity, local/cloud state, structured-output level, and vision degradation in provenance and Privacy Activity. |
 
 ## Current release
 
-ClipGauge v0.1.1 is a public open-source release-engineering closure release. It does not rewrite the analytical pipeline. Linux amd64 and Windows x64 release artifacts are unsigned when the corresponding native release jobs succeed. Native macOS builds are qualification results from GitHub-hosted runners; macOS distribution is not claimed to be signed or notarized unless real Apple credentials were used and the release explicitly says so. The updater remains disabled because no real signing key is configured.
+ClipGauge v0.2.0 is the Universal AI Providers release. It preserves local-first operation while adding curated cloud/BYO-key presets, LM Studio, capability-aware scoring, provider-aware privacy activity, OS-vault credentials, and a generic OpenAI-compatible adapter. v0.1.0 and v0.1.1 remain immutable historical releases.
 
-Unsigned Windows software may trigger SmartScreen or other reputation warnings. Unsigned and non-notarized macOS software may be blocked or warned about by Gatekeeper. These warnings are expected consequences of distributing without platform signing credentials; they are not evidence that ClipGauge is signed or notarized. Review the release notes and checksums before installing any artifact.
+The v0.2.0 release artifacts are unsigned unless the release notes explicitly prove otherwise. Windows SmartScreen warnings and non-notarized macOS Gatekeeper warnings are expected. The updater remains disabled because no real signing key is configured.
 
-The earlier v0.1.0 release remains available as historical release metadata and packaging. v0.1.1 supersedes it for release-engineering documentation, version consistency, SBOM correctness, and current platform packaging. The v0.1.0 tag and release are not rewritten.
+## Provider options
+
+Completely local options include Ollama, LM Studio, and compatible local endpoints. Curated cloud/BYO-key options include Gemini, OpenRouter, Groq, Cloudflare Workers AI, Hugging Face, and Cerebras. Free access, quotas, model support, retention, and payment requirements vary and can change; ClipGauge does not promise permanent free or unlimited usage. Any OpenAI-compatible endpoint can be configured manually with a model and validated authentication mode.
+
+See [`docs/providers/README.md`](docs/providers/README.md) and [`docs/providers/PROVIDER_RESEARCH_2026.md`](docs/providers/PROVIDER_RESEARCH_2026.md) for setup, capability, privacy, and terms guidance.
 
 ## Public artifacts
 
-The v0.1.1 release workflow is the source of truth for downloadable artifacts. It publishes a Linux amd64 Debian package and a Windows x64 NSIS installer only after their native release jobs pass. macOS builds are retained as CI qualification artifacts unless the release notes explicitly identify an unsigned, non-notarized macOS asset.
+The v0.2.0 release workflow is the source of truth for downloadable artifacts. It publishes platform artifacts only after native build, metadata, checksum, SBOM, provenance, attestation, and secret-scan gates pass. Review release notes and checksums before installing any unsigned artifact.
 
 Every public binary is accompanied by `SHA256SUMS`. The release also includes a CycloneDX SBOM and a human-readable provenance record. A checksum is not a cryptographic attestation, and neither is a substitute for Windows code signing or Apple signing/notarization.
 
@@ -58,15 +63,16 @@ cd pipeline
 uv sync
 uv run pytest -q
 uv run clipgauge --help
-uv run clipgauge preflight --llm ollama
-uv run clipgauge run "https://www.youtube.com/watch?v=..." --llm ollama
+uv run clipgauge preflight --provider ollama
+uv run clipgauge provider-test --provider openrouter --model openrouter/free
+uv run clipgauge run "https://www.youtube.com/watch?v=..." --provider ollama
 ```
 
 The desktop shell invokes the same CLI through `uv` in development and through the packaged resource environment in a bundle. The Rust bridge owns job lifecycle, cancellation, diagnostics, and filesystem boundaries; the Python sidecar emits structured JSONL events.
 
 ## Privacy and credentials
 
-ClipGauge has no default telemetry and no mandatory subscription. Local processing includes source media, transcripts, model inference, scoring inputs, and rendered output. Network activity can occur when you provide a source URL, allow pinned runtime/model downloads, use Gemini or Pexels, or opt into Instagram. The in-app **Privacy Activity** view describes the selected mode.
+ClipGauge has no default telemetry and no mandatory subscription. Local processing includes source media, transcripts, model inference, scoring inputs, and rendered output. Network activity can occur when you provide a source URL, allow pinned runtime/model downloads, use a selected cloud provider, use Pexels, or opt into Instagram. The in-app **Privacy Activity** view describes the selected provider, model, endpoint, and whether frames may leave the device.
 
 Credentials are stored through the operating system credential store when available and are injected into child processes only for the operation that needs them. Do not place API keys in source files, issue reports, support bundles, or shell history. The support bundle is redacted and excludes raw source media, raw transcripts, and known credential material, but review it before sharing.
 
@@ -104,7 +110,7 @@ The test suite includes Rust security and lifecycle tests, Python pipeline tests
 
 ## Documentation and support
 
-Read [`INSTALL.md`](INSTALL.md) for platform prerequisites, [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for preflight and runtime failures, and [`CHANGELOG.md`](CHANGELOG.md) for the v0.1.1 release record. License and provenance information is available in [`NOTICE.md`](NOTICE.md), [`ORIGIN.md`](ORIGIN.md), and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Use the in-app support-bundle action when reporting a failure, and redact any remaining personal or source-specific information before sharing.
+Read [`INSTALL.md`](INSTALL.md) for platform prerequisites, [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for preflight and runtime failures, [`docs/providers/README.md`](docs/providers/README.md) for provider setup, and [`CHANGELOG.md`](CHANGELOG.md) for the v0.2.0 release record. License and provenance information is available in [`NOTICE.md`](NOTICE.md), [`ORIGIN.md`](ORIGIN.md), and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Use the in-app support-bundle action when reporting a failure, and redact any remaining personal or source-specific information before sharing.
 
 ## License
 

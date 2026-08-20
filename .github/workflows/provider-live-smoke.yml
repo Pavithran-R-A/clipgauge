@@ -1,0 +1,104 @@
+name: Provider live smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: Provider to smoke, or all configured providers
+        required: true
+        default: all
+        type: choice
+        options: [all, gemini, openrouter, groq, cloudflare, huggingface, cerebras]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: gemini
+            model: gemini-flash-latest
+            auth: api_key_header
+            vision_smoke: true
+          - provider: openrouter
+            model: openrouter/free
+            auth: bearer
+            vision_smoke: true
+          - provider: groq
+            model: openai/gpt-oss-20b
+            auth: bearer
+            vision_smoke: true
+          - provider: cloudflare
+            model: '@cf/meta/llama-3.1-8b-instruct'
+            auth: bearer
+            vision_smoke: true
+          - provider: huggingface
+            model: Qwen/Qwen3-32B
+            auth: bearer
+            vision_smoke: true
+          - provider: cerebras
+            model: gpt-oss-120b
+            auth: bearer
+            vision_smoke: false
+    runs-on: ubuntu-22.04
+    env:
+      CLIPGAUGE_GEMINI_API_KEY: ${{ secrets.CLIPGAUGE_GEMINI_API_KEY }}
+      CLIPGAUGE_OPENROUTER_API_KEY: ${{ secrets.CLIPGAUGE_OPENROUTER_API_KEY }}
+      CLIPGAUGE_GROQ_API_KEY: ${{ secrets.CLIPGAUGE_GROQ_API_KEY }}
+      CLIPGAUGE_CLOUDFLARE_API_TOKEN: ${{ secrets.CLIPGAUGE_CLOUDFLARE_API_TOKEN }}
+      CLIPGAUGE_CLOUDFLARE_ENDPOINT: ${{ secrets.CLIPGAUGE_CLOUDFLARE_ENDPOINT }}
+      CLIPGAUGE_HF_TOKEN: ${{ secrets.CLIPGAUGE_HF_TOKEN }}
+      CLIPGAUGE_CEREBRAS_API_KEY: ${{ secrets.CLIPGAUGE_CEREBRAS_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.17'
+      - name: Run tiny live smoke or report skip
+        env:
+          SELECTED_PROVIDER: ${{ github.event.inputs.provider }}
+          MATRIX_PROVIDER: ${{ matrix.provider }}
+          MATRIX_MODEL: ${{ matrix.model }}
+          MATRIX_AUTH: ${{ matrix.auth }}
+          VISION_SMOKE: ${{ matrix.vision_smoke }}
+        run: |
+          set -euo pipefail
+          if [ "$SELECTED_PROVIDER" != "all" ] && [ "$SELECTED_PROVIDER" != "$MATRIX_PROVIDER" ]; then
+            echo "SKIPPED: $MATRIX_PROVIDER was not selected; no live inference was attempted."
+            exit 0
+          fi
+          secret=""
+          endpoint=""
+          case "$MATRIX_PROVIDER" in
+            gemini) secret="${CLIPGAUGE_GEMINI_API_KEY:-}" ;;
+            openrouter) secret="${CLIPGAUGE_OPENROUTER_API_KEY:-}" ;;
+            groq) secret="${CLIPGAUGE_GROQ_API_KEY:-}" ;;
+            cloudflare) secret="${CLIPGAUGE_CLOUDFLARE_API_TOKEN:-}" ; endpoint="${CLIPGAUGE_CLOUDFLARE_ENDPOINT:-}" ;;
+            huggingface) secret="${CLIPGAUGE_HF_TOKEN:-}" ;;
+            cerebras) secret="${CLIPGAUGE_CEREBRAS_API_KEY:-}" ;;
+          esac
+          if [ -z "$secret" ] || { [ "$MATRIX_PROVIDER" = "cloudflare" ] && [ -z "$endpoint" ]; }; then
+            echo "SKIPPED: $MATRIX_PROVIDER credentials are not fully configured; no live inference was attempted."
+            exit 0
+          fi
+          case "$MATRIX_PROVIDER" in
+            gemini) export CLIPGAUGE_GEMINI_API_KEY="$secret" ;;
+            openrouter) export CLIPGAUGE_OPENROUTER_API_KEY="$secret" ;;
+            groq) export CLIPGAUGE_GROQ_API_KEY="$secret" ;;
+            cloudflare) export CLIPGAUGE_CLOUDFLARE_API_TOKEN="$secret" ;;
+            huggingface) export CLIPGAUGE_HF_TOKEN="$secret" ;;
+            cerebras) export CLIPGAUGE_CEREBRAS_API_KEY="$secret" ;;
+          esac
+          args=(--provider "$MATRIX_PROVIDER" --model "$MATRIX_MODEL" --auth "$MATRIX_AUTH")
+          if [ "$VISION_SMOKE" = "true" ]; then args+=(--vision-smoke); fi
+          if [ -n "$endpoint" ]; then args+=(--endpoint "$endpoint"); fi
+          uv run --directory pipeline --with pytest --with httpx clipgauge provider-test "${args[@]}"

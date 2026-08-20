@@ -1,16 +1,7 @@
-"""Paths and settings.
+"""Managed paths, timeouts, and versioned per-job settings snapshots.
 
-Everything lives under CLIPGAUGE_HOME (default ~/.clipgauge):
-
-    ~/.clipgauge/
-      db.sqlite3          job + stage bookkeeping
-      bin/                managed binaries (yt-dlp)
-      models/             downloaded model weights
-      jobs/<job_id>/      per-job artifacts (media, audio, stage checkpoints)
-
-The desktop app points CLIPGAUGE_HOME at its own app-data dir; the CLI uses
-the default. Artifacts on disk are the source of truth — the DB only records
-what should exist so a stage can decide whether to skip itself on resume.
+Everything lives under CLIPGAUGE_HOME (default ~/.clipgauge). A job snapshot
+contains provider identity and capability metadata but never provider secrets.
 """
 
 from __future__ import annotations
@@ -18,6 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 def legacy_home_dir() -> Path:
@@ -52,65 +44,149 @@ def ensure_home() -> Path:
     return root
 
 
-# Hard per-attempt network timeouts (seconds). A blackholed connection must
-# never freeze the pipeline — every subprocess/network call takes one of these.
 HTTP_TIMEOUT = 60.0
-SUBPROCESS_INACTIVITY_TIMEOUT = 120.0  # kill if no output for this long
+SUBPROCESS_INACTIVITY_TIMEOUT = 120.0
 PROBE_TIMEOUT = 60.0
-
-# Ingest
 MAX_HEIGHT = 1080
-AUDIO_SR = 16_000  # analysis sample rate; every M1 model consumes this wav
+AUDIO_SR = 16_000
 
 
 @dataclass
 class CameraSettings:
-    """User-facing camera preset knobs (locked decision #7: exposed options)."""
+    """User-facing camera preset knobs."""
 
-    # 'cut' = hard cut on speaker change (default), 'pan' = eased pan between
-    # speakers, 'locked' = static crop on the dominant face.
     speaker_change: str = "cut"
     pan_duration_s: float = 0.6
-    deadzone_frac: float = 0.05  # ignore drift below this fraction of width
+    deadzone_frac: float = 0.05
     punch_in: bool = True
-    punch_in_sensitivity: float = 1.0  # scales event/energy trigger thresholds
+    punch_in_sensitivity: float = 1.0
     zoom_lock_per_scene: bool = True
+
+
+def _legacy_provider_snapshot(llm_mode: str, model: str | None = None) -> dict[str, Any]:
+    if llm_mode == "ollama":
+        return {
+            "schema_version": 1,
+            "id": "legacy-ollama",
+            "kind": "ollama",
+            "model": model or "auto",
+            "endpoint_identity": "http://127.0.0.1:11434",
+            "capabilities": {
+                "text": True,
+                "structured_json": True,
+                "json_schema": None,
+                "vision": None,
+                "model_listing": True,
+                "local": True,
+                "cloud": False,
+            },
+        }
+    return {
+        "schema_version": 1,
+        "id": "legacy-gemini",
+        "kind": "gemini",
+        "model": model or "gemini-flash-latest",
+        "endpoint_identity": "https://generativelanguage.googleapis.com/v1beta",
+        "capabilities": {
+            "text": True,
+            "structured_json": True,
+            "json_schema": True,
+            "vision": True,
+            "model_listing": True,
+            "local": False,
+            "cloud": True,
+        },
+    }
 
 
 @dataclass
 class Settings:
-    """Per-job settings snapshot. Serialized into the job dir at creation so a
-    resumed job never silently picks up changed defaults."""
+    """Per-job settings snapshot; resume never silently changes provider/model."""
 
     camera: CameraSettings = field(default_factory=CameraSettings)
-    lufs_target: float = -14.0  # decision #8: configurable per destination
+    lufs_target: float = -14.0
     true_peak_db: float = -1.0
-    llm_mode: str = "gemini"  # 'gemini' (BYO key) | 'ollama' (local fallback)
+    llm_mode: str = "gemini"  # legacy compatibility field
+    provider_profile_id: str | None = None
+    provider_kind: str | None = None
+    provider_model: str | None = None
+    provider_endpoint_identity: str | None = None
+    provider_capabilities: dict[str, Any] = field(default_factory=dict)
+    provider_auth_strategy: str = "none"
+    provider_locality: str = "cloud"
+    provider_metadata: dict[str, Any] = field(default_factory=dict)
+    provider_schema_version: int = 0
     caption_preset: str = "classic"
-    # jrgillick laughter specialist: 10 ms precision but ~300k CPU forward
-    # passes on an hour-plus source. OFF by default — PANNs' AudioSet
-    # laughter classes cover the bus at 320 ms resolution for a fraction of
-    # the compute; flip on for the two-detector agreement boost.
     laughter_specialist: bool = False
 
-    def to_json(self) -> dict:
+    def provider_snapshot(self) -> dict[str, Any]:
+        if self.provider_profile_id and self.provider_kind and self.provider_model:
+            return {
+                "schema_version": self.provider_schema_version or 1,
+                "id": self.provider_profile_id,
+                "kind": self.provider_kind,
+                "model": self.provider_model,
+                "endpoint_identity": self.provider_endpoint_identity or "",
+                "capabilities": dict(self.provider_capabilities),
+                "auth_strategy": self.provider_auth_strategy,
+                "locality": self.provider_locality,
+                "metadata": dict(self.provider_metadata),
+            }
+        return _legacy_provider_snapshot(self.llm_mode, self.provider_model)
+
+    def to_json(self) -> dict[str, Any]:
+        snapshot = self.provider_snapshot()
         return {
+            "settings_schema_version": 2,
             "camera": self.camera.__dict__.copy(),
             "lufs_target": self.lufs_target,
             "true_peak_db": self.true_peak_db,
             "llm_mode": self.llm_mode,
+            "provider_snapshot": snapshot,
+            "provider_profile_id": snapshot["id"],
+            "provider_kind": snapshot["kind"],
+            "provider_model": snapshot["model"],
+            "provider_endpoint_identity": snapshot["endpoint_identity"],
+            "provider_capabilities": dict(snapshot.get("capabilities", {})),
+            "provider_auth_strategy": snapshot.get("auth_strategy", "none"),
+            "provider_locality": snapshot.get("locality", "cloud"),
+            "provider_metadata": dict(snapshot.get("metadata", {})),
+            "provider_schema_version": int(snapshot.get("schema_version", 1)),
             "caption_preset": self.caption_preset,
             "laughter_specialist": self.laughter_specialist,
         }
 
     @classmethod
-    def from_json(cls, data: dict) -> "Settings":
+    def from_json(cls, data: dict[str, Any]) -> "Settings":
         cam = CameraSettings(**data.get("camera", {}))
+        legacy_mode = str(data.get("llm_mode", "gemini"))
+        snapshot = data.get("provider_snapshot")
+        if not isinstance(snapshot, dict):
+            snapshot = {
+                "schema_version": data.get("provider_schema_version", 1),
+                "id": data.get("provider_profile_id"),
+                "kind": data.get("provider_kind"),
+                "model": data.get("provider_model"),
+                "endpoint_identity": data.get("provider_endpoint_identity"),
+                "capabilities": data.get("provider_capabilities", {}),
+            }
+        if not snapshot.get("id") or not snapshot.get("kind") or not snapshot.get("model"):
+            snapshot = _legacy_provider_snapshot(legacy_mode)
+        kind = str(snapshot.get("kind", legacy_mode))
         return cls(
             camera=cam,
             lufs_target=data.get("lufs_target", -14.0),
             true_peak_db=data.get("true_peak_db", -1.0),
-            llm_mode=data.get("llm_mode", "gemini"),
+            llm_mode=legacy_mode if legacy_mode in {"gemini", "ollama"} else kind,
+            provider_profile_id=str(snapshot["id"]),
+            provider_kind=kind,
+            provider_model=str(snapshot["model"]),
+            provider_endpoint_identity=str(snapshot.get("endpoint_identity", "")),
+            provider_capabilities=dict(snapshot.get("capabilities", {})),
+            provider_auth_strategy=str(snapshot.get("auth_strategy", "none")),
+            provider_locality=str(snapshot.get("locality", "cloud")),
+            provider_metadata=dict(snapshot.get("metadata", {})),
+            provider_schema_version=int(snapshot.get("schema_version", 1)),
             caption_preset=data.get("caption_preset", "classic"),
             laughter_specialist=data.get("laughter_specialist", False),
         )

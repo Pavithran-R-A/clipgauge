@@ -117,7 +117,7 @@ export default function App() {
   }, [refreshJobs])
 
   const startRun = useCallback(
-    async (source: string, llm: string, captions: string) => {
+    async (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) => {
       setRunning(false)
       setCancelling(false)
       setRunError(null)
@@ -126,7 +126,7 @@ export default function App() {
       setResults(null)
       setActiveJob(null)
       try {
-        const preflight = await api.preflight(llm)
+        const preflight = await api.preflight(provider, model, endpoint, auth, secretHeader)
         const blocked = preflight.checks.filter((check) => check.state === 'blocked')
         const warnings = preflight.checks.filter((check) => check.state === 'warning')
         if (preflight.state === 'blocked' || blocked.length) {
@@ -139,7 +139,7 @@ export default function App() {
         }
         setRunning(true)
         setRunStartedAt(Date.now())
-        await api.runJob(source, llm, captions)
+        await api.runJob(source, provider, captions, model, endpoint, auth, secretHeader)
       } catch (error) {
         setRunning(false)
         setRunError(String(error))
@@ -221,14 +221,14 @@ export default function App() {
       onOpenLoop={() => setView('loop')}
       onOpenAbout={() => setView('about')}
       onOpenJob={openJob}
-      onResume={(id, llm) => {
+      onResume={(id) => {
         setRunning(true)
         setCancelling(false)
         setRunError(null)
         setRunNotice(null)
         setStages({})
         setActiveJob(id)
-        api.resumeJob(id, llm)
+        api.resumeJob(id)
       }}
     />
   )

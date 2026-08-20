@@ -23,6 +23,7 @@ import httpx
 
 from .. import config
 from ..scoring import llm as llm_mod
+from ..scoring import providers as providers_mod
 from .timeline import Overlay
 
 PLAN_SCHEMA: dict[str, Any] = {
@@ -62,11 +63,13 @@ def plan_prompt(numbered_words: str) -> str:
     )
 
 
-def plan_overlays(words: list[dict], llm_mode: str) -> list[dict]:
-    """words carry OUTPUT-timeline times. Returns raw visual plans."""
+def plan_overlays(words: list[dict], provider: providers_mod.ProviderProfile | str) -> list[dict]:
+    """Words carry OUTPUT-timeline times; provider identity is explicit."""
     numbered = " ".join(f"[{i}]{w['word']}" for i, w in enumerate(words))
-    client = llm_mod.make_client(llm_mode)
-    result = client.generate_json(plan_prompt(numbered), PLAN_SCHEMA)
+    profile = providers_mod.legacy_profile(provider) if isinstance(provider, str) else provider
+    result = providers_mod.make_adapter(profile).infer(
+        providers_mod.InferenceRequest(prompt=plan_prompt(numbered), schema=PLAN_SCHEMA)
+    ).data
     plans = []
     for v in result.get("visuals", []):
         idx = max(0, min(int(v["start_word_index"]), len(words) - 1))
@@ -124,7 +127,7 @@ GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
 
 
 def fetch_gemini(query: str, job_dir: Path) -> str | None:
-    key = llm_mod.gemini_api_key()
+    key = providers_mod.secret_from_environment(providers_mod.legacy_profile("gemini"))
     if not key:
         return None
     dest = _overlay_dir(job_dir) / f"gm_{hashlib.sha256(query.encode()).hexdigest()[:12]}.png"
@@ -163,10 +166,10 @@ def fetch_image(query: str, job_dir: Path, prefer: str = "pexels") -> tuple[str 
     return None, "none"
 
 
-def suggest(job_dir: Path, words: list[dict], llm_mode: str, prefer: str = "pexels") -> list[Overlay]:
+def suggest(job_dir: Path, words: list[dict], provider: providers_mod.ProviderProfile | str, prefer: str = "pexels") -> list[Overlay]:
     """Plan + fetch, returning ready Overlay items (static by default —
     animation strictly opt-in per the design decision)."""
-    plans = plan_overlays(words, llm_mode)
+    plans = plan_overlays(words, provider)
     out: list[Overlay] = []
     for i, plan in enumerate(plans):
         path, source = fetch_image(plan["query"], job_dir, prefer)

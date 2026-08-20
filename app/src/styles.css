@@ -334,6 +334,23 @@ body {
   transition: all 0.15s;
 }
 .opt-on { border-color: var(--amber); color: var(--amber); background: rgba(255, 178, 36, 0.08); }
+.provider-group { max-width: 780px; flex-wrap: wrap; }
+.provider-config { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; max-width: 780px; margin-top: 12px; }
+.provider-config input, .provider-config select {
+  min-width: 150px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  padding: 7px 9px;
+}
+.provider-config input:focus, .provider-config select:focus { outline: 2px solid var(--amber); outline-offset: 1px; }
+.field-label { font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; color: var(--faint); text-transform: uppercase; }
+.provider-test { flex-basis: 100%; margin: 4px 0 0; font-family: var(--mono); font-size: 11px; }
+.provider-test-pass { color: var(--green); }
+.provider-test-warning { color: var(--amber); }
+.provider-test-fail { color: var(--red); }
 
 /* the processing deck — VU meter rows */
 .deck {
