@@ -8,7 +8,7 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, gemini, openrouter, groq, cloudflare, huggingface]
+        options: [all, gemini, openrouter, groq, cloudflare, huggingface, cerebras]
 
 permissions:
   contents: read
@@ -23,23 +23,33 @@ jobs:
             secret_name: CLIPGAUGE_GEMINI_API_KEY
             model: gemini-flash-latest
             auth: api_key_header
+            vision_smoke: true
           - provider: openrouter
             secret_name: CLIPGAUGE_OPENROUTER_API_KEY
             model: openrouter/free
             auth: bearer
+            vision_smoke: true
           - provider: groq
             secret_name: CLIPGAUGE_GROQ_API_KEY
             model: openai/gpt-oss-20b
             auth: bearer
+            vision_smoke: true
           - provider: cloudflare
             secret_name: CLIPGAUGE_CLOUDFLARE_API_TOKEN
             endpoint_secret_name: CLIPGAUGE_CLOUDFLARE_ENDPOINT
             model: '@cf/meta/llama-3.1-8b-instruct'
             auth: bearer
+            vision_smoke: true
           - provider: huggingface
             secret_name: CLIPGAUGE_HF_TOKEN
             model: Qwen/Qwen3-32B
             auth: bearer
+            vision_smoke: true
+          - provider: cerebras
+            secret_name: CLIPGAUGE_CEREBRAS_API_KEY
+            model: gpt-oss-120b
+            auth: bearer
+            vision_smoke: false
     runs-on: ubuntu-22.04
     env:
       PROVIDER_SECRET: ${{ secrets[matrix.secret_name] }}
@@ -59,18 +69,20 @@ jobs:
         with:
           version: '0.8.17'
       - name: Report skipped provider
-        if: ${{ (github.event.inputs.provider == 'all' || github.event.inputs.provider == matrix.provider) && env.PROVIDER_SECRET == '' }}
-        run: echo "SKIPPED: ${{ matrix.provider }} secret is not configured; no live inference was attempted."
+        if: ${{ (github.event.inputs.provider == 'all' || github.event.inputs.provider == matrix.provider) && (env.PROVIDER_SECRET == '' || (matrix.provider == 'cloudflare' && env.PROVIDER_ENDPOINT == '')) }}
+        run: echo "SKIPPED: ${{ matrix.provider }} credentials are not fully configured; no live inference was attempted."
       - name: Run tiny live smoke
-        if: ${{ (github.event.inputs.provider == 'all' || github.event.inputs.provider == matrix.provider) && env.PROVIDER_SECRET != '' }}
+        if: ${{ (github.event.inputs.provider == 'all' || github.event.inputs.provider == matrix.provider) && env.PROVIDER_SECRET != '' && (matrix.provider != 'cloudflare' || env.PROVIDER_ENDPOINT != '') }}
         env:
           CLIPGAUGE_GEMINI_API_KEY: ${{ matrix.provider == 'gemini' && env.PROVIDER_SECRET || '' }}
           CLIPGAUGE_OPENROUTER_API_KEY: ${{ matrix.provider == 'openrouter' && env.PROVIDER_SECRET || '' }}
           CLIPGAUGE_GROQ_API_KEY: ${{ matrix.provider == 'groq' && env.PROVIDER_SECRET || '' }}
           CLIPGAUGE_CLOUDFLARE_API_TOKEN: ${{ matrix.provider == 'cloudflare' && env.PROVIDER_SECRET || '' }}
           CLIPGAUGE_HF_TOKEN: ${{ matrix.provider == 'huggingface' && env.PROVIDER_SECRET || '' }}
+          CLIPGAUGE_CEREBRAS_API_KEY: ${{ matrix.provider == 'cerebras' && env.PROVIDER_SECRET || '' }}
         run: |
           set -euo pipefail
-          args=(--provider "${{ matrix.provider }}" --model "${{ matrix.model }}" --auth "${{ matrix.auth }}" --vision-smoke)
+          args=(--provider "${{ matrix.provider }}" --model "${{ matrix.model }}" --auth "${{ matrix.auth }}")
+          if [ "${{ matrix.vision_smoke }}" = "true" ]; then args+=(--vision-smoke); fi
           if [ -n "${PROVIDER_ENDPOINT:-}" ]; then args+=(--endpoint "$PROVIDER_ENDPOINT"); fi
           uv run --directory pipeline --with pytest --with httpx clipgauge provider-test "${args[@]}"
