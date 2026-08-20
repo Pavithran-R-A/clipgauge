@@ -2,6 +2,23 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.2.0] — 2026-08-20
+
+### Universal AI provider architecture
+
+- Adds a versioned `ProviderProfile`, capability model, normalized inference request/result contract, explicit structured-output levels, provider-aware cache identity, immutable job snapshots, and legacy Gemini/Ollama migration.
+- Adds curated Gemini, OpenRouter, Groq, Cloudflare Workers AI, Hugging Face, and Cerebras profiles through one OpenAI-compatible adapter family.
+- Adds local Ollama and LM Studio loopback presets, model discovery, manual model entry, and capability-aware degradation reporting.
+- Adds a generic OpenAI-compatible custom endpoint with validated HTTPS/loopback URL policy, no-auth/bearer/API-key/custom-header modes, disabled authenticated redirects, and OS-vault credentials.
+- Adds provider-aware Studio controls, Test Connection, neutral onboarding, Privacy Activity details, provider provenance, and redacted support-bundle behavior.
+- Adds deterministic provider contract tests, migration tests, normalized error/retry handling, URL/redirect security tests, and the v0.2 full QA/rebrand/security documentation set.
+
+### Caveats
+
+- Provider free tiers, quotas, model support, retention, payment requirements, and terms change over time; ClipGauge makes no permanent free or unlimited-use promise.
+- Local and cloud model capabilities are model-dependent. Text-only providers record missing vision instead of silently claiming image support.
+- Release signing, notarization, and live-provider smoke depend on owner credentials and are reported separately from deterministic CI.
+
 ## [0.1.1] — 2026-08-19
 
 ClipGauge v0.1.1 is a release-engineering closure release. It does not rewrite the analytical pipeline or replace the historical v0.1.0 tag and release.

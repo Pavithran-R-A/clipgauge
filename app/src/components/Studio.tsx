@@ -23,6 +23,7 @@ const CAPTION_PRESETS = ['classic', 'beast', 'hormozi', 'minimal', 'karaoke-pop'
 const PROVIDER_DEFAULTS: Record<string, { model: string; endpoint?: string; locality: string }> = {
   gemini: { model: 'gemini-flash-latest', locality: 'cloud' },
   ollama: { model: 'auto', endpoint: 'http://127.0.0.1:11434', locality: 'local' },
+  lmstudio: { model: 'auto', endpoint: 'http://127.0.0.1:1234/v1', locality: 'local' },
   openrouter: { model: 'openrouter/free', locality: 'cloud' },
   groq: { model: 'openai/gpt-oss-20b', locality: 'cloud' },
   cloudflare: { model: '@cf/meta/llama-3.1-8b-instruct', locality: 'cloud' },

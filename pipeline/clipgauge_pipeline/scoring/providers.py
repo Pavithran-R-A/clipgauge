@@ -513,6 +513,14 @@ def _status_error(response: httpx.Response) -> ProviderError:
 class OpenAICompatibleAdapter(ProviderAdapter):
     backend = "openai-compatible"
 
+    def infer(self, request: InferenceRequest) -> InferenceResult:
+        if self.model == "auto":
+            models = self.model_listing()
+            if not models:
+                raise ProviderError("PROVIDER_UNAVAILABLE", "The local compatible server is stopped or has no models.")
+            self.model = _pick_model(models)
+        return super().infer(request)
+
     def _headers(self) -> dict[str, str]:
         headers = {"content-type": "application/json"}
         strategy = self.profile.auth_strategy
@@ -803,6 +811,7 @@ def preset_profile(
             )
         return base
     defaults: dict[str, tuple[str, str, str]] = {
+        "lmstudio": ("LM Studio", "http://127.0.0.1:1234/v1", "auto"),
         "openrouter": ("OpenRouter", "https://openrouter.ai/api/v1", "openrouter/free"),
         "groq": ("Groq", "https://api.groq.com/openai/v1", "openai/gpt-oss-20b"),
         "cloudflare": ("Cloudflare Workers AI", "", "@cf/meta/llama-3.1-8b-instruct"),
@@ -819,7 +828,7 @@ def preset_profile(
     selected_model = model or default_model
     if not selected_model:
         raise ValueError(f"provider {kind} requires a model")
-    selected_auth = auth_strategy or ("none" if kind == "custom" else "bearer")
+    selected_auth = auth_strategy or ("none" if kind in {"custom", "lmstudio"} else "bearer")
     selected_metadata = dict(metadata or {})
     if secret_header_name:
         selected_metadata["secret_header_name"] = secret_header_name
@@ -830,13 +839,14 @@ def preset_profile(
         "cerebras": {"structured_json": True, "json_schema": True, "vision": False},
     }
     selected_caps = capability_defaults.get(kind, {"structured_json": None, "json_schema": None, "vision": None})
+    local = kind == "lmstudio"
     caps = CapabilitySet(
         structured_json=selected_caps["structured_json"],
         json_schema=selected_caps["json_schema"],
         vision=selected_caps["vision"],
         model_listing=True,
-        local=False,
-        cloud=True,
+        local=local,
+        cloud=not local,
     )
     return ProviderProfile(
         schema_version=1,
@@ -848,7 +858,7 @@ def preset_profile(
         auth_strategy=selected_auth,
         secret_ref=f"provider:{kind}",
         capabilities=caps,
-        locality="cloud",
+        locality="local" if local else "cloud",
         metadata=selected_metadata,
     )
 

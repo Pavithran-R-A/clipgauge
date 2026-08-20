@@ -120,19 +120,24 @@ def _provider(checks: list[dict], profile: providers_mod.ProviderProfile) -> Non
             provider=profile.kind,
         )
         return
-    if profile.kind == "ollama":
+    if profile.kind in {"ollama", "lmstudio"}:
         try:
-            response = httpx.get(profile.endpoint_identity.rstrip("/") + "/api/tags", timeout=3.0)
+            listing_path = "/api/tags" if profile.kind == "ollama" else "/models"
+            response = httpx.get(profile.endpoint_identity.rstrip("/") + listing_path, timeout=3.0)
             if len(response.content) > 1024 * 1024:
                 raise ValueError("health response exceeded 1 MiB")
             response.raise_for_status()
-            models = [item.get("name") for item in response.json().get("models", []) if item.get("name")]
-            if not models:
-                _check(checks, "provider", "blocked", "Ollama is running but has no local models.", "Start Ollama and pull a supported model, then retry.", provider=profile.kind, models=[])
+            payload = response.json()
+            if profile.kind == "ollama":
+                models = [item.get("name") for item in payload.get("models", []) if item.get("name")]
             else:
-                _check(checks, "provider", "ready", "Ollama is running with local models.", provider=profile.kind, models=models)
+                models = [item.get("id") for item in payload.get("data", []) if item.get("id")]
+            if not models:
+                _check(checks, "provider", "blocked", f"{profile.display_name} is running but has no local models.", "Start the local server and load a compatible chat model, then retry.", provider=profile.kind, models=[])
+            else:
+                _check(checks, "provider", "ready", f"{profile.display_name} is running with local models.", provider=profile.kind, models=models)
         except (httpx.HTTPError, ValueError, KeyError, TypeError):
-            _check(checks, "provider", "blocked", "Ollama is stopped or unavailable on loopback.", "Start Ollama locally or choose another provider.", provider=profile.kind)
+            _check(checks, "provider", "blocked", f"{profile.display_name} is stopped or unavailable on loopback.", "Start the local server or choose another provider.", provider=profile.kind)
         return
     _check(
         checks,

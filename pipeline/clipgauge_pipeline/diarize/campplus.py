@@ -2,7 +2,7 @@
 
 Model definition vendored from modelscope/3D-Speaker (Apache-2.0), weights
 from huggingface.co/funasr/campplus (Apache-2.0, verified 2026-08-10, no
-gating). This is what lets publikclip ship diarization inside a downloadable
+gating). This is what lets ClipGauge ship diarization inside a downloadable
 app with no HuggingFace account — pyannote's gated weights couldn't.
 
 Features: kaldi-style 80-dim fbank at 16 kHz with cepstral mean subtraction,

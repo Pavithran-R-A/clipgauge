@@ -8,6 +8,7 @@ the final result are emitted as one JSON object per stdout line, so the Tauri sh
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import sys
 
@@ -125,7 +126,21 @@ def cmd_preflight(args: argparse.Namespace) -> int:
 def cmd_provider_test(args: argparse.Namespace) -> int:
     try:
         profile = _profile_from_args(args)
-        result = providers_mod.make_adapter(profile).test_connection()
+        adapter = providers_mod.make_adapter(profile)
+        if args.vision_smoke:
+            tiny_png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            smoke = adapter.infer(
+                providers_mod.InferenceRequest(
+                    prompt='Return exactly {"vision":true}.',
+                    schema={"type": "object", "properties": {"vision": {"type": "boolean"}}, "required": ["vision"]},
+                    images=[tiny_png],
+                    purpose="manual_live_smoke",
+                    require_vision=True,
+                )
+            )
+            result = {"state": "WARNING" if smoke.degraded_signals else "PASS", "provider": profile.kind, "model": smoke.model, "capabilities": smoke.capabilities_used, "degraded_signals": smoke.degraded_signals}
+        else:
+            result = adapter.test_connection()
     except Exception as err:  # noqa: BLE001 — return an actionable JSON boundary
         result = {
             "state": "FAIL",
@@ -437,6 +452,7 @@ def main(argv: list[str] | None = None) -> int:
     p_test.add_argument("--endpoint", default=None, help="custom provider base URL")
     p_test.add_argument("--auth", choices=["none", "bearer", "api_key_header", "custom_secret_header"], default=None)
     p_test.add_argument("--secret-header", default=None, help=argparse.SUPPRESS)
+    p_test.add_argument("--vision-smoke", action="store_true", help=argparse.SUPPRESS)
     p_test.set_defaults(fn=cmd_provider_test)
 
     p_run = sub.add_parser("run", help="process a YouTube URL or local video file")
