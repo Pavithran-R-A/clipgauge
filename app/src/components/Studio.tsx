@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { api } from '../api'
-import type { JobSummary, PrivacySummary } from '../types'
+import type { JobSummary, PrivacySummary, ProviderTestResult } from '../types'
 import KeyModal from './KeyModal'
 
 const STAGE_ORDER = [
@@ -20,6 +20,16 @@ const STAGE_LABELS: Record<string, string> = {
 }
 
 const CAPTION_PRESETS = ['classic', 'beast', 'hormozi', 'minimal', 'karaoke-pop']
+const PROVIDER_DEFAULTS: Record<string, { model: string; endpoint?: string; locality: string }> = {
+  gemini: { model: 'gemini-flash-latest', locality: 'cloud' },
+  ollama: { model: 'auto', endpoint: 'http://127.0.0.1:11434', locality: 'local' },
+  openrouter: { model: 'openrouter/free', locality: 'cloud' },
+  groq: { model: 'openai/gpt-oss-20b', locality: 'cloud' },
+  cloudflare: { model: '@cf/meta/llama-3.1-8b-instruct', locality: 'cloud' },
+  huggingface: { model: 'Qwen/Qwen3-32B', locality: 'cloud' },
+  cerebras: { model: 'gpt-oss-120b', locality: 'cloud' },
+  custom: { model: '', locality: 'cloud' }
+}
 
 interface Props {
   jobs: JobSummary[]
@@ -29,17 +39,21 @@ interface Props {
   stages: Record<string, { fraction: number; message: string }>
   error: string | null
   notice: string | null
-  onRun: (source: string, llm: string, captions: string) => void
+  onRun: (source: string, provider: string, captions: string, model?: string, endpoint?: string) => void
   onCancel: () => void
   onOpenLoop: () => void
   onOpenAbout: () => void
   onOpenJob: (id: string) => void
-  onResume: (id: string, llm?: string) => void
+  onResume: (id: string) => void
 }
 
 export default function Studio({ jobs, running, cancelling, startedAt, stages, error, notice, onRun, onCancel, onOpenLoop, onOpenAbout, onOpenJob, onResume }: Props) {
   const [source, setSource] = useState('')
-  const [llm, setLlm] = useState('gemini')
+  const [provider, setProvider] = useState('gemini')
+  const [model, setModel] = useState(PROVIDER_DEFAULTS.gemini.model)
+  const [endpoint, setEndpoint] = useState(PROVIDER_DEFAULTS.gemini.endpoint ?? '')
+  const [providerKey, setProviderKey] = useState('')
+  const [testResult, setTestResult] = useState<ProviderTestResult | null>(null)
   const [captions, setCaptions] = useState('classic')
   const [showKey, setShowKey] = useState(false)
   const [privacy, setPrivacy] = useState<PrivacySummary | null>(null)
@@ -58,9 +72,38 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
 
   async function showPrivacy() {
     try {
-      setPrivacy(await api.privacySummary(llm))
+      setPrivacy(await api.privacySummary(provider, model || undefined, endpoint || undefined))
     } catch (error) {
       setSupportMessage(`Privacy summary unavailable: ${String(error)}`)
+    }
+  }
+
+  function chooseProvider(next: string) {
+    setProvider(next)
+    const defaults = PROVIDER_DEFAULTS[next] ?? PROVIDER_DEFAULTS.custom
+    setModel(defaults.model)
+    setEndpoint(defaults.endpoint ?? '')
+    setProviderKey('')
+    setTestResult(null)
+  }
+
+  async function testProvider() {
+    setTestResult(null)
+    try {
+      setTestResult(await api.testConnection(provider, model || undefined, endpoint || undefined))
+    } catch (error) {
+      setTestResult({ state: 'FAIL', provider, message: String(error) })
+    }
+  }
+
+  async function saveProviderKey() {
+    if (!providerKey.trim() || provider === 'ollama') return
+    try {
+      await api.saveProviderKey(`preset-${provider}`, providerKey.trim())
+      setProviderKey('')
+      setSupportMessage(`Saved ${provider} credential in the operating-system vault.`)
+    } catch (error) {
+      setSupportMessage(`Could not save provider credential: ${String(error)}`)
     }
   }
 
@@ -136,9 +179,10 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
           ))}
         </div>
         <footer className="rail-foot">
-          <button className="btn-ghost" onClick={() => setShowKey(true)}>
-            ◈ gemini key
+                      <button className="btn-ghost" onClick={() => setShowKey(true)}>
+            ◈ provider settings
           </button>
+
           <button className="btn-ghost" onClick={onOpenLoop}>
             ⟳ instagram loop
           </button>
@@ -168,7 +212,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
             <input
               value={source}
               onChange={(e) => setSource(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && source.trim() && !running && onRun(source.trim(), llm, captions)}
+              onKeyDown={(e) => e.key === 'Enter' && source.trim() && !running && onRun(source.trim(), provider, captions, model || undefined, endpoint || undefined)}
               placeholder="YouTube URL or a path to a video file"
               disabled={running}
             />
@@ -182,7 +226,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
             </button>
             <button
               className="btn-primary"
-              onClick={() => onRun(source.trim(), llm, captions)}
+              onClick={() => onRun(source.trim(), provider, captions, model || undefined, endpoint || undefined)}
               disabled={running || !source.trim()}
             >
               {running ? 'WORKING' : 'CUT IT'}
@@ -199,18 +243,38 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
             )}
           </div>
           <div className="run-options">
-            <div className="opt-group">
-              <span className="opt-label">brain</span>
-              {['gemini', 'ollama'].map((mode) => (
+            <div className="opt-group provider-group">
+              <span className="opt-label">provider</span>
+              {Object.keys(PROVIDER_DEFAULTS).map((kind) => (
                 <button
-                  key={mode}
-                  className={`opt ${llm === mode ? 'opt-on' : ''}`}
-                  onClick={() => setLlm(mode)}
+                  key={kind}
+                  className={`opt ${provider === kind ? 'opt-on' : ''}`}
+                  onClick={() => chooseProvider(kind)}
                   disabled={running}
+                  aria-pressed={provider === kind}
                 >
-                  {mode}
+                  {kind}
                 </button>
               ))}
+            </div>
+            <div className="provider-config" aria-label="Provider configuration">
+              <label className="field-label" htmlFor="provider-model">model</label>
+              <input id="provider-model" value={model} onChange={(event) => setModel(event.target.value)} disabled={running} placeholder="model identifier" />
+              {(provider === 'custom' || provider === 'cloudflare') && (
+                <>
+                  <label className="field-label" htmlFor="provider-endpoint">endpoint</label>
+                  <input id="provider-endpoint" value={endpoint} onChange={(event) => setEndpoint(event.target.value)} disabled={running} placeholder="https://…/v1" />
+                </>
+              )}
+              {provider !== 'ollama' && (
+                <>
+                  <label className="field-label" htmlFor="provider-key">credential</label>
+                  <input id="provider-key" type="password" value={providerKey} onChange={(event) => setProviderKey(event.target.value)} disabled={running} placeholder="stored in OS vault; optional until Test Connection" autoComplete="off" />
+                  <button className="btn-secondary" onClick={saveProviderKey} disabled={running || !providerKey.trim()}>SAVE CREDENTIAL</button>
+                </>
+              )}
+              <button className="btn-secondary" onClick={testProvider} disabled={running}>TEST CONNECTION</button>
+              {testResult && <p className={`provider-test provider-test-${testResult.state.toLowerCase()}`} role="status">{testResult.state}: {testResult.message ?? `${testResult.provider ?? provider} / ${testResult.model ?? model}`}</p>}
             </div>
             <div className="opt-group">
               <span className="opt-label">captions</span>

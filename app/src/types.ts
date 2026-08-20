@@ -32,6 +32,43 @@ export interface MusicBrief {
   alternatives: { genre: string; mood: string; bpm_range: string }[]
 }
 
+export type CapabilityValue = boolean | null
+
+export interface ProviderCapabilities {
+  text: CapabilityValue
+  structured_json: CapabilityValue
+  json_schema: CapabilityValue
+  vision: CapabilityValue
+  model_listing: CapabilityValue
+  local: CapabilityValue
+  cloud: CapabilityValue
+  streaming?: CapabilityValue
+  context_window?: number | null
+  max_images?: number | null
+}
+
+export interface ProviderProfile {
+  id: string
+  kind: string
+  display_name: string
+  model: string
+  endpoint_identity?: string
+  locality: 'local' | 'cloud' | string
+  auth_strategy?: string
+  capabilities?: ProviderCapabilities
+}
+
+export interface ProviderTestResult {
+  state: 'PASS' | 'WARNING' | 'FAIL'
+  provider?: string
+  model?: string
+  code?: string
+  message?: string
+  models?: string[]
+  capabilities?: Record<string, unknown>
+  degraded_signals?: string[]
+}
+
 export interface ClipLedger {
   score: number
   composition: {
@@ -51,6 +88,12 @@ export interface ClipLedger {
     scoring_config_version: number
     arousal_source: string
     visual_pass: boolean
+    provider_profile_id?: string
+    provider_kind?: string
+    endpoint_identity?: string
+    capabilities?: ProviderCapabilities
+    structured_level?: string
+    degraded_signals?: string[]
   }
 }
 
@@ -100,7 +143,7 @@ export interface JobResults {
     heatmap: unknown[] | null
     probe: { duration_sec: number; width: number; height: number }
   } | null
-  score: { clips: Clip[]; llm_mode: string; model: string; scored_count: number } | null
+  score: { clips: Clip[]; llm_mode: string; model: string; scored_count: number; provider_profile_id?: string; provider_kind?: string; capabilities?: ProviderCapabilities } | null
   render: { outputs: RenderOutput[]; emoji_ok: boolean; caption_preset: string } | null
   events: { counts: Record<string, number>; timeline: unknown[]; arousal_source: string } | null
   candidates: { count: number; effective_weights: Record<string, number>; heatmap_present: boolean } | null
@@ -161,6 +204,8 @@ export interface PrivacySummary {
     device: string[]
     network: string[]
     provider: string
+    model?: string
+    endpoint?: string
   }
   instagram: string
   source: string
@@ -170,11 +215,13 @@ export interface PreflightResult {
   state: 'ready' | 'warning' | 'blocked'
   selected_llm: string
   checks: PreflightCheck[]
+  provider?: ProviderProfile
 }
 
 export interface SetupState {
   has_gemini_key: boolean
   onboarded: boolean
+  provider_keys?: Record<string, boolean>
 }
 
 /* ---------- the Instagram loop ---------- */

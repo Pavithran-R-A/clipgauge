@@ -116,6 +116,20 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     return 0 if payload["state"] != "blocked" else 2
 
 
+def cmd_provider_test(args: argparse.Namespace) -> int:
+    try:
+        profile = _profile_from_args(args)
+        result = providers_mod.make_adapter(profile).test_connection()
+    except Exception as err:  # noqa: BLE001 — return an actionable JSON boundary
+        result = {
+            "state": "FAIL",
+            "provider": args.provider or args.llm or "gemini",
+            "message": protocol.safe_message(str(err)),
+        }
+    print(json.dumps(result), flush=True)
+    return 0 if result.get("state") in {"PASS", "WARNING"} else 2
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     source = args.source
     source_type = "url" if source.startswith(("http://", "https://")) else "file"
@@ -406,6 +420,13 @@ def main(argv: list[str] | None = None) -> int:
     p_preflight.add_argument("--model", default=None, help="provider model identifier")
     p_preflight.add_argument("--endpoint", default=None, help="custom provider base URL")
     p_preflight.set_defaults(fn=cmd_preflight)
+
+    p_test = sub.add_parser("provider-test", help="test a configured provider connection")
+    p_test.add_argument("--llm", choices=["gemini", "ollama"], default=None, help=argparse.SUPPRESS)
+    p_test.add_argument("--provider", default=None, help="provider preset or custom kind")
+    p_test.add_argument("--model", default=None, help="provider model identifier")
+    p_test.add_argument("--endpoint", default=None, help="custom provider base URL")
+    p_test.set_defaults(fn=cmd_provider_test)
 
     p_run = sub.add_parser("run", help="process a YouTube URL or local video file")
     p_run.add_argument("source")
