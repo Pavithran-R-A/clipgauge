@@ -1,6 +1,7 @@
 """Stage 1A terminal-protocol regressions; intentionally added before fixes."""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,17 @@ class SuccessStage(queue.Stage):
 
     def run(self, ctx):
         return {"title": "fixture"}
+
+
+def _fake_ytdlp(tmp_path, message: str) -> Path:
+    if os.name == "nt":
+        fake = tmp_path / "yt-dlp-fake.cmd"
+        fake.write_text(f"@echo off\n>&2 echo ERROR: {message}\nexit /b 1\n")
+    else:
+        fake = tmp_path / "yt-dlp-fake"
+        fake.write_text(f"#!/bin/sh\nprintf 'ERROR: {message}\\n' >&2\nexit 1\n")
+        fake.chmod(0o755)
+    return fake
 
 
 def _assert_one_terminal(events):
@@ -189,9 +201,7 @@ def test_success_has_exactly_one_terminal_event(monkeypatch, capsys):
 def test_real_ingest_translates_fake_ytdlp_failure(monkeypatch, tmp_path, capsys):
     from clipgauge_pipeline.ingest import stage as ingest_stage
 
-    fake = tmp_path / "yt-dlp-fake"
-    fake.write_text("#!/bin/sh\nprintf 'ERROR: video unavailable after extractor failure\\n' >&2\nexit 1\n")
-    fake.chmod(0o755)
+    fake = _fake_ytdlp(tmp_path, "video unavailable after extractor failure")
     monkeypatch.setattr(ingest_stage.ytdlp, "ensure_ytdlp", lambda _progress: fake)
     monkeypatch.setattr(cli, "_stages", lambda: [ingest_stage.IngestStage()])
     code = cli.main(["--jsonl", "run", "https://example.test/video"])
@@ -206,9 +216,7 @@ def test_real_ingest_translates_fake_ytdlp_failure(monkeypatch, tmp_path, capsys
 def test_disposable_fake_ytdlp_failure_is_cleaned(monkeypatch, tmp_path):
     from clipgauge_pipeline.ingest import ytdlp
 
-    fake = tmp_path / "yt-dlp-fake"
-    fake.write_text("#!/bin/sh\nprintf 'ERROR: video unavailable\n' >&2\nexit 1\n")
-    fake.chmod(0o755)
+    fake = _fake_ytdlp(tmp_path, "video unavailable")
     with pytest.raises(YtDlpError, match="video unavailable"):
         ytdlp._run(fake, [], inactivity_timeout=1.0)
 

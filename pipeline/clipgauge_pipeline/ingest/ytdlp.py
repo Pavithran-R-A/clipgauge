@@ -198,13 +198,23 @@ def _run(
     inactivity_timeout: float = config.SUBPROCESS_INACTIVITY_TIMEOUT,
 ) -> str:
     """Run yt-dlp, streaming stdout lines, killing on output inactivity."""
-    proc = subprocess.Popen(
-        [str(bin_path), *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
+    command = [str(bin_path), *args]
+    if os.name == "nt" and bin_path.suffix.lower() in {".cmd", ".bat"}:
+        command = ["cmd.exe", "/d", "/c", *command]
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+    except OSError as exc:
+        raise YtDlpError(
+            f"The managed yt-dlp executable could not be started: {exc}",
+            code="YTDLP_UNAVAILABLE",
+            retryable=True,
+        ) from exc
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
     activity = threading.Event()
