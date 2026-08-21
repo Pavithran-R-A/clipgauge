@@ -1,5 +1,6 @@
 import hashlib
 import io
+import os
 import tarfile
 import zipfile
 from pathlib import Path
@@ -148,4 +149,9 @@ def test_valid_staged_archive_installation(tmp_path):
     )
     assert [path.relative_to(output).as_posix() for path in installed] == ["bin/tool"]
     assert (output / "bin/tool").read_bytes() == b"payload"
-    assert (output / "bin/tool").stat().st_mode & 0o111
+    if os.name == "nt":
+        # Windows does not expose POSIX execute bits through st_mode; the
+        # packaged-resource contract is successful materialization instead.
+        assert (output / "bin/tool").is_file()
+    else:
+        assert (output / "bin/tool").stat().st_mode & 0o111
