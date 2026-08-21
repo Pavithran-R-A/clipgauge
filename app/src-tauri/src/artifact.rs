@@ -147,7 +147,9 @@ mod tests {
     use super::{export_clip, job_results};
     use serde_json::json;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
     fn write_render_checkpoint(job: &std::path::Path, path: &std::path::Path) {
         let checkpoint = json!({
@@ -166,11 +168,11 @@ mod tests {
     }
 
     fn fixture() -> std::path::PathBuf {
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let home = std::env::temp_dir().join(format!("clipgauge-artifact-{suffix}"));
+        let suffix = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let home = std::env::temp_dir().join(format!(
+            "clipgauge-artifact-{}-{suffix}",
+            std::process::id()
+        ));
         let job = home.join("jobs/20260818-155237-c6b118");
         fs::create_dir_all(job.join("clips")).unwrap();
         fs::write(job.join("clips/clip_00.mp4"), b"video").unwrap();
