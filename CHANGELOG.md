@@ -2,6 +2,27 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.4.1] — 2026-08-21
+
+ClipGauge v0.4.1 is the qualification-and-release-gates patch release. It closes the verified v0.4.0 gaps around setup observability, production-default model-backed output, exact-tag publication, and platform quality enforcement.
+
+### Setup Center and onboarding
+
+- Completes streamed setup progress for every substantial setup action in Studio and Onboarding, including bytes completed/total, determinate percentage, speed, meaningful ETA, elapsed time, and one-time versus reused lifecycle labels.
+- Adds required/optional/installed/available storage summaries, richer asset provenance rows, cancellable operations, and functional retry of the last validated setup action.
+- Routes runtime, FFmpeg, ASR, analysis, YouTube compatibility, and local-model setup through the cancellable streaming boundary; compute stages do not gain hidden large-download bypasses.
+
+### Qualification and release gates
+
+- Adds a production-default model-backed E2E gate using a genuine MIT-licensed speech fixture, real managed assets, 1080×1920 vertical output, and captions burned into the final playable MP4.
+- Adds an exact-tag `model-e2e-release` job whose validated `MODEL_E2E_SUMMARY.json` is required by release metadata and publication, then checksummed and attached.
+- Strengthens CI, Windows, macOS, and release quality gates by removing blanket Clippy allowances and test exclusions; native Windows acceptance remains a GitHub-hosted Windows responsibility.
+
+### Evidence and provenance
+
+- Commits the genuine speech fixture and provenance documentation used by the release gate.
+- Updates README download navigation, accessibility evidence, YouTube validation classification, security review, and the v0.4.1 final audit while preserving AGPL-3.0-or-later licensing, publikclip attribution, and the GPL-3.0-only bgutil notice.
+
 ## [0.4.0] — 2026-08-21
 
 ClipGauge v0.4.0 is the managed-runtime and creator-workflow release. It makes runtime, speech, analysis, YouTube compatibility, and local-provider setup explicit, consented, repairable, and observable.

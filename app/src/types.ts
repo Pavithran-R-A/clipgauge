@@ -263,6 +263,9 @@ export interface ManagedAssetRow {
   destination: string
   url: string
   size_bytes: number
+  installed_size_bytes?: number
+  source_revision?: string
+  reused_from_migration?: boolean
   required: boolean
   one_time: boolean
   license: string
@@ -295,15 +298,17 @@ export interface SetupProgressEvent {
   code?: string
   ok?: boolean
   message?: string
+  retryable?: boolean
+  diagnostic_id?: string
 }
 
 export interface LocalSetupInventory {
   state: 'ready' | 'setup-required' | string
-  runtime: Record<string, unknown> & { installed?: boolean; display_name?: string; size_bytes?: number }
-  models: Array<Record<string, unknown> & { asset_id?: string; installed?: boolean; display_name?: string; size_bytes?: number; license?: string }>
-  core_assets: Array<Record<string, unknown> & { asset_id?: string; installed?: boolean; display_name?: string; purpose?: string; integrity?: string; license?: string }>
+  runtime: Record<string, unknown> & { installed?: boolean; display_name?: string; size_bytes?: number; installed_size_bytes?: number; version?: string }
+  models: Array<Record<string, unknown> & { asset_id?: string; installed?: boolean; cached?: boolean; one_time?: boolean; display_name?: string; purpose?: string; size_bytes?: number; installed_size_bytes?: number; version?: string; license?: string }>
+  core_assets: Array<Record<string, unknown> & { asset_id?: string; installed?: boolean; cached?: boolean; one_time?: boolean; display_name?: string; purpose?: string; integrity?: string; license?: string; size_bytes?: number; installed_size_bytes?: number; version?: string }>
   managed_assets?: ManagedAssetRow[]
-  storage: PreflightStorage
+  storage: PreflightStorage & { download_bytes?: number; installed_bytes?: number; location?: string }
   catalog: Array<Record<string, unknown>>
 }
 

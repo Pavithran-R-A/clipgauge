@@ -157,7 +157,7 @@ jobs:
           Add-Content $env:GITHUB_ENV "CLIPGAUGE_FFMPEG=$env:CLIPGAUGE_HOME\bin\ffmpeg.exe"
       - name: Run Windows pipeline tests
         working-directory: pipeline
-        run: uv run pytest -q --ignore=tests/test_runtime.py --ignore=tests/test_stage1a_protocol.py
+        run: uv run pytest -q
       - name: Install frontend dependencies and run frontend gates
         working-directory: app
         run: |
@@ -173,8 +173,7 @@ jobs:
         run: |
           cargo fmt -- --check
           cargo test
-          # Provider-aware commands intentionally carry explicit provider configuration and vault handles.
-          cargo clippy -- -D warnings -A clippy::too_many_arguments -A dead_code
+          cargo clippy --all-targets --all-features -- -D warnings
       - name: Build fresh NSIS installer from exact tag
         working-directory: app
         run: npx tauri build --bundles nsis
@@ -263,9 +262,9 @@ jobs:
             # The locked ML stack has no Intel macOS wheels. Install only the
             # compatible dependencies needed by deterministic test modules.
             uv venv --python 3.12 .venv
-            uv pip install --python .venv/bin/python pytest httpx numpy scipy scikit-learn yt-dlp python-speech-features
+            uv pip install --python .venv/bin/python pytest httpx 'librosa==0.10.2.post1' 'numba==0.60.0' numpy scipy scikit-learn yt-dlp python-speech-features
             PYTHONPATH="$GITHUB_WORKSPACE/pipeline" .venv/bin/python -c "from clipgauge_pipeline.render import ffmpeg_bin; path, captions = ffmpeg_bin.resolve(); print(path, captions); assert captions"
-            PYTHONPATH="$GITHUB_WORKSPACE/pipeline" .venv/bin/pytest -q --ignore=tests/test_events_post.py
+            PYTHONPATH="$GITHUB_WORKSPACE/pipeline" .venv/bin/pytest -q
           else
             uv sync --dev
             uv run python -c "from clipgauge_pipeline.render import ffmpeg_bin; path, captions = ffmpeg_bin.resolve(); print(path, captions); assert captions"
@@ -282,10 +281,9 @@ jobs:
         run: |
           mkdir -p resources
           cargo fmt -- --check
-          # Release qualification has no generated render checkpoint; skip fixture-dependent artifact tests only.
-          cargo test --target "${{ matrix.target }}" -- --skip artifact::tests::missing_render_artifact_is_explicit --skip artifact::tests::outside_render_artifact_is_explicit --skip artifact::tests::reports_available_render_artifact
-          # Provider-aware commands intentionally carry explicit provider configuration and vault handles.
-          cargo clippy --target "${{ matrix.target }}" -- -D warnings -A clippy::too_many_arguments -A dead_code
+          # Run the complete target test suite; fixture-dependent artifact tests must remain release-visible.
+          cargo test --target "${{ matrix.target }}"
+          cargo clippy --target "${{ matrix.target }}" --all-targets --all-features -- -D warnings
       - name: Build unsigned macOS app qualification artifact
         working-directory: app
         run: |
@@ -316,9 +314,90 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  model-e2e-release:
+    name: Production-default model-backed E2E
+    needs: validate-tag
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    env:
+      CLIPGAUGE_HOME: ${{ github.workspace }}/.clipgauge-home
+      CLIPGAUGE_FFMPEG: /usr/bin/ffmpeg
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      TRANSFORMERS_VERBOSITY: error
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: latest
+          enable-cache: true
+          cache-dependency-glob: pipeline/uv.lock
+      - name: Install deterministic media prerequisite
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y ffmpeg
+      - name: Resolve full pipeline environment
+        working-directory: pipeline
+        run: uv sync --dev
+      - name: Install managed ASR assets with explicit setup consent
+        working-directory: pipeline
+        run: |
+          uv run clipgauge --jsonl setup install-group --group core:asr | tee "$GITHUB_WORKSPACE/setup-asr.jsonl"
+      - name: Install managed analysis assets with explicit setup consent
+        working-directory: pipeline
+        run: |
+          uv run clipgauge --jsonl setup install-group --group core:analysis | tee "$GITHUB_WORKSPACE/setup-analysis.jsonl"
+      - name: Install managed local runtime and model with explicit setup consent
+        working-directory: pipeline
+        run: |
+          uv run clipgauge --jsonl setup install-runtime | tee "$GITHUB_WORKSPACE/setup-runtime.jsonl"
+          uv run clipgauge --jsonl setup download-model clipgauge-local/qwen3-1.7b-q8_0 | tee "$GITHUB_WORKSPACE/setup-model.jsonl"
+      - name: Build the genuine speech acceptance input
+        working-directory: pipeline
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/e2e-input"
+          ffmpeg -hide_banner -loglevel error -y \
+            -f lavfi -i color=c=0x182033:s=1280x720:r=30 \
+            -stream_loop -1 -i tests/fixtures/v041-jfk.flac \
+            -t 33 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac -ar 16000 -shortest \
+            "$GITHUB_WORKSPACE/e2e-input/v041-controlled.mp4"
+      - name: Run the real production-default pipeline
+        working-directory: pipeline
+        run: |
+          uv run clipgauge --jsonl run "$GITHUB_WORKSPACE/e2e-input/v041-controlled.mp4" \
+            --provider clipgauge-local \
+            --model clipgauge-local/qwen3-1.7b-q8_0 \
+            > "$GITHUB_WORKSPACE/model-e2e.jsonl" 2>&1
+      - name: Validate terminal, stages, and production-default media contract
+        working-directory: pipeline
+        run: |
+          job_id=$(python3 -c 'import json; events=[json.loads(line) for line in open("../model-e2e.jsonl") if line.lstrip().startswith("{")]; print(next(event["job_id"] for event in reversed(events) if event.get("event")=="terminal"))')
+          job_dir="$CLIPGAUGE_HOME/jobs/$job_id"
+          test -d "$job_dir"
+          uv run python ../scripts/validate-model-e2e.py ../model-e2e.jsonl "$job_dir" "$job_dir/clips/clip_00.mp4" > ../model-e2e-summary.json
+          printf 'job_id=%s\n' "$job_id" > ../model-e2e-job.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clipgauge-model-e2e-${{ github.sha }}
+          path: |
+            model-e2e.jsonl
+            model-e2e-summary.json
+            model-e2e-job.txt
+            setup-asr.jsonl
+            setup-analysis.jsonl
+            setup-runtime.jsonl
+            setup-model.jsonl
+            e2e-input/v041-controlled.mp4
+          if-no-files-found: error
+          retention-days: 14
+
   release-metadata:
     name: Generate and validate release metadata
-    needs: [validate-tag, linux-release, windows-release, macos-release]
+    needs: [validate-tag, linux-release, windows-release, macos-release, model-e2e-release]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -338,6 +417,10 @@ jobs:
         with:
           name: clipgauge-windows-${{ github.sha }}
           path: release-inputs/windows
+      - uses: actions/download-artifact@v4
+        with:
+          name: clipgauge-model-e2e-${{ github.sha }}
+          path: release-inputs/model-e2e
       - name: Normalize release inputs
         shell: bash
         run: |
@@ -345,7 +428,9 @@ jobs:
           mkdir -p release-assets
           find release-inputs/linux -maxdepth 1 -type f -name 'ClipGauge_*.deb' -exec cp {} release-assets/ \;
           find release-inputs/windows -maxdepth 1 -type f -name 'ClipGauge_*.exe' -exec cp {} release-assets/ \;
+          cp release-inputs/model-e2e/model-e2e-summary.json release-assets/MODEL_E2E_SUMMARY.json
           test "$(find release-assets -maxdepth 1 -type f \( -name '*.deb' -o -name '*.exe' \) | wc -l)" -eq 2
+          test -s release-assets/MODEL_E2E_SUMMARY.json
       - name: Generate CycloneDX SBOM
         run: python3 scripts/generate-release-metadata.py --tag "$RELEASE_TAG" --output-dir release-assets
       - name: Validate CycloneDX SBOM
@@ -383,6 +468,7 @@ jobs:
           - Curated cloud presets are capability-aware and require explicit user selection; no automatic cross-provider failover is enabled.
           - Linux amd64 Debian and Windows x64 NSIS artifacts are unsigned.
           - Native macOS ARM and Intel builds are qualification results; no signing or notarization is claimed.
+          - The exact-tag publication is gated by a real managed-model E2E using the production-default captioned 1080x1920 render path; its summary is attached as `MODEL_E2E_SUMMARY.json`.
           - The CycloneDX SBOM is generated from the ${RELEASE_TAG} tag and validated against its peeled source commit.
           - \`SHA256SUMS\`, \`RELEASE_PROVENANCE.md\`, and \`ATTESTATION_STATUS.md\` describe the exact attached assets and distinguish checksums, metadata, GitHub attestations, and platform signing.
           - AGPL-3.0-or-later licensing and upstream publikclip attribution remain preserved.
@@ -391,7 +477,7 @@ jobs:
         working-directory: release-assets
         run: |
           set -euo pipefail
-          sha256sum ClipGauge_*.deb ClipGauge_*.exe SBOM.cyclonedx.json RELEASE_PROVENANCE.md ATTESTATION_STATUS.md > SHA256SUMS
+          sha256sum ClipGauge_*.deb ClipGauge_*.exe SBOM.cyclonedx.json MODEL_E2E_SUMMARY.json RELEASE_PROVENANCE.md ATTESTATION_STATUS.md > SHA256SUMS
           sha256sum -c SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
@@ -402,7 +488,7 @@ jobs:
 
   release-publish:
     name: Publish draft-first GitHub release
-    needs: [validate-tag, linux-release, windows-release, macos-release, release-metadata]
+    needs: [validate-tag, linux-release, windows-release, macos-release, model-e2e-release, release-metadata]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -421,6 +507,7 @@ jobs:
           test -f SBOM.cyclonedx.json
           test -f RELEASE_PROVENANCE.md
           test -f ATTESTATION_STATUS.md
+          test -f MODEL_E2E_SUMMARY.json
           sha256sum -c SHA256SUMS
       - name: Create complete draft release
         env:
@@ -440,6 +527,7 @@ jobs:
             release-assets/ClipGauge_*.exe \
             release-assets/SHA256SUMS \
             release-assets/SBOM.cyclonedx.json \
+            release-assets/MODEL_E2E_SUMMARY.json \
             release-assets/RELEASE_PROVENANCE.md \
             release-assets/ATTESTATION_STATUS.md
       - name: Verify draft assets then publish

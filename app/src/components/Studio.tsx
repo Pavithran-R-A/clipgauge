@@ -3,6 +3,7 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { listen } from '@tauri-apps/api/event'
 import { api } from '../api'
 import type { JobSummary, LocalSetupInventory, ManagedAssetRow, PrivacySummary, ProviderTestResult, SetupProgressEvent, StageProgress } from '../types'
+import { assetLifecycleLabel, formatBytes, formatDuration, formatRate, meaningfulEta, progressPercent } from '../setupFormatting'
 import KeyModal from './KeyModal'
 import clipgaugeMark from '../assets/clipgauge-mark.svg'
 
@@ -68,7 +69,10 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
   const [setupInventory, setSetupInventory] = useState<LocalSetupInventory | null>(null)
   const [setupBusy, setSetupBusy] = useState(false)
   const [setupOperationId, setSetupOperationId] = useState<string | null>(null)
+  const [lastSetupArgs, setLastSetupArgs] = useState<string[] | null>(null)
   const [setupProgress, setSetupProgress] = useState<SetupProgressEvent | null>(null)
+  const [setupStartedAt, setSetupStartedAt] = useState<number | null>(null)
+  const [setupNow, setSetupNow] = useState(() => Date.now())
   const [privacy, setPrivacy] = useState<PrivacySummary | null>(null)
   const [supportMessage, setSupportMessage] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
@@ -76,6 +80,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
   useEffect(() => {
     let unlisten: (() => void) | undefined
     void listen<SetupProgressEvent>('setup-event', ({ payload }) => {
+      setSetupStartedAt((value) => value ?? Date.now())
       setSetupProgress(payload)
       if (payload.event === 'terminal') {
         setSetupBusy(false)
@@ -95,7 +100,15 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
     return () => window.clearInterval(timer)
   }, [startedAt])
 
+  useEffect(() => {
+    if (!setupStartedAt) return
+    setSetupNow(Date.now())
+    const timer = window.setInterval(() => setSetupNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [setupStartedAt])
+
   const elapsed = startedAt ? Math.max(0, Math.floor((now - startedAt) / 1000)) : 0
+  const setupElapsed = setupProgress?.elapsed_seconds ?? (setupStartedAt ? Math.max(0, Math.floor((setupNow - setupStartedAt) / 1000)) : 0)
   const elapsedLabel = `${String(Math.floor(elapsed / 60)).padStart(2, '0')}:${String(elapsed % 60).padStart(2, '0')}`
 
   async function showPrivacy() {
@@ -115,22 +128,11 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
     }
   }
 
-  async function runSetupAction(action: () => Promise<Record<string, unknown>>, success: string) {
-    setSetupBusy(true)
-    try {
-      await action()
-      setSupportMessage(success)
-      setSetupInventory((await api.setupInventory()) as unknown as LocalSetupInventory)
-    } catch (error) {
-      setSupportMessage(`Setup needs attention: ${String(error)}`)
-    } finally {
-      setSetupBusy(false)
-    }
-  }
-
   async function startSetupAction(args: string[], success: string) {
+    setLastSetupArgs(args)
     setSetupBusy(true)
-    setSetupProgress({ operation: 'Preparing verified setup…', message: 'Preparing verified setup…', state: 'STARTING' })
+    setSetupStartedAt(Date.now())
+    setSetupProgress({ operation: 'Preparing verified setup…', message: 'Preparing verified setup…', state: 'STARTING', elapsed_seconds: 0, one_time_download: true })
     try {
       const operationId = await api.startSetup(args)
       setSetupOperationId(operationId)
@@ -214,6 +216,19 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
   const youtubeReady = hasAsset('runtime:node:') && hasAsset('youtube:bgutil-provider:')
   const analysisReady = ['model:laughter:', 'model:panns:', 'model:campplus:', 'model:ultraface:', 'model:lr-asd:'].every(hasAsset)
   const ffmpegAsset = managedAssets.find((asset) => asset.asset_id.startsWith('runtime:ffmpeg:'))
+  const setupStorage = setupInventory?.storage
+  const setupPercent = progressPercent(setupProgress)
+  const setupEta = meaningfulEta(setupProgress)
+  const setupRate = formatRate(setupProgress?.bytes_per_second)
+  const setupTotal = setupProgress?.bytes_total ?? 0
+  const setupDone = setupProgress?.bytes_done ?? 0
+  const groupSummary = (prefixes: string[]) => {
+    const rows = managedAssets.filter((asset) => prefixes.some((prefix) => asset.asset_id.startsWith(prefix)))
+    const download = rows.reduce((sum, asset) => sum + (asset.size_bytes || 0), 0)
+    const installed = rows.filter((asset) => asset.installed).reduce((sum, asset) => sum + (asset.installed_size_bytes || asset.size_bytes || 0), 0)
+    const missing = rows.some((asset) => !asset.installed)
+    return `${formatBytes(download)} download · ${formatBytes(installed)} installed · ${missing ? 'ONE-TIME DOWNLOAD' : 'INSTALLED · REUSED FOR FUTURE JOBS'}`
+  }
 
   return (
     <div className="studio">
@@ -226,36 +241,44 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
               <div><p id="setup-title" className="audit-kicker">SETUP CENTER</p><p className="ig-intro">Verified local AI, one controlled download at a time.</p></div>
               <button className="btn-ghost" onClick={() => setShowSetup(false)}>close</button>
             </header>
+            <div className="setup-storage-summary" aria-label="Managed storage summary">
+              <div><span>Required now</span><strong>{formatBytes(setupStorage?.required_bytes)}</strong></div>
+              <div><span>Optional local AI</span><strong>{formatBytes(setupStorage?.optional_bytes)}</strong></div>
+              <div><span>Already installed</span><strong>{formatBytes(setupStorage?.installed_bytes)}</strong></div>
+              <div><span>Available disk</span><strong>{formatBytes(setupStorage?.available_bytes)}</strong></div>
+            </div>
             <div className="setup-panel">
-              <div className="setup-panel-row"><strong>ClipGauge Local runtime</strong><span className={`chip ${setupInventory?.runtime?.installed ? 'chip-green' : 'chip-amber'}`}>{setupInventory?.runtime?.installed ? 'VERIFIED' : 'NOT INSTALLED'}</span></div>
+              <div className="setup-panel-row"><strong>ClipGauge Local runtime</strong><span className={`chip ${setupInventory?.runtime?.installed ? 'chip-green' : 'chip-amber'}`}>{setupInventory?.runtime?.installed ? 'INSTALLED · REUSED FOR FUTURE JOBS' : 'ONE-TIME DOWNLOAD'}</span></div>
               <p className="ig-message">llama.cpp runs on loopback only. The archive is pinned and SHA-256 checked before extraction.</p>
-              {!setupInventory?.runtime?.installed && <button className="btn-secondary" disabled={setupBusy} onClick={() => runSetupAction(api.installLocalRuntime, 'ClipGauge Local runtime installed and verified.')}>{setupBusy ? 'WORKING…' : 'INSTALL RUNTIME'}</button>}
+              <p className="mono setup-size">{formatBytes(setupInventory?.runtime?.size_bytes)} download{setupInventory?.runtime?.installed_size_bytes ? ` · ${formatBytes(setupInventory.runtime.installed_size_bytes)} installed` : ''}{setupInventory?.runtime?.version ? ` · ${String(setupInventory.runtime.version)}` : ''}</p>
+              {!setupInventory?.runtime?.installed && <button className="btn-secondary" disabled={setupBusy} onClick={() => startSetupAction(['install-runtime'], 'ClipGauge Local runtime setup started.')}
+>{setupBusy ? 'WORKING…' : 'INSTALL RUNTIME'}</button>}
             </div>
             <div className="setup-panel">
               <div className="setup-panel-row"><strong>Core components</strong><span className="mono setup-size">verified manifest</span></div>
               {setupInventory?.core_assets?.map((asset) => (
-                <div className="setup-asset" key={String(asset.asset_id)}>
-                  <div><strong>{asset.display_name ?? asset.asset_id}</strong><span>{asset.purpose ?? 'ClipGauge component'}</span></div>
-                  <span className={`chip ${asset.installed ? 'chip-green' : 'chip-amber'}`}>{asset.installed ? 'READY' : String(asset.integrity ?? 'SETUP')}</span>
+                <div className="setup-asset setup-asset-rich" key={String(asset.asset_id)}>
+                  <div><strong>{asset.display_name ?? asset.asset_id}</strong><span>{asset.purpose ?? 'ClipGauge component'}</span><span className="mono setup-size">{formatBytes(asset.size_bytes)} download{asset.installed_size_bytes ? ` · ${formatBytes(asset.installed_size_bytes)} installed` : ''}{asset.version ? ` · ${String(asset.version)}` : ''}</span></div>
+                  <span className={`chip ${asset.installed ? 'chip-green' : 'chip-amber'}`}>{assetLifecycleLabel({ installed: asset.installed, cached: Boolean(asset.cached), one_time: Boolean(asset.one_time ?? true), status: asset.integrity })}</span>
                 </div>
               ))}
             </div>
             <div className="setup-panel">
               <div className="setup-panel-row"><strong>Managed components</strong><span className="mono setup-size">{managedAssets.length} verified assets</span></div>
-              <p className="ig-message">Every large download is listed, consented as a group, resumable, cancellable, and SHA-256 checked before use.</p>
-              <div className="setup-asset"><div><strong>Video engine</strong><span>Caption-capable FFmpeg for decoding and rendering</span></div>{ffmpegAsset?.installed ? <span className="chip chip-green">READY</span> : <button className="btn-secondary" disabled={setupBusy} onClick={() => startSetupAction(['install-ffmpeg'], 'Video engine installation started.')}>{setupBusy ? 'WORKING…' : 'DOWNLOAD'}</button>}</div>
-              <div className="setup-asset"><div><strong>Speech recognition</strong><span>Verified faster-whisper, English alignment, and sentence data</span></div>{asrReady ? <span className="chip chip-green">READY</span> : <button className="btn-secondary" disabled={setupBusy} onClick={() => startSetupAction(['install-group', '--group', 'core:asr'], 'Speech recognition download started.')}>{setupBusy ? 'WORKING…' : 'DOWNLOAD'}</button>}</div>
-              <div className="setup-asset"><div><strong>Clip analysis</strong><span>Speaker, laughter, audio-event, and smart-camera assets</span></div>{analysisReady ? <span className="chip chip-green">READY</span> : <button className="btn-secondary" disabled={setupBusy} onClick={() => startSetupAction(['install-group', '--group', 'core:analysis'], 'Analysis components download started.')}>{setupBusy ? 'WORKING…' : 'DOWNLOAD'}</button>}</div>
-              <div className="setup-asset"><div><strong>YouTube compatibility</strong><span>yt-dlp, portable Node.js, and loopback PO-token provider</span></div>{youtubeReady ? <span className="chip chip-green">READY</span> : <button className="btn-secondary" disabled={setupBusy} onClick={() => startSetupAction(['install-group', '--group', 'core:youtube'], 'YouTube compatibility setup started.')}>{setupBusy ? 'WORKING…' : 'DOWNLOAD'}</button>}</div>
-              {setupBusy && <div className="setup-progress" role="status"><div className="setup-panel-row"><strong>{setupProgress?.display_name ?? setupProgress?.operation ?? 'Preparing setup…'}</strong><button className="btn-ghost" disabled={!setupOperationId} onClick={cancelSetupAction}>cancel</button></div><p className="ig-message">{setupProgress?.message ?? 'Preparing verified assets…'}{setupProgress?.eta_seconds != null ? ` · about ${Math.ceil(setupProgress.eta_seconds)}s left` : ''}</p>{setupProgress?.bytes_total ? <div className="progress-track"><div className="progress-fill" style={{ width: `${Math.max(0, Math.min(100, (setupProgress.bytes_done ?? 0) / setupProgress.bytes_total * 100))}%` }} /></div> : <div className="progress-track"><div className="progress-fill progress-indeterminate" /> </div>}</div>}
-              <details className="setup-details"><summary>Show verified asset details</summary>{managedAssets.map((asset) => <div className="setup-asset" key={asset.asset_id}><div><strong>{asset.display_name}</strong><span>{asset.purpose} · {asset.license}</span></div><span className={`chip ${asset.installed ? 'chip-green' : 'chip-amber'}`}>{asset.installed ? 'VERIFIED' : asset.status ?? 'SETUP'}</span></div>)}</details>
+              <p className="ig-message">Every substantial download is listed, consented as a group, resumable, cancellable, and SHA-256 checked before use.</p>
+              <div className="setup-asset setup-asset-rich"><div><strong>Video engine</strong><span>Caption-capable FFmpeg for decoding and rendering</span><span className="mono setup-size">{groupSummary(['runtime:ffmpeg:'])}</span></div>{ffmpegAsset?.installed ? <span className="chip chip-green">{assetLifecycleLabel(ffmpegAsset)}</span> : <button className="btn-secondary" disabled={setupBusy} onClick={() => startSetupAction(['install-ffmpeg'], 'Video engine installation started.')}>{setupBusy ? 'WORKING…' : 'DOWNLOAD'}</button>}</div>
+              <div className="setup-asset setup-asset-rich"><div><strong>Speech recognition</strong><span>Verified faster-whisper, Silero VAD, English alignment, and sentence data</span><span className="mono setup-size">{groupSummary(['model:asr:', 'model:alignment:', 'data:nltk:', 'model:silero:'])}</span></div>{asrReady ? <span className="chip chip-green">INSTALLED · REUSED FOR FUTURE JOBS</span> : <button className="btn-secondary" disabled={setupBusy} onClick={() => startSetupAction(['install-group', '--group', 'core:asr'], 'Speech recognition download started.')}>{setupBusy ? 'WORKING…' : 'DOWNLOAD'}</button>}</div>
+              <div className="setup-asset setup-asset-rich"><div><strong>Clip analysis</strong><span>Speaker, laughter, audio-event, and smart-camera assets</span><span className="mono setup-size">{groupSummary(['model:laughter:', 'model:panns:', 'model:campplus:', 'model:ultraface:', 'model:lr-asd:'])}</span></div>{analysisReady ? <span className="chip chip-green">INSTALLED · REUSED FOR FUTURE JOBS</span> : <button className="btn-secondary" disabled={setupBusy} onClick={() => startSetupAction(['install-group', '--group', 'core:analysis'], 'Analysis components download started.')}>{setupBusy ? 'WORKING…' : 'DOWNLOAD'}</button>}</div>
+              <div className="setup-asset setup-asset-rich"><div><strong>YouTube compatibility</strong><span>yt-dlp, portable Node.js, and loopback PO-token provider</span><span className="mono setup-size">{groupSummary(['runtime:yt-dlp:', 'runtime:node:', 'youtube:bgutil-provider:'])}</span></div>{youtubeReady ? <span className="chip chip-green">INSTALLED · REUSED FOR FUTURE JOBS</span> : <button className="btn-secondary" disabled={setupBusy} onClick={() => startSetupAction(['install-group', '--group', 'core:youtube'], 'YouTube compatibility setup started.')}>{setupBusy ? 'WORKING…' : 'DOWNLOAD'}</button>}</div>
+              {setupBusy || setupProgress ? <div className="setup-progress" role="status" aria-live="polite"><div className="setup-panel-row"><strong>{setupProgress?.display_name ?? setupProgress?.operation ?? 'Preparing setup…'}</strong><button className="btn-ghost" disabled={!setupOperationId} onClick={cancelSetupAction}>cancel</button></div><p className="ig-message">{setupProgress?.message ?? 'Preparing verified assets…'}</p><div className="setup-progress-facts"><span>{setupTotal > 0 ? `${formatBytes(setupDone)} / ${formatBytes(setupTotal)}` : 'Downloading…'}</span>{setupPercent != null && <span>{setupPercent}%</span>}{setupRate && <span>{setupRate}</span>}{setupEta && <span>{setupEta} remaining</span>}<span>elapsed {formatDuration(setupElapsed)}</span>{setupProgress?.one_time_download && <span>One-time download</span>}</div>{setupTotal > 0 && setupPercent != null ? <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={setupPercent}><div className="progress-fill" style={{ width: `${setupPercent}%` }} /></div> : <div className="progress-track" role="progressbar" aria-label="Download in progress"><div className="progress-fill progress-indeterminate" /></div>}{!setupBusy && setupProgress?.state && setupProgress.state !== 'STARTING' && lastSetupArgs && <button className="btn-secondary" onClick={() => startSetupAction(lastSetupArgs, 'Retry started.')}>RETRY</button>}</div> : null}
+              <details className="setup-details"><summary>Show verified asset details</summary>{managedAssets.map((asset) => <div className="setup-asset setup-asset-rich" key={asset.asset_id}><div><strong>{asset.display_name}</strong><span>{asset.purpose} · {asset.license}</span><span className="mono setup-size">{formatBytes(asset.size_bytes)} download{asset.installed_size_bytes ? ` · ${formatBytes(asset.installed_size_bytes)} installed` : ''}{asset.source_revision ? ` · ${asset.source_revision}` : ''}</span></div><span className={`chip ${asset.installed ? 'chip-green' : 'chip-amber'}`}>{assetLifecycleLabel(asset)}</span></div>)}</details>
             </div>
             <div className="setup-panel">
               <div className="setup-panel-row"><strong>Local models</strong><span className="mono setup-size">{setupInventory?.storage?.required_bytes ? `${(setupInventory.storage.required_bytes / 1024 ** 3).toFixed(1)} GB required` : 'size check pending'}</span></div>
               {setupInventory?.models?.map((asset) => (
-                <div className="setup-asset" key={String(asset.asset_id)}>
-                  <div><strong>{asset.display_name ?? asset.asset_id}</strong><span className="mono">{asset.license ?? 'license in source manifest'}</span></div>
-                  {asset.installed ? <span className="chip chip-green">VERIFIED</span> : <button className="btn-secondary" disabled={setupBusy} onClick={() => runSetupAction(() => api.downloadLocalModel(String(asset.asset_id)), 'Local model downloaded and verified.')}>{setupBusy ? 'WORKING…' : 'DOWNLOAD'}</button>}
+                <div className="setup-asset setup-asset-rich" key={String(asset.asset_id)}>
+                  <div><strong>{asset.display_name ?? asset.asset_id}</strong><span>{asset.purpose ?? 'ClipGauge Local structured clip scoring'}</span><span className="mono setup-size">{formatBytes(asset.size_bytes)} download{asset.installed_size_bytes ? ` · ${formatBytes(asset.installed_size_bytes)} installed` : ''}{asset.version ? ` · ${String(asset.version)}` : ''}</span></div>
+                  {asset.installed ? <span className="chip chip-green">{assetLifecycleLabel({ installed: asset.installed, cached: Boolean(asset.cached), one_time: Boolean(asset.one_time ?? true) })}</span> : <button className="btn-secondary" disabled={setupBusy} onClick={() => startSetupAction(['download-model', String(asset.asset_id)], 'Local model setup started.')}>{setupBusy ? 'WORKING…' : 'DOWNLOAD'}</button>}
                 </div>
               ))}
             </div>
