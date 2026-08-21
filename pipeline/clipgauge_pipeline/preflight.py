@@ -10,7 +10,7 @@ from pathlib import Path
 
 import httpx
 
-from . import config, hardware, protocol, runtime
+from . import config, hardware, local_runtime, protocol, runtime
 from .ingest import ytdlp
 from .models import registry, specs  # noqa: F401 - register concrete models
 from .render import ffmpeg_bin
@@ -119,6 +119,27 @@ def _provider(checks: list[dict], profile: providers_mod.ProviderProfile) -> Non
             "Save the provider credential in Settings or choose a local provider.",
             provider=profile.kind,
         )
+        return
+    if profile.kind == "clipgauge-local":
+        try:
+            managed = local_runtime.LocalRuntime()
+            binary = managed.binary_path()
+            model = managed.model_path(profile.model)
+            model_spec = local_runtime.MODEL_CATALOG[profile.model]
+        except (KeyError, local_runtime.LocalRuntimeError) as error:
+            _check(checks, "clipgauge-local", "blocked", "ClipGauge Local is not available for the selected model or platform.", "Open Setup Center and choose a verified local model.", error=str(error), provider=profile.kind)
+            return
+        if not binary.is_file():
+            _check(checks, "clipgauge-local-runtime", "blocked", "ClipGauge Local runtime is not installed yet.", "Open Setup Center to install the verified llama.cpp runtime.", path=str(binary), expected_size=managed.runtime_asset().get("size"), provider=profile.kind)
+            return
+        if not model.is_file():
+            _check(checks, "clipgauge-local-model", "blocked", f"{model_spec.display_name} is not installed yet.", "Open Setup Center to download the verified local model.", expected_size=model_spec.size_bytes, provider=profile.kind, model=profile.model)
+            return
+        digest = runtime.sha256_file(model)
+        if digest.lower() != model_spec.sha256.lower():
+            _check(checks, "clipgauge-local-model", "blocked", "The ClipGauge Local model failed SHA-256 verification.", "Delete the invalid model and retry the verified download.", sha256=digest, expected_size=model_spec.size_bytes, provider=profile.kind, model=profile.model)
+            return
+        _check(checks, "clipgauge-local", "ready", "ClipGauge Local runtime and model are verified.", provider=profile.kind, model=profile.model, endpoint=profile.endpoint_identity, capabilities=profile.capabilities.to_dict())
         return
     if profile.kind in {"ollama", "lmstudio"}:
         try:

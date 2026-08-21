@@ -838,7 +838,7 @@ fn stream_pipeline(
                 app,
                 json!({
                     "event": "terminal",
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "ok": false,
                     "stage": "pipeline",
                     "code": "PIPELINE_START_FAILED",
@@ -906,7 +906,7 @@ fn stream_pipeline(
             app,
             json!({
                 "event": "terminal",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "ok": false,
                 "stage": "pipeline",
                 "code": "CANCELLED",
@@ -932,7 +932,7 @@ fn stream_pipeline(
             app,
             json!({
                 "event": "terminal",
-                "protocol_version": 1,
+                "protocol_version": 2,
                 "ok": false,
                 "stage": "pipeline",
                 "code": "PIPELINE_EXIT_WITHOUT_TERMINAL",
@@ -1129,6 +1129,42 @@ async fn check_ollama() -> Result<Value, String> {
         "service-healthy"
     };
     Ok(json!({"state": state, "running": true, "models": models}))
+}
+
+#[tauri::command]
+fn setup_tool(args: Vec<String>) -> Result<Value, String> {
+    let valid = matches!(args.as_slice(), [command] if command == "inventory" || command == "install-runtime")
+        || matches!(args.as_slice(), [command, model] if command == "download-model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')));
+    if !valid {
+        return Err("unsupported setup operation".to_string());
+    }
+    let (program, base_args) = pipeline_invocation();
+    let mut full = base_args;
+    full.push("--jsonl".to_string());
+    full.push("setup".to_string());
+    full.extend(args);
+    let mut command = quiet_command(&program);
+    secrets::apply_operation_env(&mut command);
+    let out = command
+        .env("CLIPGAUGE_HOME", home_dir())
+        .args(&full)
+        .output()
+        .map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with('{'));
+    match line.and_then(|line| serde_json::from_str::<Value>(line).ok()) {
+        Some(value) => Ok(value),
+        None => Err(format!(
+            "setup command produced no JSON: {}",
+            String::from_utf8_lossy(&out.stderr)
+                .chars()
+                .take(400)
+                .collect::<String>()
+        )),
+    }
 }
 
 /// Sync pipeline call that returns one JSON blob (edit context, visual
@@ -1379,6 +1415,7 @@ fn main() {
             get_setup_state,
             mark_onboarded,
             check_ollama,
+            setup_tool,
             ig_status,
             ig_connect,
             ig_tool,

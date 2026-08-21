@@ -14,7 +14,7 @@ import os
 import sys
 import time
 
-from . import __version__, config, protocol
+from . import __version__, config, downloads, local_runtime, protocol
 from .jobs import queue
 from .scoring import providers as providers_mod
 
@@ -134,6 +134,101 @@ def _apply_profile(settings: config.Settings, profile: providers_mod.ProviderPro
     settings.provider_locality = profile.locality
     settings.provider_metadata = dict(profile.metadata)
     settings.provider_schema_version = profile.schema_version
+
+
+def _setup_runtime_asset(manager: local_runtime.LocalRuntime) -> downloads.ManagedAsset:
+    spec = manager.runtime_asset()
+    version = str(manager.manifest["runtimes"]["llama-server"]["version"])
+    platform_key = manager._platform_key()
+    archive_type = str(spec["archive_type"])
+    return downloads.ManagedAsset(
+        asset_id=f"runtime:llama-server:{platform_key}",
+        display_name=f"ClipGauge Local runtime · llama.cpp {version}",
+        purpose="Owned loopback local inference runtime",
+        destination=f"downloads/llama-server-{version}-{platform_key}.{archive_type.replace('.', '-')}",
+        url=str(spec["url"]),
+        size_bytes=int(spec["size"]),
+        sha256=str(spec["sha256"]),
+        required=True,
+        one_time=True,
+        license=str(manager.manifest["runtimes"]["llama-server"]["license"]),
+        source=str(manager.manifest["runtimes"]["llama-server"]["provenance"]),
+    )
+
+
+def _setup_model_asset(model: local_runtime.LocalModel) -> downloads.ManagedAsset:
+    return downloads.ManagedAsset(
+        asset_id=model.model_id,
+        display_name=model.display_name,
+        purpose="ClipGauge Local structured clip scoring",
+        destination=f"models/clipgauge-local/{model.filename}",
+        url=model.url,
+        size_bytes=model.size_bytes,
+        sha256=model.sha256,
+        required=False,
+        one_time=True,
+        license=model.license,
+        source=model.provenance,
+    )
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    manager = local_runtime.LocalRuntime()
+
+    def setup_event(payload: dict[str, object]) -> None:
+        if args.jsonl:
+            print(json.dumps({"event": "setup-progress", "protocol_version": protocol.PROTOCOL_VERSION, **payload}), flush=True)
+
+    downloads_manager = downloads.DownloadManager(event=setup_event)
+    try:
+        runtime_asset = _setup_runtime_asset(manager)
+        model_assets = [_setup_model_asset(model) for model in local_runtime.MODEL_CATALOG.values()]
+        if args.setup_cmd == "inventory":
+            runtime_binary = manager.binary_path()
+            rows = downloads_manager.inventory(model_assets)
+            payload = {
+                "state": "ready" if runtime_binary.is_file() else "setup-required",
+                "runtime": {
+                    **runtime_asset.to_json(),
+                    "installed": runtime_binary.is_file(),
+                    "managed_path": str(runtime_binary),
+                    "version": manager.manifest["runtimes"]["llama-server"]["version"],
+                },
+                "models": rows,
+                "storage": downloads_manager.estimate([runtime_asset, *model_assets]),
+                "catalog": [
+                    {
+                        "model_id": model.model_id,
+                        "display_name": model.display_name,
+                        "license": model.license,
+                        "context_window": model.context_window,
+                        "capabilities": list(model.capabilities),
+                        "provenance": model.provenance,
+                    }
+                    for model in local_runtime.MODEL_CATALOG.values()
+                ],
+            }
+            print(json.dumps(payload))
+            return 0
+        if args.setup_cmd == "install-runtime":
+            archive = downloads_manager.download(runtime_asset)
+            binary = manager.install_runtime(archive)
+            print(json.dumps({"ok": True, "asset_id": runtime_asset.asset_id, "path": str(binary)}))
+            return 0
+        if args.setup_cmd == "download-model":
+            try:
+                model = local_runtime.MODEL_CATALOG[args.model_id]
+            except KeyError as exc:
+                print(json.dumps({"ok": False, "code": "MODEL_NOT_FOUND", "message": "The selected local model is not in the verified catalog."}))
+                return 2
+            asset = _setup_model_asset(model)
+            path = downloads_manager.download(asset)
+            print(json.dumps({"ok": True, "asset_id": asset.asset_id, "path": str(path), "license": asset.license, "source": asset.source}))
+            return 0
+    except Exception as err:  # noqa: BLE001 - setup commands return one actionable JSON result
+        print(json.dumps({"ok": False, "code": "SETUP_DOWNLOAD_FAILED", "message": protocol.safe_message(str(err), limit=300)}))
+        return 1
+    return 2
 
 
 def cmd_preflight(args: argparse.Namespace) -> int:
@@ -478,6 +573,14 @@ def main(argv: list[str] | None = None) -> int:
     p_preflight.add_argument("--auth", choices=["none", "bearer", "api_key_header", "custom_secret_header"], default=None)
     p_preflight.add_argument("--secret-header", default=None, help=argparse.SUPPRESS)
     p_preflight.set_defaults(fn=cmd_preflight)
+
+    p_setup = sub.add_parser("setup", help="inspect or install managed local-AI assets")
+    setup_sub = p_setup.add_subparsers(dest="setup_cmd", required=True)
+    setup_sub.add_parser("inventory", help="show verified runtime/model inventory")
+    setup_sub.add_parser("install-runtime", help="download and install the verified llama.cpp runtime")
+    p_download_model = setup_sub.add_parser("download-model", help="download a verified local model")
+    p_download_model.add_argument("model_id", choices=sorted(local_runtime.MODEL_CATALOG))
+    p_setup.set_defaults(fn=cmd_setup)
 
     p_test = sub.add_parser("provider-test", help="test a configured provider connection")
     p_test.add_argument("--llm", choices=["gemini", "ollama"], default=None, help=argparse.SUPPRESS)

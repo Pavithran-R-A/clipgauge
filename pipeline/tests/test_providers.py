@@ -127,6 +127,58 @@ def test_local_preset_defaults_to_loopback_without_auth():
     assert lm.locality == "local"
 
 
+def test_clipgauge_local_preset_is_managed_and_structured():
+    local = providers.preset_profile("clipgauge-local")
+    assert local.display_name == "ClipGauge Local"
+    assert local.endpoint_identity == "http://127.0.0.1:8080/v1"
+    assert local.auth_strategy == "none"
+    assert local.locality == "local"
+    assert local.capabilities.json_schema is True
+    assert local.metadata["managed"] is True
+
+
+def test_clipgauge_local_adapter_uses_existing_loopback_server(monkeypatch):
+    seen = {}
+
+    def fake_post(url, *, headers, json, timeout, follow_redirects):
+        seen.update(url=url, json=json, follow_redirects=follow_redirects)
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok": true}'}}]})
+
+    monkeypatch.setattr(providers.httpx, "post", fake_post)
+    profile_local = providers.preset_profile(
+        "clipgauge-local",
+        metadata={"managed": False},
+    )
+    adapter = providers.make_adapter(profile_local)
+    result = adapter.infer(
+        providers.InferenceRequest(
+            prompt="return ok",
+            schema={"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
+        )
+    )
+    assert result.data == {"ok": True}
+    assert seen["url"] == "http://127.0.0.1:8080/v1/chat/completions"
+    assert seen["follow_redirects"] is False
+
+
+def test_clipgauge_local_runtime_command_is_loopback_only(monkeypatch, tmp_path):
+    from clipgauge_pipeline import local_runtime
+
+    manager = local_runtime.LocalRuntime(tmp_path)
+    binary = tmp_path / "runtimes" / "llama-server" / "b10545" / "llama-server"
+    model = tmp_path / "models" / "clipgauge-local" / "Qwen3-4B-Q4_K_M.gguf"
+    binary.parent.mkdir(parents=True)
+    model.parent.mkdir(parents=True)
+    binary.write_text("binary")
+    model.write_text("model")
+    monkeypatch.setattr(manager, "binary_path", lambda: binary)
+    monkeypatch.setattr(manager, "model_path", lambda _model_id: model)
+    command = manager.command("clipgauge-local/qwen3-4b-q4_k_m", 43210)
+    assert command[command.index("--host") + 1] == "127.0.0.1"
+    assert command[command.index("--port") + 1] == "43210"
+    assert "--no-webui" in command
+
+
 def test_custom_auth_strategy_and_header_are_non_secret_profile_metadata():
     custom = providers.preset_profile(
         "custom",

@@ -56,9 +56,80 @@
         "status": "not-managed",
         "reason": "No pinned compiled archive with authoritative checksum was selected; use a verified system binary or captions degrade safely."
       }
+    },
+    "llama-server": {
+      "version": "b10545",
+      "provenance": "https://github.com/ggml-org/llama.cpp/releases/tag/b10545",
+      "license": "MIT; see llama.cpp and ggml notices",
+      "assets": {
+        "linux-x86_64": {
+          "platform": "linux",
+          "architecture": "x86_64",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10545/llama-b10545-bin-ubuntu-x64.tar.gz",
+          "sha256": "bc128b83e13e9dac47ebc4b6a2030ba2ff7629bd08a12cb0a680a2f0eb0093fc",
+          "size": 16673635,
+          "archive_type": "tar.gz",
+          "binary": "llama-b10545/llama-server"
+        },
+        "windows-x86_64": {
+          "platform": "windows",
+          "architecture": "x86_64",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10545/llama-b10545-bin-win-cpu-x64.zip",
+          "sha256": "475e2720a6dec6e0e10c58b37461c140cf9523f4efb373cb5b65ae7e4ff6b4cf",
+          "size": 18581847,
+          "archive_type": "zip",
+          "binary": "llama-server.exe"
+        },
+        "macos-arm64": {
+          "platform": "macos",
+          "architecture": "arm64",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10545/llama-b10545-bin-macos-arm64.tar.gz",
+          "sha256": "c94b6cf341c23e2aff57cc0539aa9e32966d59f0ae2f723636e9e4379804c25a",
+          "size": 11093290,
+          "archive_type": "tar.gz",
+          "binary": "llama-b10545/llama-server"
+        }
+      }
     }
   },
   "models": {
+    "clipgauge-local/qwen3-1.7b-q8_0.gguf": {
+      "version": "90862c4b9d2787eaed51d12237eafdfe7c5f6077",
+      "platform": "all",
+      "architecture": "all",
+      "url": "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/90862c4b9d2787eaed51d12237eafdfe7c5f6077/Qwen3-1.7B-Q8_0.gguf",
+      "sha256": "061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a",
+      "size": 1834426016,
+      "license": "Apache-2.0",
+      "provenance": "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/tree/90862c4b9d2787eaed51d12237eafdfe7c5f6077",
+      "context_window": 32768,
+      "capabilities": ["text", "structured_json"]
+    },
+    "clipgauge-local/qwen3-4b-q4_k_m.gguf": {
+      "version": "bc640142c66e1fdd12af0bd68f40445458f3869b",
+      "platform": "all",
+      "architecture": "all",
+      "url": "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/bc640142c66e1fdd12af0bd68f40445458f3869b/Qwen3-4B-Q4_K_M.gguf",
+      "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+      "size": 2497280256,
+      "license": "Apache-2.0",
+      "provenance": "https://huggingface.co/Qwen/Qwen3-4B-GGUF/tree/bc640142c66e1fdd12af0bd68f40445458f3869b",
+      "context_window": 131072,
+      "capabilities": ["text", "structured_json"]
+    },
+    "clipgauge-local/gemma-3-4b-it": {
+      "version": "093f9f388b31de276ce2de164bdc2081324b9767",
+      "platform": "all",
+      "architecture": "all",
+      "url": "",
+      "sha256": "",
+      "size": 0,
+      "license": "Google Gemma Terms of Use; acceptance required",
+      "provenance": "https://huggingface.co/google/gemma-3-4b-it/tree/093f9f388b31de276ce2de164bdc2081324b9767",
+      "context_window": 131072,
+      "capabilities": ["text", "vision", "structured_json"],
+      "status": "catalog-only-until-terms-and-exact-GGUF-provenance-are-approved"
+    },
     "laughter-jrgillick/best.pth.tar": {
       "version": "5d5e0327916959d832d95ffbef5f484efc93d799",
       "platform": "all",
