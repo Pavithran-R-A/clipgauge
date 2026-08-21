@@ -19,7 +19,7 @@ export default function About({ onBack }: Props) {
       <main className="about-card" aria-labelledby="about-title">
         <header className="modal-head">
           <div>
-            <p className="ob-kicker">ClipGauge / creator edition</p>
+            <p className="ob-kicker">ClipGauge v0.3.0 / creator edition</p>
             <h1 id="about-title" className="ob-h2">ABOUT / LICENSES</h1>
           </div>
           <button className="btn-ghost" onClick={onBack}>back</button>

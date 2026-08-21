@@ -2,6 +2,29 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.3.0] — 2026-08-21
+
+ClipGauge v0.3.0 is the creator-experience release: a calmer, privacy-first desktop workflow with ClipGauge Local, managed runtime setup, typed diagnostics, resumable progress, and native Windows installer acceptance.
+
+### Creator workflow
+
+- Adds progressive onboarding and an in-studio Setup Center with consent-aware storage estimates, pinned provenance, SHA-256 verification state, and repairable runtime/model actions.
+- Adds ClipGauge Local as a first-class loopback-only OpenAI-compatible provider using pinned llama.cpp `llama-server` assets and conservative Qwen3 GGUF tiers.
+- Adds human-readable Studio labels, named caption styles, plain-language failure recovery, richer stage timing/ETA/download metadata, and accurate runtime-detected About platform copy.
+- Adds an original SVG-first ClipGauge mark and a navy/indigo/cyan/emerald creator-console visual system while preserving the AGPL license and upstream attribution.
+
+### Reliability and security
+
+- Adds job-scoped diagnostic support bundles, typed speaker-stage errors, resumable checkpoint semantics, and explicit YouTube access classifications for attestation, login, private, age, region, and unavailable states.
+- Adds safe full-archive extraction for managed runtime bundles, loopback-only local-runtime lifecycle ownership, manifest-driven inventory, and deterministic setup/provider regression coverage.
+- Full local Python and frontend gates pass; Rust tests, strict Clippy, and native Windows install/launch acceptance pass. Full model-backed inference benchmarking remains environment-dependent and is not claimed without a controlled fixture.
+- The existing GTK3/glib RustSec warning set remains upstream-blocked in the stable Tauri/Wry graph; pip-audit findings constrained by WhisperX are documented rather than hidden or force-upgraded.
+
+### Caveats
+
+- Cloud providers, local inference engines, and model-backed end-to-end video jobs are reported only when credentials, installed assets, and controlled fixtures are available; blocked tests are not marked PASS.
+- Release artifacts remain unsigned unless release evidence explicitly proves otherwise. Platform qualification is not signing or notarization.
+
 ## [0.2.1] — 2026-08-21
 
 ClipGauge v0.2.1 is a maintenance and verification release. It preserves the v0.2.0 provider architecture and closes the project-owned findings from the independent A-to-Z audit.

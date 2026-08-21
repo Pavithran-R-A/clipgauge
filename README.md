@@ -15,9 +15,9 @@ ClipGauge is an AGPL-3.0-or-later desktop application for turning a YouTube URL 
 
 ## Current release
 
-ClipGauge v0.2.1 is the maintenance and verification release for Universal AI Providers. It preserves the v0.2.0 provider architecture while closing strict Clippy findings, adding typed provider-aware Tauri job requests, adding the conventional CLI version command, and documenting the remaining upstream GTK/glib dependency risk. v0.1.0, v0.1.1, and v0.2.0 remain immutable historical releases.
+ClipGauge v0.3.0 is the creator-experience release. It adds ClipGauge Local as a managed, loopback-only structured-scoring option; a progressive Setup Center with consent-aware downloads and verification; typed diagnostics; resumable progress; creator-first onboarding; and the Studio, Review, Settings, and Diagnostics surfaces. v0.1.0, v0.1.1, v0.2.0, and v0.2.1 remain immutable historical releases.
 
-The v0.2.1 release artifacts are unsigned unless the release notes explicitly prove otherwise. Windows SmartScreen warnings and non-notarized macOS Gatekeeper warnings are expected. The updater remains disabled because no real signing key is configured.
+The v0.3.0 release artifacts are unsigned unless the release notes explicitly prove otherwise. Windows SmartScreen warnings and non-notarized macOS Gatekeeper warnings are expected. The updater remains disabled because no real signing key is configured. ClipGauge Local remains optional until its pinned runtime and selected model are installed and verified.
 
 ## Provider options
 
@@ -27,13 +27,13 @@ See [`docs/providers/README.md`](docs/providers/README.md) and [`docs/providers/
 
 ## Public artifacts
 
-The v0.2.1 release workflow is the source of truth for downloadable artifacts. It publishes platform artifacts only after native build, metadata, checksum, SBOM, provenance, attestation, and secret-scan gates pass. Review release notes and checksums before installing any unsigned artifact.
+The v0.3.0 release workflow is the source of truth for downloadable artifacts. It publishes platform artifacts only after native build, metadata, checksum, SBOM, provenance, attestation, and secret-scan gates pass. Review release notes and checksums before installing any unsigned artifact.
 
 Every public binary is accompanied by `SHA256SUMS`. The release also includes a CycloneDX SBOM and a human-readable provenance record. A checksum is not a cryptographic attestation, and neither is a substitute for Windows code signing or Apple signing/notarization.
 
 ## Requirements
 
-Building from source requires Git, Node.js 22 or newer, Rust via [rustup](https://rustup.rs/), Python 3.12, and [uv](https://docs.astral.sh/uv/). Linux packaging additionally requires the Tauri system libraries listed in [`INSTALL.md`](INSTALL.md). Runtime model and binary downloads require network access the first time a selected feature is used; fully local scoring can use an installed Ollama model.
+Building from source requires Git, Node.js 22 or newer, Rust via [rustup](https://rustup.rs/), Python 3.12, and [uv](https://docs.astral.sh/uv/). Linux packaging additionally requires the Tauri system libraries listed in [`INSTALL.md`](INSTALL.md). Runtime, analysis-model, and ClipGauge Local downloads require network access the first time a selected feature is used. Once verified assets are installed, ClipGauge Local scoring runs against the loopback-owned runtime without a cloud credential.
 
 ## Install from source
 
@@ -110,7 +110,7 @@ The test suite includes Rust security and lifecycle tests, Python pipeline tests
 
 ## Documentation and support
 
-Read [`INSTALL.md`](INSTALL.md) for platform prerequisites, [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for preflight and runtime failures, [`docs/providers/README.md`](docs/providers/README.md) for provider setup, and [`CHANGELOG.md`](CHANGELOG.md) for the v0.2.1 release record. License and provenance information is available in [`NOTICE.md`](NOTICE.md), [`ORIGIN.md`](ORIGIN.md), and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Use the in-app support-bundle action when reporting a failure, and redact any remaining personal or source-specific information before sharing.
+Read [`INSTALL.md`](INSTALL.md) for platform prerequisites, [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for preflight and runtime failures, [`docs/providers/README.md`](docs/providers/README.md) for provider setup, and [`CHANGELOG.md`](CHANGELOG.md) for the v0.3.0 release record. License and provenance information is available in [`NOTICE.md`](NOTICE.md), [`ORIGIN.md`](ORIGIN.md), and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Use the in-app support-bundle action when reporting a failure, and redact any remaining personal or source-specific information before sharing.
 
 ## License
 
