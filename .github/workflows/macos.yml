@@ -85,10 +85,7 @@ jobs:
         working-directory: pipeline
         run: |
           if [ "${{ matrix.arch }}" = "x86_64" ]; then
-            # events/dsp imports librosa at module import time; that optional
-            # ML/audio path is unavailable on Intel macOS and is excluded
-            # explicitly. All other deterministic tests run natively.
-            PYTHONPATH="$GITHUB_WORKSPACE/pipeline" .venv/bin/pytest -q --ignore=tests/test_events_post.py
+            PYTHONPATH="$GITHUB_WORKSPACE/pipeline" .venv/bin/pytest -q
           else
             uv run pytest -q
           fi
@@ -111,9 +108,8 @@ jobs:
         working-directory: app/src-tauri
         run: |
           cargo fmt -- --check
-          cargo test --target "${{ matrix.target }}" -- --skip artifact::tests::missing_render_artifact_is_explicit --skip artifact::tests::outside_render_artifact_is_explicit
-          # Provider-aware commands intentionally carry explicit provider configuration and vault handles.
-          cargo clippy --target "${{ matrix.target }}" -- -D warnings -A clippy::too_many_arguments -A dead_code
+          cargo test --target "${{ matrix.target }}"
+          cargo clippy --target "${{ matrix.target }}" --all-targets --all-features -- -D warnings
 
       - name: Stage trusted resources and build unsigned macOS app
         working-directory: app

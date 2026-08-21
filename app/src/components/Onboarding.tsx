@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import { api } from '../api'
-import type { LocalSetupInventory } from '../types'
+import type { LocalSetupInventory, SetupProgressEvent } from '../types'
+import { formatBytes, formatDuration, formatRate, meaningfulEta, progressPercent } from '../setupFormatting'
 
 interface Props {
   onDone: () => void
@@ -8,23 +10,14 @@ interface Props {
 
 const BALANCED_MODEL = 'clipgauge-local/qwen3-4b-q4_k_m'
 
-function formatBytes(value: number | undefined): string {
-  if (!value || value <= 0) return 'unknown size'
-  const units = ['B', 'MB', 'GB', 'TB']
-  let amount = value
-  let index = 0
-  while (amount >= 1024 && index < units.length - 1) {
-    amount /= 1024
-    index += 1
-  }
-  return `${amount >= 10 || index === 0 ? Math.round(amount) : amount.toFixed(1)} ${units[index]}`
-}
-
 export default function Onboarding({ onDone }: Props) {
   const [step, setStep] = useState(0)
   const [inventory, setInventory] = useState<LocalSetupInventory | null>(null)
   const [busy, setBusy] = useState(false)
   const [setupMessage, setSetupMessage] = useState<string | null>(null)
+  const [setupOperationId, setSetupOperationId] = useState<string | null>(null)
+  const [lastSetupArgs, setLastSetupArgs] = useState<string[] | null>(null)
+  const [setupProgress, setSetupProgress] = useState<SetupProgressEvent | null>(null)
   const [downloadConsent, setDownloadConsent] = useState(false)
 
   const refreshInventory = () => {
@@ -35,6 +28,17 @@ export default function Onboarding({ onDone }: Props) {
 
   useEffect(() => {
     refreshInventory()
+    let unlisten: (() => void) | undefined
+    void listen<SetupProgressEvent>('setup-event', ({ payload }) => {
+      setSetupProgress(payload)
+      if (payload.event === 'terminal') {
+        setBusy(false)
+        setSetupOperationId(null)
+        setSetupMessage(payload.ok ? (payload.message ?? 'Setup completed and verified.') : (payload.message ?? 'Setup needs attention; retry the selected action.'))
+        refreshInventory()
+      }
+    }).then((stop) => { unlisten = stop })
+    return () => { unlisten?.() }
   }, [])
 
   const runtimeReady = Boolean(inventory?.runtime?.installed)
@@ -44,22 +48,24 @@ export default function Onboarding({ onDone }: Props) {
   )
   const modelReady = Boolean(balancedModel?.installed)
   const storageEstimate = inventory?.storage?.required_bytes
+  const setupPercent = progressPercent(setupProgress)
+  const setupEta = meaningfulEta(setupProgress)
+  const setupRate = formatRate(setupProgress?.bytes_per_second)
 
   const installRuntime = async () => {
     if (!downloadConsent) {
       setSetupMessage('Please approve the one-time managed download plan first.')
       return
     }
+    setLastSetupArgs(['install-runtime'])
     setBusy(true)
-    setSetupMessage('Installing the verified local runtime…')
+    setSetupProgress({ operation: 'Preparing runtime setup…', message: 'Preparing verified runtime download…', state: 'STARTING', elapsed_seconds: 0, one_time_download: true })
     try {
-      await api.installLocalRuntime()
-      setSetupMessage('ClipGauge Local runtime installed and verified.')
-      refreshInventory()
+      setSetupOperationId(await api.startSetup(['install-runtime']))
+      setSetupMessage('Runtime setup started; verified progress is shown below.')
     } catch (error) {
-      setSetupMessage(`Runtime setup needs attention: ${String(error)}`)
-    } finally {
       setBusy(false)
+      setSetupMessage(`Runtime setup could not start: ${String(error)}`)
     }
   }
 
@@ -68,16 +74,15 @@ export default function Onboarding({ onDone }: Props) {
       setSetupMessage('Please approve the one-time managed download plan first.')
       return
     }
+    setLastSetupArgs(['download-model', BALANCED_MODEL])
     setBusy(true)
-    setSetupMessage('Downloading the balanced local model. You can leave this running and come back.')
+    setSetupProgress({ operation: 'Preparing balanced model setup…', message: 'Preparing verified model download…', state: 'STARTING', elapsed_seconds: 0, one_time_download: true })
     try {
-      await api.downloadLocalModel(BALANCED_MODEL)
-      setSetupMessage('Balanced model downloaded and verified.')
-      refreshInventory()
+      setSetupOperationId(await api.startSetup(['download-model', BALANCED_MODEL]))
+      setSetupMessage('Balanced model setup started; verified progress is shown below.')
     } catch (error) {
-      setSetupMessage(`Model setup needs attention: ${String(error)}`)
-    } finally {
       setBusy(false)
+      setSetupMessage(`Model setup could not start: ${String(error)}`)
     }
   }
 
@@ -124,6 +129,7 @@ export default function Onboarding({ onDone }: Props) {
             </div>
           </div>
           {setupMessage && <p className="ob-notice" role="status">{setupMessage}</p>}
+          {setupProgress && <div className="setup-progress onboarding-progress" role="status" aria-live="polite"><div className="setup-panel-row"><strong>{setupProgress.display_name ?? setupProgress.operation ?? 'Setup'}</strong><button className="btn-ghost" disabled={!setupOperationId} onClick={() => setupOperationId && api.cancelSetup(setupOperationId).then(() => setSetupMessage('Cancelling setup; verified files remain reusable.')).catch((error) => setSetupMessage(`Could not cancel setup: ${String(error)}`))}>cancel</button></div><p className="ig-message">{setupProgress.message ?? 'Downloading…'}</p><div className="setup-progress-facts"><span>{setupProgress.bytes_total ? `${formatBytes(setupProgress.bytes_done ?? 0)} / ${formatBytes(setupProgress.bytes_total)}` : 'Downloading…'}</span>{setupPercent != null && <span>{setupPercent}%</span>}{setupRate && <span>{setupRate}</span>}{setupEta && <span>{setupEta} remaining</span>}<span>elapsed {formatDuration(setupProgress.elapsed_seconds)}</span>{setupProgress.one_time_download && <span>One-time download</span>}</div>{setupProgress.bytes_total && setupPercent != null ? <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={setupPercent}><div className="progress-fill" style={{ width: `${setupPercent}%` }} /></div> : <div className="progress-track" role="progressbar" aria-label="Download in progress"><div className="progress-fill progress-indeterminate" /></div>}{!busy && setupProgress.event !== 'terminal' && lastSetupArgs && <button className="btn-secondary" onClick={() => { setBusy(true); setSetupProgress({ operation: 'Retrying verified setup…', message: 'Retrying the selected managed operation…', state: 'STARTING', elapsed_seconds: 0, one_time_download: true }); api.startSetup(lastSetupArgs).then(setSetupOperationId).catch((error) => { setBusy(false); setSetupMessage(`Retry could not start: ${String(error)}`) }) }}>RETRY</button>}</div>}
           <p className="ob-fine">You can switch providers per run. Existing jobs retain their provider snapshot when resumed. The consent checkbox above is required before any managed download begins.</p>
           <button className="btn-primary" onClick={() => setStep(2)}>Continue</button>
         </section>
