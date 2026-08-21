@@ -536,5 +536,5 @@ jobs:
         run: |
           set -euo pipefail
           asset_count=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')
-          test "$asset_count" -eq 6
+          test "$asset_count" -eq 7
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
