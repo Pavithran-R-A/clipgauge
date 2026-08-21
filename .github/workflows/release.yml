@@ -134,8 +134,23 @@ jobs:
         run: uv sync --dev
       - name: Fetch caption-capable FFmpeg
         working-directory: pipeline
+        shell: pwsh
         run: |
-          uv run python -c "from clipgauge_pipeline.render import ffmpeg_bin; assert ffmpeg_bin.ensure_capable(); print(ffmpeg_bin.resolve())"
+          $success = $false
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            Write-Host "Fetching caption-capable FFmpeg (attempt $attempt/3)"
+            uv run python -c "from clipgauge_pipeline.render import ffmpeg_bin; ok = ffmpeg_bin.ensure_capable(); print('resolved:', ffmpeg_bin.resolve()); assert ok, 'no subtitles-capable ffmpeg on Windows'"
+            if ($LASTEXITCODE -eq 0) {
+              $success = $true
+              break
+            }
+            # A failed integrity check leaves only a resumable .part file. Do
+            # not resume a corrupted archive on the next attempt.
+            $partial = Join-Path $env:CLIPGAUGE_HOME "bin\.ffmpeg-static.zip.part"
+            Remove-Item -Force -ErrorAction SilentlyContinue $partial
+            Start-Sleep -Seconds (10 * $attempt)
+          }
+          if (-not $success) { throw "caption-capable FFmpeg could not be fetched after three verified attempts" }
           Add-Content $env:GITHUB_ENV "CLIPGAUGE_FFMPEG=$env:CLIPGAUGE_HOME\bin\ffmpeg.exe"
       - name: Run Windows pipeline tests
         working-directory: pipeline
