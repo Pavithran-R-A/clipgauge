@@ -10,7 +10,7 @@ from pathlib import Path
 
 import httpx
 
-from . import config, protocol, runtime
+from . import config, hardware, protocol, runtime
 from .ingest import ytdlp
 from .models import registry, specs  # noqa: F401 - register concrete models
 from .render import ffmpeg_bin
@@ -152,13 +152,42 @@ def _provider(checks: list[dict], profile: providers_mod.ProviderProfile) -> Non
     )
 
 
+def _storage_estimate(checks: list[dict], free_bytes: int | None) -> dict:
+    assets = []
+    for check in checks:
+        details = check.get("details") or {}
+        expected = details.get("expected_size")
+        if not isinstance(expected, int) or expected <= 0:
+            continue
+        name = str(check.get("name", "asset"))
+        assets.append(
+            {
+                "asset_id": name,
+                "display_name": name.removeprefix("model:").replace("_", " "),
+                "size_bytes": expected,
+                "required": True,
+                "installed": check.get("state") == "ready",
+                "status": check.get("state"),
+            }
+        )
+    required_bytes = sum(item["size_bytes"] for item in assets if not item["installed"])
+    return {
+        "required_bytes": required_bytes,
+        "available_bytes": free_bytes,
+        "consent_required": required_bytes >= 100 * 1024 * 1024,
+        "assets": assets,
+    }
+
+
 def run(selected_llm: providers_mod.ProviderProfile | str = "gemini") -> dict:
     checks: list[dict] = []
     system = platform.system()
     machine = platform.machine()
     _check(checks, "platform", "ready" if system in SUPPORTED_SYSTEMS and machine in SUPPORTED_MACHINES else "warning", f"Detected {system}/{machine}.", "Use a supported desktop build if runtime behavior is unexpected.", system=system, architecture=machine)
+    free_bytes: int | None = None
     try:
         usage = shutil.disk_usage(config.home_dir().parent)
+        free_bytes = usage.free
         if usage.free < MIN_FREE_BYTES:
             _check(checks, "disk", "blocked", "Less than 1 GiB is free on the managed data volume.", "Free disk space before downloading models or rendering.", free_bytes=usage.free)
         else:
@@ -178,9 +207,12 @@ def run(selected_llm: providers_mod.ProviderProfile | str = "gemini") -> dict:
     _provider(checks, profile)
     states = {item["state"] for item in checks}
     overall = "blocked" if "blocked" in states else "warning" if "warning" in states else "ready"
+    capabilities = hardware.snapshot(config.home_dir())
     return {
         "state": overall,
         "checks": checks,
+        "hardware": capabilities,
+        "storage": _storage_estimate(checks, free_bytes),
         "selected_llm": profile.kind,
         "provider": {
             "id": profile.id,

@@ -20,7 +20,7 @@ import os
 import time
 from pathlib import Path
 
-from .. import config
+from .. import config, hardware
 from ..jobs.queue import Stage, StageContext, StageError
 
 ASR_MODEL = "large-v3-turbo"
@@ -54,11 +54,36 @@ class AsrStage(Stage):
         import torch  # deferred: heavy import
         import whisperx
 
-        device = "cpu"  # ctranslate2 has no MPS backend; int8 CPU is the local path
+        capabilities = hardware.snapshot(config.home_dir())
+        device, compute_type = hardware.select_asr_accelerator(capabilities)
+        os.environ["CLIPGAUGE_ACCELERATOR"] = f"{device}/{compute_type}"
+        ctx.emit(-1, f"Using {device.upper()} speech acceleration ({compute_type})…")
         t0 = time.monotonic()
-        model = whisperx.load_model(
-            ASR_MODEL, device, compute_type=COMPUTE_TYPE, vad_method="silero"
-        )
+        try:
+            model = whisperx.load_model(
+                ASR_MODEL, device, compute_type=compute_type, vad_method="silero"
+            )
+        except Exception as exc:  # noqa: BLE001 - provide a reliable CPU fallback
+            if device != "cpu":
+                device, compute_type = "cpu", "int8"
+                os.environ["CLIPGAUGE_ACCELERATOR"] = "cpu/int8"
+                ctx.emit(-1, "GPU speech acceleration was unavailable; using CPU fallback (int8)…")
+                try:
+                    model = whisperx.load_model(
+                        ASR_MODEL, device, compute_type=compute_type, vad_method="silero"
+                    )
+                except Exception as fallback_exc:  # noqa: BLE001 - final typed boundary
+                    raise StageError(
+                        "Speech transcription could not load its model. Repair the speech runtime in Setup Center and retry.",
+                        code="ASR_MODEL_LOAD_FAILED",
+                        retryable=True,
+                    ) from fallback_exc
+            else:
+                raise StageError(
+                    "Speech transcription could not load its model. Repair the speech runtime in Setup Center and retry.",
+                    code="ASR_MODEL_LOAD_FAILED",
+                    retryable=True,
+                ) from exc
         audio = whisperx.load_audio(str(audio_path))
         duration = float(len(audio)) / 16000.0
 
@@ -74,11 +99,35 @@ class AsrStage(Stage):
 
         ctx.emit(-1, "Aligning words…")
         t1 = time.monotonic()
-        align_model, align_meta = whisperx.load_align_model(language_code=language, device=device)
-        aligned = whisperx.align(
-            result["segments"], align_model, align_meta, audio, device,
-            return_char_alignments=False,
-        )
+        try:
+            align_model, align_meta = whisperx.load_align_model(language_code=language, device=device)
+            aligned = whisperx.align(
+                result["segments"], align_model, align_meta, audio, device,
+                return_char_alignments=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - alignment can fall back to CPU
+            if device != "cpu":
+                device, compute_type = "cpu", "int8"
+                os.environ["CLIPGAUGE_ACCELERATOR"] = "cpu/int8"
+                ctx.emit(-1, "Word alignment fell back to CPU…")
+                try:
+                    align_model, align_meta = whisperx.load_align_model(language_code=language, device=device)
+                    aligned = whisperx.align(
+                        result["segments"], align_model, align_meta, audio, device,
+                        return_char_alignments=False,
+                    )
+                except Exception as fallback_exc:  # noqa: BLE001 - final typed boundary
+                    raise StageError(
+                        "Speech alignment could not complete. Retry with CPU acceleration or repair the speech runtime.",
+                        code="ASR_ALIGNMENT_FAILED",
+                        retryable=True,
+                    ) from fallback_exc
+            else:
+                raise StageError(
+                    "Speech alignment could not complete. Retry the job or repair the speech runtime.",
+                    code="ASR_ALIGNMENT_FAILED",
+                    retryable=True,
+                ) from exc
         align_secs = time.monotonic() - t1
         del align_model
         gc.collect()
@@ -116,7 +165,9 @@ class AsrStage(Stage):
         return {
             "language": language,
             "model": ASR_MODEL,
-            "compute_type": COMPUTE_TYPE,
+            "compute_type": compute_type,
+            "device": device,
+            "accelerator": f"{device}/{compute_type}",
             "segments": segments,
             "word_count": word_count,
             "benchmark": {

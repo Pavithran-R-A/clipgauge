@@ -239,11 +239,21 @@ export interface PrivacySummary {
   source: string
 }
 
+export interface PreflightStorage {
+  required_bytes: number
+  optional_bytes?: number
+  available_bytes?: number | null
+  consent_required: boolean
+  assets: Array<Record<string, unknown>>
+}
+
 export interface PreflightResult {
   state: 'ready' | 'warning' | 'blocked'
   selected_llm: string
   checks: PreflightCheck[]
   provider?: ProviderProfile
+  hardware?: Record<string, unknown>
+  storage?: PreflightStorage
 }
 
 export interface SetupState {
