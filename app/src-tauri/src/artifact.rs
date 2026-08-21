@@ -145,6 +145,7 @@ pub fn export_clip(
 #[cfg(test)]
 mod tests {
     use super::{export_clip, job_results};
+    use serde_json::json;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -157,10 +158,17 @@ mod tests {
         let job = home.join("jobs/20260818-155237-c6b118");
         fs::create_dir_all(job.join("clips")).unwrap();
         fs::write(job.join("clips/clip_00.mp4"), b"video").unwrap();
+        let checkpoint = json!({
+            "data": {
+                "outputs": [{
+                    "clip": 0,
+                    "path": job.join("clips/clip_00.mp4").to_string_lossy(),
+                }]
+            }
+        });
         fs::write(
             job.join("render.json"),
-            r#"{"data":{"outputs":[{"clip":0,"path":"JOB/clips/clip_00.mp4"}]}}"#
-                .replace("JOB", &job.to_string_lossy()),
+            serde_json::to_vec(&checkpoint).unwrap(),
         )
         .unwrap();
         home
