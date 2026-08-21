@@ -74,7 +74,7 @@ jobs:
             # The locked ML stack has no Intel macOS wheels. Install only the
             # compatible dependencies needed by deterministic test modules.
             uv venv --python 3.12 .venv
-            uv pip install --python .venv/bin/python pytest httpx librosa numpy scipy scikit-learn yt-dlp python-speech-features
+            uv pip install --python .venv/bin/python pytest httpx 'librosa==0.10.2.post1' 'numba==0.60.0' numpy scipy scikit-learn yt-dlp python-speech-features
             PYTHONPATH="$GITHUB_WORKSPACE/pipeline" .venv/bin/python -c "from clipgauge_pipeline.render import ffmpeg_bin; path, captions = ffmpeg_bin.resolve(); print(path, captions); assert captions, 'caption-capable ffmpeg unavailable'"
           else
             uv sync --dev
