@@ -147,7 +147,7 @@ The remaining upstream risk is `RUSTSEC-2024-0429` through the Tauri/Wry GTK3 gr
 **Repo:** [Pavithran-R-A/clipgauge](https://github.com/Pavithran-R-A/clipgauge)  
 **Tag:** `v0.2.1` (annotated, historical tags unchanged)  
 **SHA:** `092922c6d79e64f0849bcdae98852e8829638d0c`  
-**Tag/main verification:** the peeled `v0.2.1` commit matches `origin/main`.
+**Tag/source verification:** at publication time, the peeled `v0.2.1` commit matched `origin/main` at `092922c6d79e64f0849bcdae98852e8829638d0c`. After publication, the final QA report and coverage matrix were added in the documentation-only main commit `54a195853097b856c770b81d1c5d0f92ba116bb9`; the immutable release source remains exactly the v0.2.1 tag.
 
 Published assets and verified SHA-256 values:
 
