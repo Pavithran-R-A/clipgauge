@@ -260,6 +260,7 @@ export interface LocalSetupInventory {
   state: 'ready' | 'setup-required' | string
   runtime: Record<string, unknown> & { installed?: boolean; display_name?: string; size_bytes?: number }
   models: Array<Record<string, unknown> & { asset_id?: string; installed?: boolean; display_name?: string; size_bytes?: number; license?: string }>
+  core_assets: Array<Record<string, unknown> & { asset_id?: string; installed?: boolean; display_name?: string; purpose?: string; integrity?: string; license?: string }>
   storage: PreflightStorage
   catalog: Array<Record<string, unknown>>
 }

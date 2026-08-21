@@ -59,16 +59,13 @@ class IngestStage(Stage):
                     ytdlp.download(job.source, media_path, prog)
             except ytdlp.YtDlpError as err:
                 message = str(err)
-                if ytdlp.is_auth_error(message):
-                    code = "YTDLP_AUTH_REQUIRED"
-                elif "download" in message.lower() or "connection" in message.lower():
+                code = getattr(err, "code", None) or ("YTDLP_LOGIN_REQUIRED" if ytdlp.is_auth_error(message) else "YTDLP_METADATA_FAILED")
+                if code == "YTDLP_ERROR" and ("download" in message.lower() or "connection" in message.lower()):
                     code = "YTDLP_DOWNLOAD_FAILED"
-                else:
-                    code = "YTDLP_METADATA_FAILED"
                 raise StageError(
                     f"yt-dlp could not process this video: {message}",
                     code=code,
-                    retryable=True,
+                    retryable=getattr(err, "retryable", True),
                 ) from err
         else:
             source_path = Path(job.source).expanduser().resolve()

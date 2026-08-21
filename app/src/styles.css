@@ -28,16 +28,19 @@
 
 :root {
   color-scheme: dark;
-  --ink: #0e0f12;          /* the bay */
-  --panel: #16171b;
-  --panel-2: #1c1e23;
-  --line: #26282e;
-  --text: #ece9e2;         /* warm paper white */
-  --dim: #8b8e96;
-  --faint: #55585f;
-  --amber: #ffb224;        /* VU signal */
-  --amber-dim: #b97e15;
-  --green: #3dd6a3;
+  --ink: #070b14;
+  --panel: #0b1020;
+  --panel-2: #11182b;
+  --line: #202a42;
+  --text: #f3f6ff;
+  --dim: #9aa8c1;
+  --faint: #64708c;
+  --amber: #f2b84b;
+  --amber-dim: #a97b22;
+  --primary: #7357ff;
+  --primary-bright: #8066ff;
+  --signal: #22d3ee;
+  --green: #35d39b;
   --red: #ff5c49;
   --display: 'Archivo Black', sans-serif;
   --body: 'Public Sans', sans-serif;
@@ -80,26 +83,28 @@ body {
 
 /* ---------- buttons ---------- */
 .btn-primary {
-  font-family: var(--display);
+  font-family: var(--body);
   font-size: 14px;
-  letter-spacing: 0.06em;
-  background: var(--amber);
-  color: #14100a;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  background: var(--primary);
+  color: #fbfaff;
   border: 0;
   padding: 14px 26px;
   cursor: pointer;
   transition: transform 0.12s ease, box-shadow 0.12s ease;
-  box-shadow: 0 0 0 0 rgba(255, 178, 36, 0.35);
+  box-shadow: 0 0 0 0 rgba(115, 87, 255, 0.35);
 }
 .btn-primary:hover:not(:disabled) {
   transform: translateY(-1px);
-  box-shadow: 0 6px 24px -6px rgba(255, 178, 36, 0.45);
+  box-shadow: 0 8px 26px -8px rgba(115, 87, 255, 0.7);
 }
 .btn-primary:disabled { opacity: 0.35; cursor: default; }
 
 .btn-secondary {
-  font-family: var(--mono);
-  font-size: 12px;
+  font-family: var(--body);
+  font-size: 13px;
+  font-weight: 650;
   background: var(--panel-2);
   color: var(--text);
   border: 1px solid var(--line);
@@ -109,8 +114,8 @@ body {
 .btn-secondary:disabled { opacity: 0.4; }
 
 .btn-ghost {
-  font-family: var(--mono);
-  font-size: 12px;
+  font-family: var(--body);
+  font-size: 13px;
   background: none;
   border: 0;
   color: var(--dim);
@@ -140,7 +145,8 @@ body {
   place-items: center;
   padding: 48px;
   background:
-    radial-gradient(1200px 500px at 85% -10%, rgba(255, 178, 36, 0.07), transparent 60%),
+    radial-gradient(900px 500px at 86% -12%, rgba(115, 87, 255, 0.18), transparent 62%),
+    radial-gradient(700px 420px at 0% 100%, rgba(34, 211, 238, 0.08), transparent 65%),
     var(--ink);
 }
 .ob-step {
@@ -154,10 +160,11 @@ body {
   to { opacity: 1; transform: none; }
 }
 .ob-kicker {
-  font-family: var(--mono);
+  font-family: var(--body);
   font-size: 12px;
-  letter-spacing: 0.2em;
-  color: var(--amber);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--signal);
   margin-bottom: 22px;
   text-transform: uppercase;
 }
@@ -254,11 +261,14 @@ body {
   min-height: 0;
 }
 .rail-brand { padding: 26px 22px 20px; border-bottom: 1px solid var(--line); }
+.rail-brand-line { display: flex; align-items: center; gap: 10px; }
+.rail-mark { width: 28px; height: 28px; flex: none; }
 .rail-logo {
   display: block;
-  font-family: var(--display);
-  font-size: 21px;
-  letter-spacing: 0.01em;
+  font-family: var(--body);
+  font-weight: 750;
+  font-size: 20px;
+  letter-spacing: -0.02em;
 }
 .rail-sub { font-size: 11px; color: var(--faint); }
 .rail-jobs { padding: 18px 12px; overflow-y: auto; }

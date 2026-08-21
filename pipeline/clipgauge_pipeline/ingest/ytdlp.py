@@ -35,7 +35,12 @@ ProgressFn = Callable[[float, str], None]  # (fraction 0..1 or -1, message)
 
 
 class YtDlpError(Exception):
-    """yt-dlp process failure with a cleaned, user-facing message."""
+    """yt-dlp process failure with a cleaned, user-facing message and stable code."""
+
+    def __init__(self, message: str, code: str = "YTDLP_ERROR", retryable: bool = True) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
 
 
 def _binary_name() -> str:
@@ -96,15 +101,27 @@ def _clean_error(stderr: str) -> str:
     return ""
 
 
+def classify_error(message: str) -> str:
+    """Map yt-dlp's changing prose to stable, creator-facing states."""
+    lowered = message.lower()
+    if re.search(r"po.?token|attestation|playback verification|signature extraction|403|forbidden", lowered):
+        return "YTDLP_ATTESTATION_REQUIRED"
+    if re.search(r"sign ?in|log ?in|cookies|password|authentication required|401|authoriz", lowered):
+        return "YTDLP_LOGIN_REQUIRED"
+    if re.search(r"private|members only|purchase required|member-only", lowered):
+        return "YTDLP_PRIVATE"
+    if re.search(r"age.?restricted|confirm your age|mature content", lowered):
+        return "YTDLP_AGE_RESTRICTED"
+    if re.search(r"not available in your country|geo.?restrict|region|country", lowered):
+        return "YTDLP_REGION_RESTRICTED"
+    if re.search(r"video unavailable|video has been removed|deleted|does not exist|not found", lowered):
+        return "YTDLP_UNAVAILABLE"
+    return "YTDLP_ERROR"
+
+
 def is_auth_error(message: str) -> bool:
-    """Site refused the anonymous request — surface a clear next step."""
-    return bool(
-        re.search(
-            r"log ?in|sign ?in|password|private|members only|purchase|cookies|401|403|authoriz",
-            message,
-            re.IGNORECASE,
-        )
-    )
+    """Backward-compatible helper for callers that only need a login distinction."""
+    return classify_error(message) == "YTDLP_LOGIN_REQUIRED"
 
 
 def _run(
@@ -160,7 +177,7 @@ def _run(
         msg = _clean_error(stderr) or f"yt-dlp exited with code {code}"
         if code in (-9, -15) and not _clean_error(stderr):
             msg = "yt-dlp stalled (no output for a while) and was stopped. Check your connection and retry."
-        raise YtDlpError(msg)
+        raise YtDlpError(msg, code=classify_error(msg), retryable=True)
     return "".join(stdout_parts)
 
 

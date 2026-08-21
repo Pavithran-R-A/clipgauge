@@ -11,6 +11,18 @@ import './styles.css'
 
 type View = 'boot' | 'onboarding' | 'studio' | 'review' | 'loop' | 'about'
 
+const FRIENDLY_FAILURES: Record<string, string> = {
+  SPEAKER_MODEL_DOWNLOAD_FAILED: 'Speaker analysis couldn’t start because its model could not be downloaded. Retry the model download or continue without speaker-aware reframing.',
+  SPEAKER_MODEL_VERIFY_FAILED: 'Speaker analysis couldn’t start because the downloaded model did not pass verification. Open Setup Center and repair the model.',
+  SPEAKER_MODEL_LOAD_FAILED: 'Speaker analysis couldn’t start because the speaker model could not be loaded. Retry the model download or continue without speaker-aware reframing.',
+  SPEAKER_AUDIO_LOAD_FAILED: 'Speaker analysis couldn’t read the audio for this video. Retry the job or continue without speaker-aware reframing.',
+  SPEAKER_ANALYSIS_FAILED: 'Speaker analysis could not complete. Retry the job or continue without speaker-aware reframing.',
+  SPEAKER_CLUSTER_FAILED: 'Speaker grouping could not complete. Retry the job or continue without speaker-aware reframing.',
+  PROVIDER_UNAVAILABLE: 'The selected AI is unavailable. Open Setup Center or choose another provider.',
+  YTDLP_ATTESTATION_REQUIRED: 'YouTube needs an additional playback verification step. Enable YouTube compatibility in Setup Center and retry.',
+  YTDLP_LOGIN_REQUIRED: 'This video requires a signed-in YouTube session. Use a browser session only if you explicitly consent.',
+}
+
 export default function App() {
   const [view, setView] = useState<View>('boot')
   const [setup, setSetup] = useState<SetupState | null>(null)
@@ -93,9 +105,9 @@ export default function App() {
           })
         } else if (!payload.ok) {
           setRunNotice(null)
-          const code = payload.code ? ` [${payload.code}]` : ''
-          const diagnostic = payload.diagnostic_id ? ` Diagnostic ID: ${payload.diagnostic_id}.` : ''
-          setRunError(`${payload.message ?? 'Pipeline failed.'}${code}${diagnostic}`)
+          const friendly = payload.code ? FRIENDLY_FAILURES[payload.code] : undefined
+          const diagnostic = payload.diagnostic_id ? ` Technical details: ${payload.diagnostic_id}.` : ''
+          setRunError(`${friendly ?? payload.message ?? 'Pipeline failed.'}${diagnostic}`)
         }
       } else if (payload.event === 'result') {
         // Backward-compatible handling for one-shot edit commands.

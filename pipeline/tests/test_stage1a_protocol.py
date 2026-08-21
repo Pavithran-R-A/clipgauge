@@ -198,7 +198,7 @@ def test_real_ingest_translates_fake_ytdlp_failure(monkeypatch, tmp_path, capsys
     events = _events(capsys)
     assert code == 1
     terminal = _assert_one_terminal(events)
-    assert terminal["code"] == "YTDLP_METADATA_FAILED"
+    assert terminal["code"] == "YTDLP_UNAVAILABLE"
     assert terminal["stage"] == "ingest"
     assert terminal["retryable"] is True
 
@@ -211,3 +211,26 @@ def test_disposable_fake_ytdlp_failure_is_cleaned(monkeypatch, tmp_path):
     fake.chmod(0o755)
     with pytest.raises(YtDlpError, match="video unavailable"):
         ytdlp._run(fake, [], inactivity_timeout=1.0)
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("HTTP Error 403: Forbidden; PO token required", "YTDLP_ATTESTATION_REQUIRED"),
+        ("This video requires you to sign in and use cookies", "YTDLP_LOGIN_REQUIRED"),
+        ("This is a private video", "YTDLP_PRIVATE"),
+        ("This video is age-restricted", "YTDLP_AGE_RESTRICTED"),
+        ("This video is not available in your country", "YTDLP_REGION_RESTRICTED"),
+        ("Video unavailable; it may have been deleted", "YTDLP_UNAVAILABLE"),
+    ],
+)
+def test_ytdlp_failure_states_are_distinct(message, expected):
+    from clipgauge_pipeline.ingest import ytdlp
+
+    assert ytdlp.classify_error(message) == expected
+
+
+def test_ytdlp_error_carries_stable_code_and_retryability():
+    error = YtDlpError("HTTP Error 403: Forbidden", code="YTDLP_ATTESTATION_REQUIRED", retryable=True)
+    assert error.code == "YTDLP_ATTESTATION_REQUIRED"
+    assert error.retryable is True

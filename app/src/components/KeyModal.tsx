@@ -55,14 +55,12 @@ export default function KeyModal({ onClose }: Props) {
     <div className="modal-scrim" onClick={onClose}>
       <div className="modal" role="dialog" aria-modal="true" aria-labelledby="key-modal-title" onClick={(e) => e.stopPropagation()}>
         <header className="modal-head">
-          <p id="key-modal-title" className="audit-kicker">THE BRAIN</p>
+          <p id="key-modal-title" className="audit-kicker">PROVIDER SETTINGS</p>
           <button className="btn-ghost" onClick={onClose}>close ✕</button>
         </header>
         <p className="ig-intro">
-          Gemini scores your moments at full quality (~<span className="mono">$0.15</span>/hr
-          of source). The key is stored in your operating system’s credential vault and is
-          supplied only to the operation that needs it.{' '}
-          {hasKey && <strong>A key is currently saved{saved ? ' — updated ✓' : ''}.</strong>}
+          Provider prices, quotas, and model limits change over time. Credentials are stored in your operating system’s vault and supplied only to the operation that needs them.{' '}
+          {hasKey && <strong>A Gemini key is currently saved{saved ? ' — updated ✓' : ''}.</strong>}
         </p>
         <div className="ig-form">
           <input
@@ -77,7 +75,7 @@ export default function KeyModal({ onClose }: Props) {
             {saved ? 'SAVED ✓' : 'SAVE KEY'}
           </button>
         </div>
-        <p className="audit-label" style={{ marginTop: 22 }}>PEXELS (STOCK VISUALS)</p>
+        <p className="audit-label" style={{ marginTop: 22 }}>OPTIONAL STOCK VISUALS</p>
         <PexelsField />
         <p className="ig-message mono">
           Applies to new runs; a job mid-flight keeps the brain it started with.

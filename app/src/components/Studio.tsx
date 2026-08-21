@@ -3,6 +3,7 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { api } from '../api'
 import type { JobSummary, LocalSetupInventory, PrivacySummary, ProviderTestResult, StageProgress } from '../types'
 import KeyModal from './KeyModal'
+import clipgaugeMark from '../assets/clipgauge-mark.svg'
 
 const STAGE_ORDER = [
   'ingest', 'asr', 'diarize', 'events', 'candidates', 'score', 'camera', 'render'
@@ -20,6 +21,7 @@ const STAGE_LABELS: Record<string, string> = {
 }
 
 const CAPTION_PRESETS = ['classic', 'beast', 'hormozi', 'minimal', 'karaoke-pop']
+const CAPTION_LABELS: Record<string, string> = { classic: 'Clean', beast: 'Bold Pop', hormozi: 'Punch', minimal: 'Minimal', 'karaoke-pop': 'Karaoke' }
 const PROVIDER_DEFAULTS: Record<string, { model: string; endpoint?: string; locality: string }> = {
   'clipgauge-local': { model: 'clipgauge-local/qwen3-4b-q4_k_m', endpoint: 'http://127.0.0.1:8080/v1', locality: 'local' },
   gemini: { model: 'gemini-flash-latest', locality: 'cloud' },
@@ -181,6 +183,15 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
               {!setupInventory?.runtime?.installed && <button className="btn-secondary" disabled={setupBusy} onClick={() => runSetupAction(api.installLocalRuntime, 'ClipGauge Local runtime installed and verified.')}>{setupBusy ? 'WORKING…' : 'INSTALL RUNTIME'}</button>}
             </div>
             <div className="setup-panel">
+              <div className="setup-panel-row"><strong>Core components</strong><span className="mono setup-size">verified manifest</span></div>
+              {setupInventory?.core_assets?.map((asset) => (
+                <div className="setup-asset" key={String(asset.asset_id)}>
+                  <div><strong>{asset.display_name ?? asset.asset_id}</strong><span>{asset.purpose ?? 'ClipGauge component'}</span></div>
+                  <span className={`chip ${asset.installed ? 'chip-green' : 'chip-amber'}`}>{asset.installed ? 'READY' : String(asset.integrity ?? 'SETUP')}</span>
+                </div>
+              ))}
+            </div>
+            <div className="setup-panel">
               <div className="setup-panel-row"><strong>Local models</strong><span className="mono setup-size">{setupInventory?.storage?.required_bytes ? `${(setupInventory.storage.required_bytes / 1024 ** 3).toFixed(1)} GB required` : 'size check pending'}</span></div>
               {setupInventory?.models?.map((asset) => (
                 <div className="setup-asset" key={String(asset.asset_id)}>
@@ -211,8 +222,8 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
         </div>
       )}
       <aside className="rail">
-        <header className="rail-brand">
-          <span className="rail-logo">ClipGauge</span>
+          <header className="rail-brand">
+            <div className="rail-brand-line"><img className="rail-mark" src={clipgaugeMark} alt="" /><span className="rail-logo">ClipGauge</span></div>
           <span className="rail-sub">local AI video clipper</span>
         </header>
         <div className="rail-jobs">
@@ -260,7 +271,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
       <main className="stage-area">
         <section className="input-block">
           <h1 className="input-heading">
-            FEED IT<span className="amber"> AN HOUR.</span>
+            Create clips
           </h1>
           <div
             className="input-row source-drop"
@@ -281,14 +292,14 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
               disabled={running}
               aria-label="Choose a local video file"
             >
-              CHOOSE FILE
+              Choose video
             </button>
             <button
               className="btn-primary"
               onClick={() => onRun(source.trim(), provider, captions, model || undefined, endpoint || undefined, auth, auth === 'custom_secret_header' ? secretHeader : undefined)}
               disabled={running || !source.trim()}
             >
-              {running ? 'WORKING' : 'CUT IT'}
+              {running ? 'Working…' : 'Create clips'}
             </button>
             {running && (
               <button
@@ -356,7 +367,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
                   onClick={() => setCaptions(preset)}
                   disabled={running}
                 >
-                  {preset}
+                  {CAPTION_LABELS[preset] ?? preset}
                 </button>
               ))}
             </div>

@@ -13,8 +13,9 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 
-from . import __version__, config, downloads, local_runtime, protocol
+from . import __version__, config, downloads, local_runtime, protocol, runtime
 from .jobs import queue
 from .scoring import providers as providers_mod
 
@@ -172,6 +173,84 @@ def _setup_model_asset(model: local_runtime.LocalModel) -> downloads.ManagedAsse
     )
 
 
+def _core_setup_inventory(manager: local_runtime.LocalRuntime) -> list[dict[str, object]]:
+    from .ingest import ytdlp
+    from .models import registry, specs  # noqa: F401 - ensure concrete specs are registered
+    from .render import ffmpeg_bin
+
+    rows: list[dict[str, object]] = []
+    try:
+        yt_manifest = manager.manifest["runtimes"]["yt-dlp"]
+        yt_name = ytdlp._binary_name()
+        yt_asset = yt_manifest["assets"][yt_name]
+        yt_path = ytdlp.binary_path()
+        yt_installed = yt_path.is_file() and runtime.sha256_file(yt_path).lower() == str(yt_asset["sha256"]).lower()
+        rows.append({
+            "asset_id": "core:yt-dlp",
+            "display_name": "YouTube compatibility",
+            "purpose": "Retrieves public video metadata and media through the managed yt-dlp runtime.",
+            "version": yt_manifest["version"],
+            "size_bytes": yt_asset.get("size"),
+            "installed": yt_installed,
+            "integrity": "verified" if yt_installed else "not-installed",
+            "source": yt_manifest["provenance"],
+            "license": yt_manifest["license"],
+            "location": str(yt_path),
+            "one_time": True,
+            "required": True,
+        })
+    except (KeyError, OSError):
+        rows.append({"asset_id": "core:yt-dlp", "display_name": "YouTube compatibility", "installed": False, "integrity": "manifest-error", "required": True})
+
+    ffmpeg_path, captions = ffmpeg_bin.resolve()
+    rows.append({
+        "asset_id": "core:ffmpeg",
+        "display_name": "Video engine",
+        "purpose": "Reads, processes, and renders video clips.",
+        "version": manager.manifest.get("runtimes", {}).get("ffmpeg", {}).get("version", "system or managed"),
+        "size_bytes": manager.manifest.get("runtimes", {}).get("ffmpeg", {}).get("assets", {}).get("win64-gpl", {}).get("size"),
+        "installed": bool(ffmpeg_path and (ffmpeg_path == "ffmpeg" or Path(ffmpeg_path).is_file())),
+        "integrity": "system-or-verified" if captions else "available-without-caption-filter",
+        "source": manager.manifest.get("runtimes", {}).get("ffmpeg", {}).get("provenance"),
+        "license": manager.manifest.get("runtimes", {}).get("ffmpeg", {}).get("license"),
+        "location": ffmpeg_path,
+        "one_time": True,
+        "required": True,
+    })
+
+    purposes = {
+        "campplus": "Identifies who is speaking so reframing can follow the active speaker.",
+        "laughter": "Adds laughter and energy signals to moment discovery.",
+        "panns": "Understands useful audio events beyond speech.",
+        "ultraface": "Finds faces for safe vertical reframing.",
+        "lr-asd": "Estimates active-speaker motion for camera direction.",
+    }
+    for key, spec in registry.REGISTRY.items():
+        path = registry.model_path(spec)
+        installed = path.is_file()
+        integrity = "not-installed"
+        if installed and spec.sha256:
+            try:
+                integrity = "verified" if runtime.sha256_file(path).lower() == spec.sha256.lower() else "failed"
+            except OSError:
+                integrity = "unreadable"
+        rows.append({
+            "asset_id": f"analysis:{key}",
+            "display_name": spec.name.replace("-", " ").replace("_", " ").title(),
+            "purpose": next((text for token, text in purposes.items() if token in spec.name), "Supports ClipGauge analysis."),
+            "version": spec.revision,
+            "size_bytes": spec.approx_mb * 1024 * 1024 if spec.approx_mb else None,
+            "installed": installed and integrity == "verified",
+            "integrity": integrity,
+            "source": spec.url,
+            "license": spec.license,
+            "location": str(path),
+            "one_time": True,
+            "required": True,
+        })
+    return rows
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     manager = local_runtime.LocalRuntime()
 
@@ -195,6 +274,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
                     "version": manager.manifest["runtimes"]["llama-server"]["version"],
                 },
                 "models": rows,
+                "core_assets": _core_setup_inventory(manager),
                 "storage": downloads_manager.estimate([runtime_asset, *model_assets]),
                 "catalog": [
                     {
