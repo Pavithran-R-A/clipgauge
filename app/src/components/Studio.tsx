@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
+import { listen } from '@tauri-apps/api/event'
 import { api } from '../api'
-import type { JobSummary, LocalSetupInventory, PrivacySummary, ProviderTestResult, StageProgress } from '../types'
+import type { JobSummary, LocalSetupInventory, ManagedAssetRow, PrivacySummary, ProviderTestResult, SetupProgressEvent, StageProgress } from '../types'
 import KeyModal from './KeyModal'
 import clipgaugeMark from '../assets/clipgauge-mark.svg'
 
@@ -57,6 +58,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
   const [model, setModel] = useState(PROVIDER_DEFAULTS['clipgauge-local'].model)
   const [endpoint, setEndpoint] = useState(PROVIDER_DEFAULTS['clipgauge-local'].endpoint ?? '')
   const [providerKey, setProviderKey] = useState('')
+  const [advancedMode, setAdvancedMode] = useState(false)
   const [auth, setAuth] = useState('none')
   const [secretHeader, setSecretHeader] = useState('x-api-key')
   const [testResult, setTestResult] = useState<ProviderTestResult | null>(null)
@@ -65,9 +67,26 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
   const [showSetup, setShowSetup] = useState(false)
   const [setupInventory, setSetupInventory] = useState<LocalSetupInventory | null>(null)
   const [setupBusy, setSetupBusy] = useState(false)
+  const [setupOperationId, setSetupOperationId] = useState<string | null>(null)
+  const [setupProgress, setSetupProgress] = useState<SetupProgressEvent | null>(null)
   const [privacy, setPrivacy] = useState<PrivacySummary | null>(null)
   const [supportMessage, setSupportMessage] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    void listen<SetupProgressEvent>('setup-event', ({ payload }) => {
+      setSetupProgress(payload)
+      if (payload.event === 'terminal') {
+        setSetupBusy(false)
+        setSetupOperationId(null)
+        if (payload.ok) setSupportMessage(payload.message ?? 'Setup completed.')
+        else setSupportMessage(payload.message ?? 'Setup needs attention.')
+        void api.setupInventory().then((value) => setSetupInventory(value as unknown as LocalSetupInventory)).catch(() => undefined)
+      }
+    }).then((stop) => { unlisten = stop })
+    return () => { unlisten?.() }
+  }, [])
 
   useEffect(() => {
     if (!startedAt) return
@@ -106,6 +125,29 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
       setSupportMessage(`Setup needs attention: ${String(error)}`)
     } finally {
       setSetupBusy(false)
+    }
+  }
+
+  async function startSetupAction(args: string[], success: string) {
+    setSetupBusy(true)
+    setSetupProgress({ operation: 'Preparing verified setup…', message: 'Preparing verified setup…', state: 'STARTING' })
+    try {
+      const operationId = await api.startSetup(args)
+      setSetupOperationId(operationId)
+      setSupportMessage(success)
+    } catch (error) {
+      setSetupBusy(false)
+      setSupportMessage(`Setup could not start: ${String(error)}`)
+    }
+  }
+
+  async function cancelSetupAction() {
+    if (!setupOperationId) return
+    try {
+      await api.cancelSetup(setupOperationId)
+      setSupportMessage('Cancelling setup; verified files remain reusable.')
+    } catch (error) {
+      setSupportMessage(`Could not cancel setup: ${String(error)}`)
     }
   }
 
@@ -166,6 +208,13 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
     if (file?.path) setSource(file.path)
   }
 
+  const managedAssets: ManagedAssetRow[] = setupInventory?.managed_assets ?? []
+  const hasAsset = (prefix: string) => managedAssets.some((asset) => asset.asset_id.startsWith(prefix) && asset.installed)
+  const asrReady = hasAsset('model:asr:') && hasAsset('model:alignment:') && hasAsset('data:nltk:')
+  const youtubeReady = hasAsset('runtime:node:') && hasAsset('youtube:bgutil-provider:')
+  const analysisReady = ['model:laughter:', 'model:panns:', 'model:campplus:', 'model:ultraface:', 'model:lr-asd:'].every(hasAsset)
+  const ffmpegAsset = managedAssets.find((asset) => asset.asset_id.startsWith('runtime:ffmpeg:'))
+
   return (
     <div className="studio">
       <div className="grain" />
@@ -190,6 +239,16 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
                   <span className={`chip ${asset.installed ? 'chip-green' : 'chip-amber'}`}>{asset.installed ? 'READY' : String(asset.integrity ?? 'SETUP')}</span>
                 </div>
               ))}
+            </div>
+            <div className="setup-panel">
+              <div className="setup-panel-row"><strong>Managed components</strong><span className="mono setup-size">{managedAssets.length} verified assets</span></div>
+              <p className="ig-message">Every large download is listed, consented as a group, resumable, cancellable, and SHA-256 checked before use.</p>
+              <div className="setup-asset"><div><strong>Video engine</strong><span>Caption-capable FFmpeg for decoding and rendering</span></div>{ffmpegAsset?.installed ? <span className="chip chip-green">READY</span> : <button className="btn-secondary" disabled={setupBusy} onClick={() => startSetupAction(['install-ffmpeg'], 'Video engine installation started.')}>{setupBusy ? 'WORKING…' : 'DOWNLOAD'}</button>}</div>
+              <div className="setup-asset"><div><strong>Speech recognition</strong><span>Verified faster-whisper, English alignment, and sentence data</span></div>{asrReady ? <span className="chip chip-green">READY</span> : <button className="btn-secondary" disabled={setupBusy} onClick={() => startSetupAction(['install-group', '--group', 'core:asr'], 'Speech recognition download started.')}>{setupBusy ? 'WORKING…' : 'DOWNLOAD'}</button>}</div>
+              <div className="setup-asset"><div><strong>Clip analysis</strong><span>Speaker, laughter, audio-event, and smart-camera assets</span></div>{analysisReady ? <span className="chip chip-green">READY</span> : <button className="btn-secondary" disabled={setupBusy} onClick={() => startSetupAction(['install-group', '--group', 'core:analysis'], 'Analysis components download started.')}>{setupBusy ? 'WORKING…' : 'DOWNLOAD'}</button>}</div>
+              <div className="setup-asset"><div><strong>YouTube compatibility</strong><span>yt-dlp, portable Node.js, and loopback PO-token provider</span></div>{youtubeReady ? <span className="chip chip-green">READY</span> : <button className="btn-secondary" disabled={setupBusy} onClick={() => startSetupAction(['install-group', '--group', 'core:youtube'], 'YouTube compatibility setup started.')}>{setupBusy ? 'WORKING…' : 'DOWNLOAD'}</button>}</div>
+              {setupBusy && <div className="setup-progress" role="status"><div className="setup-panel-row"><strong>{setupProgress?.display_name ?? setupProgress?.operation ?? 'Preparing setup…'}</strong><button className="btn-ghost" disabled={!setupOperationId} onClick={cancelSetupAction}>cancel</button></div><p className="ig-message">{setupProgress?.message ?? 'Preparing verified assets…'}{setupProgress?.eta_seconds != null ? ` · about ${Math.ceil(setupProgress.eta_seconds)}s left` : ''}</p>{setupProgress?.bytes_total ? <div className="progress-track"><div className="progress-fill" style={{ width: `${Math.max(0, Math.min(100, (setupProgress.bytes_done ?? 0) / setupProgress.bytes_total * 100))}%` }} /></div> : <div className="progress-track"><div className="progress-fill progress-indeterminate" /> </div>}</div>}
+              <details className="setup-details"><summary>Show verified asset details</summary>{managedAssets.map((asset) => <div className="setup-asset" key={asset.asset_id}><div><strong>{asset.display_name}</strong><span>{asset.purpose} · {asset.license}</span></div><span className={`chip ${asset.installed ? 'chip-green' : 'chip-amber'}`}>{asset.installed ? 'VERIFIED' : asset.status ?? 'SETUP'}</span></div>)}</details>
             </div>
             <div className="setup-panel">
               <div className="setup-panel-row"><strong>Local models</strong><span className="mono setup-size">{setupInventory?.storage?.required_bytes ? `${(setupInventory.storage.required_bytes / 1024 ** 3).toFixed(1)} GB required` : 'size check pending'}</span></div>
@@ -315,7 +374,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
           <div className="run-options">
             <div className="opt-group provider-group">
               <span className="opt-label">provider</span>
-              {Object.keys(PROVIDER_DEFAULTS).map((kind) => (
+              {(advancedMode ? Object.keys(PROVIDER_DEFAULTS) : ['clipgauge-local', 'ollama', 'lmstudio', 'gemini']).map((kind) => (
                 <button
                   key={kind}
                   className={`opt ${provider === kind ? 'opt-on' : ''}`}
@@ -327,7 +386,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
                 </button>
               ))}
             </div>
-            <div className="provider-config" aria-label="Provider configuration">
+            {advancedMode ? <div className="provider-config" aria-label="Advanced provider configuration">
               <label className="field-label" htmlFor="provider-model">model</label>
               <input id="provider-model" value={model} onChange={(event) => setModel(event.target.value)} disabled={running} placeholder="model identifier" />
               {(provider === 'custom' || provider === 'cloudflare') && (
@@ -357,7 +416,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
               )}
               <button className="btn-secondary" onClick={testProvider} disabled={running}>TEST CONNECTION</button>
               {testResult && <p className={`provider-test provider-test-${testResult.state.toLowerCase()}`} role="status">{testResult.state}: {testResult.message ?? `${testResult.provider ?? provider} / ${testResult.model ?? model}`}</p>}
-            </div>
+            </div> : <div className="provider-simple" aria-label="Simple provider mode"><p className="ig-message">{provider === 'clipgauge-local' ? 'Private scoring runs on this computer.' : provider === 'ollama' || provider === 'lmstudio' ? 'Local scoring uses your selected desktop runner.' : 'Cloud scoring uses a credential you provide.'}</p><button className="btn-ghost" onClick={() => setAdvancedMode(true)} disabled={running}>Advanced provider setup</button></div>}
             <div className="opt-group">
               <span className="opt-label">captions</span>
               {CAPTION_PRESETS.map((preset) => (

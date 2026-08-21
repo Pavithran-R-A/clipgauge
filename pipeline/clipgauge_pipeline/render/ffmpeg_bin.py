@@ -1,50 +1,60 @@
-"""ffmpeg binary resolution.
+"""FFmpeg resolution and explicit managed installation.
 
-Caption burning needs an ffmpeg built with libass, and (as this very
-machine demonstrates) Homebrew's slimmed `ffmpeg` formula ships without it.
-Resolution order: CLIPGAUGE_FFMPEG env → bundled sidecar binary (packaged
-app) → Homebrew ffmpeg-full keg → PATH. The first candidate that actually
-has the `subtitles` filter wins; if none do, the plain PATH binary is
-returned with `has_subtitles=False` so the caller can degrade (render
-without burned captions) with an honest message instead of a crash.
+A valid capable system binary is reused.  When none exists, v0.4 exposes an
+explicit Setup Center action that downloads a pinned archive through the common
+DownloadManager; render never starts a hidden download.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import shutil
 import subprocess
+import time
 import zipfile
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
-from .. import config, runtime
+from .. import config, downloads, runtime
 
-_KEG_CANDIDATES = [
+_LEGACY_KEG_CANDIDATES = [
     "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
     "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
 ]
-
-# Static macOS builds with libass (ffmpeg.martin-riedl.de). Used only when
-# no capable ffmpeg exists on the machine — downloaded once into
-# CLIPGAUGE_HOME/bin so end users never touch Homebrew.
-# FFmpeg source is authoritative, but this packaged binary is supplied by
-# BtbN. The tag and SHA-256 are recorded in runtime-manifest.json.
-_STATIC_WINDOWS = (
-    "https://github.com/BtbN/FFmpeg-Builds/releases/download/"
-    "autobuild-2026-08-18-15-03/ffmpeg-N-126207-g21bbd98e7b-win64-gpl.zip"
-)
-_STATIC_WINDOWS_SHA256 = "0dfc1c04a5b8c15e56e3e2245d3b0a1fb5f22242591e1b2c4a1cb6fa0cd0230b"
-
 _EXE = ".exe" if platform.system() == "Windows" else ""
+
+
+def _manifest() -> dict[str, Any]:
+    path = Path(__file__).parents[2] / "runtime-manifest.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _platform_asset() -> dict[str, Any] | None:
+    manifest = _manifest().get("runtimes", {}).get("ffmpeg", {})
+    assets = manifest.get("assets", {})
+    if platform.system() == "Windows" and platform.machine().lower() in {"amd64", "x86_64"}:
+        return {"key": "win64-gpl", "version": manifest.get("version", "managed"), **assets.get("win64-gpl", {})}
+    return None
+
+
+def _managed_dir() -> Path | None:
+    asset = _platform_asset()
+    if not asset:
+        return None
+    return config.runtimes_dir() / "ffmpeg" / str(asset["version"]) / str(asset.get("key", "platform"))
 
 
 def _has_subtitles_filter(binary: str) -> bool:
     try:
         proc = subprocess.run(
             [binary, "-hide_banner", "-filters"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -53,28 +63,32 @@ def _has_subtitles_filter(binary: str) -> bool:
 
 @lru_cache(maxsize=1)
 def resolve() -> tuple[str, bool]:
-    """(ffmpeg_path, has_subtitles)."""
+    """Return `(ffmpeg_path, has_subtitles)` without downloading anything."""
     candidates: list[str] = []
     env = os.environ.get("CLIPGAUGE_FFMPEG")
     if env:
         candidates.append(env)
-    candidates.append(str(config.bin_dir() / f"ffmpeg{_EXE}"))  # our downloaded static
-    bundled = os.environ.get("CLIPGAUGE_BUNDLED_FFMPEG")  # set by the app shell
+    managed = _managed_dir()
+    if managed:
+        candidates.append(str(managed / f"ffmpeg{_EXE}"))
+    legacy = config.bin_dir() / f"ffmpeg{_EXE}"
+    candidates.append(str(legacy))
+    bundled = os.environ.get("CLIPGAUGE_BUNDLED_FFMPEG")
     if bundled:
         candidates.append(bundled)
     if platform.system() == "Darwin":
-        candidates.extend(_KEG_CANDIDATES)
+        candidates.extend(_LEGACY_KEG_CANDIDATES)
     path_ffmpeg = shutil.which("ffmpeg")
     if path_ffmpeg:
         candidates.append(path_ffmpeg)
 
     fallback: str | None = None
-    for cand in candidates:
-        if not os.path.exists(cand):
+    for candidate in candidates:
+        if not os.path.exists(candidate):
             continue
-        fallback = fallback or cand
-        if _has_subtitles_filter(cand):
-            return cand, True
+        fallback = fallback or candidate
+        if _has_subtitles_filter(candidate):
+            return candidate, True
     return (fallback or "ffmpeg"), False
 
 
@@ -83,7 +97,6 @@ def ffmpeg() -> str:
 
 
 def ffprobe() -> str:
-    """ffprobe next to the resolved ffmpeg when present, else PATH."""
     sibling = Path(ffmpeg()).parent / f"ffprobe{_EXE}"
     if sibling.exists():
         return str(sibling)
@@ -94,71 +107,93 @@ def supports_captions() -> bool:
     return resolve()[1]
 
 
-def _download(url: str, dest: Path, expected_sha256: str, progress=None) -> bool:
-    try:
-        runtime.download_verified(
-            url,
-            dest,
-            expected_sha256=expected_sha256,
-            max_bytes=512 * 1024 * 1024,
-            timeout=300.0,
-            progress=progress,
-        )
-        return True
-    except runtime.RuntimeIntegrityError:
+def managed_asset() -> downloads.ManagedAsset | None:
+    record = _platform_asset()
+    managed = _managed_dir()
+    if not record or not managed:
+        return None
+    return downloads.ManagedAsset(
+        asset_id=f"runtime:ffmpeg:{record['key']}",
+        display_name="FFmpeg — Video engine",
+        purpose="Decode, probe, caption, and render video clips",
+        destination=str(Path("runtimes") / "ffmpeg" / str(record["version"]) / str(record["key"]) / "ffmpeg.zip"),
+        url=str(record["url"]),
+        size_bytes=int(record.get("size", 0)),
+        sha256=str(record["sha256"]),
+        required=True,
+        one_time=True,
+        license=str(_manifest()["runtimes"]["ffmpeg"].get("license", "See upstream")),
+        source=str(_manifest()["runtimes"]["ffmpeg"].get("provenance", "")),
+        consent_group="core",
+        archive_type="zip",
+        source_revision=str(record.get("version", "")),
+        platform=str(record.get("platform", "")),
+        download_destination=str(Path("runtimes") / "ffmpeg" / str(record["version"]) / str(record["key"]) / "ffmpeg.zip"),
+    )
+
+
+def _atomic_install_windows(archive: Path) -> bool:
+    managed = _managed_dir()
+    if managed is None:
         return False
-
-
-def _ensure_capable_macos(progress) -> bool:
-    if progress:
-        progress(-1, "No pinned macOS FFmpeg archive is configured; using a verified system binary if available.")
-    return False
-
-
-def _ensure_capable_windows(progress) -> bool:
-    """One zip carries both tools (BtbN GPL build, libass included)."""
-    wanted = {
-        "ffmpeg.exe": config.bin_dir() / "ffmpeg.exe",
-        "ffprobe.exe": config.bin_dir() / "ffprobe.exe",
-    }
-    if all(dest.exists() for dest in wanted.values()) and _has_subtitles_filter(
-        str(wanted["ffmpeg.exe"])
-    ):
-        return True
-    if progress:
-        progress(-1, "Downloading ffmpeg (one-time, caption support)…")
-    zpath = config.bin_dir() / "ffmpeg-static.zip"
+    wanted = {"ffmpeg.exe", "ffprobe.exe"}
+    staging = managed.with_name(f".{managed.name}.{time.time_ns()}.staging")
     try:
-        if not _download(_STATIC_WINDOWS, zpath, _STATIC_WINDOWS_SHA256, progress=lambda f, m: progress(f, m) if progress else None):
-            return False
         runtime.extract_zip_selected_verified(
-            zpath,
-            config.bin_dir(),
-            expected_basenames=set(wanted),
+            archive,
+            staging,
+            expected_basenames=wanted,
             member_modes={name: 0o755 for name in wanted},
         )
-    except (OSError, zipfile.BadZipFile):
+        ffmpeg_path = staging / "ffmpeg.exe"
+        if not _has_subtitles_filter(str(ffmpeg_path)):
+            raise runtime.RuntimeIntegrityError("managed FFmpeg lacks the required subtitles/libass filter")
+        managed.parent.mkdir(parents=True, exist_ok=True)
+        backup = managed.with_name(f".{managed.name}.previous")
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+        if managed.exists():
+            os.replace(managed, backup)
+        os.replace(staging, managed)
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+        return True
+    except (OSError, runtime.RuntimeIntegrityError, zipfile.BadZipFile):
+        shutil.rmtree(staging, ignore_errors=True)
         return False
+
+
+def install_managed(*, event=None, cancel=None, require_consent: bool = True) -> bool:
+    """Install the platform-managed FFmpeg through DownloadManager."""
+    asset = managed_asset()
+    if asset is None:
+        return False
+    manager = downloads.DownloadManager(event=event)
+    try:
+        archive = manager.download(asset, require_consent=require_consent, cancel=cancel)
+        if platform.system() != "Windows":
+            return False
+        ok = _atomic_install_windows(archive)
+        if not ok:
+            manager.mark_needs_repair(asset.asset_id, "Managed FFmpeg failed archive or capability validation")
+            return False
+        resolve.cache_clear()
+        return supports_captions()
     finally:
-        zpath.unlink(missing_ok=True)
-    return all(dest.exists() for dest in wanted.values())
+        archive_path = _managed_dir() / "ffmpeg.zip" if _managed_dir() else None
+        if archive_path:
+            archive_path.unlink(missing_ok=True)
 
 
 def ensure_capable(progress=None) -> bool:
-    """If no libass ffmpeg exists anywhere, download a static build once
-    into CLIPGAUGE_HOME/bin (macOS arm64/x86_64, Windows x64), then
-    re-resolve. Returns whether caption burning is available afterwards."""
-    if supports_captions():
-        return True
-    system = platform.system()
-    config.ensure_home()
-    if system == "Darwin":
-        ok = _ensure_capable_macos(progress)
-    elif system == "Windows":
-        ok = _ensure_capable_windows(progress)
-    else:
-        return False
-    if not ok:
-        return False
-    resolve.cache_clear()
-    return supports_captions()
+    """Compatibility wrapper for explicit setup callers only.
+
+    Render stages must not call this function automatically.  It is retained
+    for the CLI/Tauri Setup Center action and requires the caller's consent.
+    """
+    event = None
+    if progress:
+        def event(payload: dict[str, Any]) -> None:
+            fraction = payload.get("fraction", -1.0)
+            progress(float(fraction if fraction is not None else -1.0), str(payload.get("message", "Installing FFmpeg…")))
+    return install_managed(event=event, require_consent=False)

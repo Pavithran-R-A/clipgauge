@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .. import config, runtime
+from .. import config, downloads, runtime
 
 ProgressFn = Callable[[float, str], None]
 
@@ -24,6 +24,7 @@ class ModelSpec:
     url: str
     sha256: str | None = None
     approx_mb: int = 0
+    size_bytes: int = 0
     revision: str = "unversioned"
     license: str = "See upstream source"
 
@@ -44,29 +45,35 @@ def is_present(spec: ModelSpec) -> bool:
     return model_path(spec).exists()
 
 
-def ensure(spec: ModelSpec, progress: ProgressFn) -> Path:
-    """Download, verify, and atomically install one pinned model artifact."""
+def managed_asset(spec: ModelSpec) -> downloads.ManagedAsset:
     if not spec.sha256:
-        raise RuntimeError(
-            f"Model {spec.name} has no release SHA-256 pin; refusing an unverified download."
-        )
-    dest = model_path(spec)
-    if dest.exists():
-        try:
-            if runtime.sha256_file(dest).lower() == spec.sha256.lower():
-                return dest
-        except OSError:
-            pass
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    label = f"Downloading {spec.name}" + (f" (~{spec.approx_mb} MB)" if spec.approx_mb else "")
+        raise RuntimeError(f"Model {spec.name} has no release SHA-256 pin; refusing an unverified download.")
+    return downloads.ManagedAsset(
+        asset_id=f"model:{spec.name}:{spec.filename}",
+        display_name=spec.name.replace("-", " ").title(),
+        purpose="ClipGauge analysis and creator workflow",
+        destination=str(model_path(spec).relative_to(config.home_dir())),
+        url=spec.url,
+        size_bytes=spec.size_bytes,
+        sha256=spec.sha256,
+        required=True,
+        one_time=True,
+        license=spec.license,
+        source=spec.url,
+        consent_group="core:analysis",
+        source_revision=spec.revision,
+    )
+
+
+def ensure(spec: ModelSpec, progress: ProgressFn) -> Path:
+    """Install one pinned analysis model only after Setup Center consent."""
+    asset = managed_asset(spec)
+    manager = downloads.DownloadManager(event=lambda payload: progress(float(payload.get("fraction", -1.0) if payload.get("fraction") is not None else -1.0), str(payload.get("message", f"Downloading {spec.name}"))))
     try:
-        return runtime.download_verified(
-            spec.url,
-            dest,
-            expected_sha256=spec.sha256,
-            max_bytes=max(2 * 1024 * 1024 * 1024, (spec.approx_mb or 1) * 1024 * 1024 * 3),
-            timeout=config.HTTP_TIMEOUT,
-            progress=lambda fraction, _: progress(fraction, label),
-        )
-    except runtime.RuntimeIntegrityError as exc:
+        return manager.download(asset, require_consent=True)
+    except downloads.ConsentRequiredError as exc:
+        raise RuntimeError(
+            f"Analysis asset {spec.name} is not installed. Open Setup Center and approve the Analysis components group."
+        ) from exc
+    except (runtime.RuntimeIntegrityError, runtime.RuntimeDiskSpaceError) as exc:
         raise RuntimeError(f"Model {spec.name} failed verification: {exc}") from exc

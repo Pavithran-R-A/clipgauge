@@ -163,6 +163,12 @@ class LocalRuntime:
             "--port",
             str(port),
             "--no-webui",
+            "--parallel",
+            "1",
+            "--ctx-size",
+            "4096",
+            "--reasoning",
+            "off",
         ]
 
     def start(self, model_id: str, endpoint: str | None = None) -> str:

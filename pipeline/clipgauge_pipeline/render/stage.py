@@ -24,10 +24,14 @@ class RenderStage(Stage):
         from ..captions import ass as ass_mod
         from . import ffmpeg_bin, renderer
 
-        if not ffmpeg_bin.supports_captions():
-            ctx.emit(-1, "No caption-capable ffmpeg found — fetching one…")
-            if not ffmpeg_bin.ensure_capable(progress=lambda f, m: ctx.emit(f, m)):
-                ctx.emit(-1, "Caption burning unavailable — rendering without captions.")
+        caption_engine_ready = ffmpeg_bin.supports_captions()
+        if not caption_engine_ready:
+            ctx.emit(-1, "No caption-capable FFmpeg is ready. Open Setup Center to install the Video engine.")
+            # Rendering may continue without burned captions only when the user
+            # explicitly selected a caption-free workflow; the default creator
+            # workflow fails closed instead of starting a hidden download.
+            if ctx.settings.caption_preset not in {"none", "off"}:
+                raise StageError("Caption-capable FFmpeg is not installed. Open Setup Center and choose Download for Video engine.")
 
         prior = ctx.prior or {}
         ingest = prior.get("ingest")
@@ -47,13 +51,13 @@ class RenderStage(Stage):
         rms = curves["rms"]
         grid = float(curves["grid_sec"])
 
-        captions_ok = ffmpeg_bin.supports_captions()
+        preset = ctx.settings.caption_preset
+        captions_ok = caption_engine_ready and preset not in {"none", "off"}
         emoji_ok = ass_mod.emoji_probe() if captions_ok else False
         ctx.emit(-1, f"Emoji support: {'yes' if emoji_ok else 'no (dropping emoji)'}")
 
         out_dir = ctx.job_dir / "clips"
         out_dir.mkdir(exist_ok=True)
-        preset = ctx.settings.caption_preset
         outputs = []
         clips = score["clips"]
         for i, clip in enumerate(clips):

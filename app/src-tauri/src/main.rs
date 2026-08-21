@@ -1131,9 +1131,106 @@ async fn check_ollama() -> Result<Value, String> {
     Ok(json!({"state": state, "running": true, "models": models}))
 }
 
+fn stream_setup(
+    app: &AppHandle,
+    program: &str,
+    args: &[String],
+    processes: Arc<Mutex<process_manager::ProcessManager>>,
+    key: String,
+) {
+    let mut command = quiet_command(program);
+    secrets::apply_operation_env(&mut command);
+    process_manager::configure_process_group(&mut command);
+    let child = command
+        .env("CLIPGAUGE_HOME", home_dir())
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(child) => child,
+        Err(error) => {
+            if let Ok(mut state) = processes.lock() {
+                let _ = state.finish(&key, false);
+            }
+            let _ = app.emit("setup-event", json!({"event": "terminal", "ok": false, "code": "SETUP_START_FAILED", "message": diagnostics::redact(&error.to_string())}));
+            return;
+        }
+    };
+    if let Ok(mut state) = processes.lock() {
+        let _ = state.adopt_job_id(&key, key.clone());
+        let _ = state.register_process(&key, child.id());
+    }
+    if let Some(stdout) = child.stdout.take() {
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().map_while(Result::ok) {
+                if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                    let _ = app_clone.emit("setup-event", value);
+                }
+            }
+        });
+    }
+    let status = child.wait();
+    let success = status.map(|value| value.success()).unwrap_or(false);
+    if let Ok(mut state) = processes.lock() {
+        let cancelled = state.is_cancel_requested(&key);
+        let _ = state.finish(&key, success && !cancelled);
+        if cancelled {
+            let _ = app.emit("setup-event", json!({"event": "terminal", "ok": false, "code": "CANCELLED", "message": "Setup was cancelled. Verified assets remain reusable."}));
+        } else {
+            let _ = app.emit("setup-event", json!({"event": "terminal", "ok": success, "code": if success { "OK" } else { "SETUP_FAILED" }, "message": if success { "Setup completed." } else { "Setup failed; retry or repair the selected asset." }}));
+        }
+    }
+}
+
+#[tauri::command]
+fn start_setup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    args: Vec<String>,
+) -> Result<String, String> {
+    let valid = matches!(args.as_slice(), [command] if command == "inventory" || command == "install-runtime" || command == "install-ffmpeg")
+        || matches!(args.as_slice(), [command, group, value] if command == "install-group" && group == "--group" && matches!(value.as_str(), "core:asr" | "core:analysis" | "core:youtube"))
+        || matches!(args.as_slice(), [command, asset] if command == "install-asset" && asset.len() <= 180 && asset.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '_' | '/' | '.')))
+        || matches!(args.as_slice(), [command, model] if command == "download-model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')));
+    if !valid {
+        return Err("unsupported setup operation".to_string());
+    }
+    let (program, base_args) = pipeline_invocation();
+    let key = format!("setup:{}", diagnostics::diagnostic_id());
+    reserve_process(&state.processes, key.clone())?;
+    let processes = state.processes.clone();
+    let worker_key = key.clone();
+    std::thread::spawn(move || {
+        let mut full = base_args;
+        full.push("--jsonl".to_string());
+        full.push("setup".to_string());
+        full.extend(args);
+        stream_setup(&app, &program, &full, processes, worker_key);
+    });
+    Ok(key)
+}
+
+#[tauri::command]
+fn cancel_setup(state: State<'_, AppState>, operation_id: String) -> Result<(), String> {
+    if !operation_id.starts_with("setup:") || operation_id.len() > 120 {
+        return Err("invalid setup operation id".to_string());
+    }
+    let process_id = state
+        .processes
+        .lock()
+        .map_err(|_| "setup lifecycle state is unavailable".to_string())?
+        .request_cancel(&operation_id)?;
+    process_manager::terminate_owned(process_id)
+}
+
 #[tauri::command]
 fn setup_tool(args: Vec<String>) -> Result<Value, String> {
-    let valid = matches!(args.as_slice(), [command] if command == "inventory" || command == "install-runtime")
+    let valid = matches!(args.as_slice(), [command] if command == "inventory" || command == "install-runtime" || command == "install-ffmpeg")
+        || matches!(args.as_slice(), [command, group, value] if command == "install-group" && group == "--group" && matches!(value.as_str(), "core:asr" | "core:analysis" | "core:youtube"))
+        || matches!(args.as_slice(), [command, asset] if command == "install-asset" && asset.len() <= 180 && asset.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '_' | '/' | '.')))
         || matches!(args.as_slice(), [command, model] if command == "download-model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')));
     if !valid {
         return Err("unsupported setup operation".to_string());
@@ -1416,6 +1513,8 @@ fn main() {
             mark_onboarded,
             check_ollama,
             setup_tool,
+            start_setup,
+            cancel_setup,
             ig_status,
             ig_connect,
             ig_tool,

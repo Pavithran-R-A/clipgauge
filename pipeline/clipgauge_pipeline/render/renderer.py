@@ -29,6 +29,20 @@ OUT_W = 1080
 OUT_H = 1920
 X264_CRF = 19
 VT_BITRATE = "10M"
+X264_PRESETS = frozenset({"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"})
+OUTPUT_SIZES = {"1080x1920": (1080, 1920), "540x960": (540, 960)}
+
+
+def output_dimensions() -> tuple[int, int]:
+    """Return a safe optional validation size; production defaults to 1080×1920."""
+    requested = os.environ.get("CLIPGAUGE_RENDER_OUTPUT_SIZE", "1080x1920").strip().lower()
+    return OUTPUT_SIZES.get(requested, OUTPUT_SIZES["1080x1920"])
+
+
+def x264_preset() -> str:
+    """Return a safe optional validation override; production defaults to medium."""
+    requested = os.environ.get("CLIPGAUGE_RENDER_X264_PRESET", "medium").strip().lower()
+    return requested if requested in X264_PRESETS else "medium"
 
 _vt_checked: bool | None = None
 
@@ -122,10 +136,11 @@ def render_clip(
     cmd_path.write_text("\n".join(sendcmd_lines(boxes, fps)) + "\n")
 
     w0, h0, x0, y0 = boxes[0]
+    out_w, out_h = output_dimensions()
     vf_parts = [
         f"sendcmd=f={_q(cmd_path)}",
         f"crop@c=w={w0}:h={h0}:x={x0}:y={y0}",
-        f"scale={OUT_W}:{OUT_H}:flags=lanczos",
+        f"scale={out_w}:{out_h}:flags=lanczos",
         "setsar=1",
     ]
     if ass_path is not None:
@@ -137,7 +152,7 @@ def render_clip(
     if videotoolbox_available():
         vcodec = ["-c:v", "h264_videotoolbox", "-b:v", VT_BITRATE, "-allow_sw", "1"]
     else:
-        vcodec = ["-c:v", "libx264", "-preset", "medium", "-crf", str(X264_CRF)]
+        vcodec = ["-c:v", "libx264", "-preset", x264_preset(), "-crf", str(X264_CRF)]
 
     args = [
         ffmpeg_bin.ffmpeg(), "-y", "-v", "error",

@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 
 from .. import config, hardware
+from .. import downloads
+from ..models import managed
 from ..jobs.queue import Stage, StageContext, StageError
 
 ASR_MODEL = "large-v3-turbo"
@@ -29,12 +31,8 @@ BATCH_SIZE = 8
 
 
 def _point_caches_at_home() -> None:
-    """All model caches live under CLIPGAUGE_HOME so 'delete the app data
-    dir' is a complete uninstall."""
-    hf_home = config.models_dir() / "hf"
-    hf_home.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("HF_HOME", str(hf_home))
-    os.environ.setdefault("TORCH_HOME", str(config.models_dir() / "torch"))
+    """Keep all library caches below the managed ClipGauge data root."""
+    managed.apply_local_env()
 
 
 class AsrStage(Stage):
@@ -50,7 +48,14 @@ class AsrStage(Stage):
             raise StageError("Analysis audio missing — re-run ingest.")
 
         _point_caches_at_home()
-        ctx.emit(-1, "Loading speech model (downloads ~1.6 GB on first run)…")
+        asset_manager = downloads.DownloadManager()
+        if not managed.ready(asset_manager):
+            raise StageError(
+                "Speech recognition assets are not ready. Open Setup Center and approve the Speech recognition download group.",
+                code="ASR_ASSETS_NOT_READY",
+                retryable=True,
+            )
+        ctx.emit(-1, "Loading verified speech model…")
         import torch  # deferred: heavy import
         import whisperx
 
@@ -61,7 +66,8 @@ class AsrStage(Stage):
         t0 = time.monotonic()
         try:
             model = whisperx.load_model(
-                ASR_MODEL, device, compute_type=compute_type, vad_method="silero"
+                str(managed.asr_model_path()), device, compute_type=compute_type,
+                vad_method="silero", local_files_only=True,
             )
         except Exception as exc:  # noqa: BLE001 - provide a reliable CPU fallback
             if device != "cpu":
@@ -70,7 +76,8 @@ class AsrStage(Stage):
                 ctx.emit(-1, "GPU speech acceleration was unavailable; using CPU fallback (int8)…")
                 try:
                     model = whisperx.load_model(
-                        ASR_MODEL, device, compute_type=compute_type, vad_method="silero"
+                        str(managed.asr_model_path()), device, compute_type=compute_type,
+                        vad_method="silero", local_files_only=True,
                     )
                 except Exception as fallback_exc:  # noqa: BLE001 - final typed boundary
                     raise StageError(
@@ -99,8 +106,17 @@ class AsrStage(Stage):
 
         ctx.emit(-1, "Aligning words…")
         t1 = time.monotonic()
+        if language != "en":
+            raise StageError(
+                f"Word alignment for language '{language}' is not installed. Open Setup Center to approve its one-time language model.",
+                code="ASR_ALIGNMENT_ASSET_NOT_READY",
+                retryable=True,
+            )
         try:
-            align_model, align_meta = whisperx.load_align_model(language_code=language, device=device)
+            align_model, align_meta = whisperx.load_align_model(
+                language_code=language, device=device,
+                model_dir=str(managed.alignment_model_dir()), model_cache_only=True,
+            )
             aligned = whisperx.align(
                 result["segments"], align_model, align_meta, audio, device,
                 return_char_alignments=False,
@@ -111,7 +127,10 @@ class AsrStage(Stage):
                 os.environ["CLIPGAUGE_ACCELERATOR"] = "cpu/int8"
                 ctx.emit(-1, "Word alignment fell back to CPU…")
                 try:
-                    align_model, align_meta = whisperx.load_align_model(language_code=language, device=device)
+                    align_model, align_meta = whisperx.load_align_model(
+                        language_code=language, device=device,
+                        model_dir=str(managed.alignment_model_dir()), model_cache_only=True,
+                    )
                     aligned = whisperx.align(
                         result["segments"], align_model, align_meta, audio, device,
                         return_char_alignments=False,
