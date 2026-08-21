@@ -147,22 +147,16 @@ mod tests {
     use super::{export_clip, job_results};
     use serde_json::json;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn fixture() -> std::path::PathBuf {
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let home = std::env::temp_dir().join(format!("clipgauge-artifact-{suffix}"));
-        let job = home.join("jobs/20260818-155237-c6b118");
-        fs::create_dir_all(job.join("clips")).unwrap();
-        fs::write(job.join("clips/clip_00.mp4"), b"video").unwrap();
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    fn write_render_checkpoint(job: &std::path::Path, path: &std::path::Path) {
         let checkpoint = json!({
             "data": {
                 "outputs": [{
                     "clip": 0,
-                    "path": job.join("clips/clip_00.mp4").to_string_lossy(),
+                    "path": path.to_string_lossy().to_string(),
                 }]
             }
         });
@@ -171,6 +165,18 @@ mod tests {
             serde_json::to_vec(&checkpoint).unwrap(),
         )
         .unwrap();
+    }
+
+    fn fixture() -> std::path::PathBuf {
+        let suffix = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let home = std::env::temp_dir().join(format!(
+            "clipgauge-artifact-{}-{suffix}",
+            std::process::id()
+        ));
+        let job = home.join("jobs/20260818-155237-c6b118");
+        fs::create_dir_all(job.join("clips")).unwrap();
+        fs::write(job.join("clips/clip_00.mp4"), b"video").unwrap();
+        write_render_checkpoint(&job, &job.join("clips/clip_00.mp4"));
         home
     }
 
@@ -197,14 +203,7 @@ mod tests {
         let job = home.join("jobs/20260818-155237-c6b118");
         let outside = home.join("outside-readable.mp4");
         fs::write(&outside, b"not the rendered clip").unwrap();
-        fs::write(
-            job.join("render.json"),
-            format!(
-                r#"{{"data":{{"outputs":[{{"clip":0,"path":"{}"}}]}}}}"#,
-                outside.to_string_lossy()
-            ),
-        )
-        .unwrap();
+        write_render_checkpoint(&job, &outside);
         assert!(export_clip(
             &home,
             &home.join("Downloads"),
@@ -221,14 +220,7 @@ mod tests {
         let job = home.join("jobs/20260818-155237-c6b118");
         let outside = home.join("outside-readable.mp4");
         fs::write(&outside, b"outside").unwrap();
-        fs::write(
-            job.join("render.json"),
-            format!(
-                r#"{{"data":{{"outputs":[{{"clip":0,"path":"{}"}}]}}}}"#,
-                outside.to_string_lossy()
-            ),
-        )
-        .unwrap();
+        write_render_checkpoint(&job, &outside);
         let result = job_results(&home, "20260818-155237-c6b118").unwrap();
         assert_eq!(
             result["render"]["outputs"][0]["artifact_status"],
