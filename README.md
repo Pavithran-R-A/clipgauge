@@ -15,9 +15,9 @@ ClipGauge is an AGPL-3.0-or-later desktop application for turning a YouTube URL 
 
 ## Current release
 
-ClipGauge v0.3.0 is the creator-experience release. It adds ClipGauge Local as a managed, loopback-only structured-scoring option; a progressive Setup Center with consent-aware downloads and verification; typed diagnostics; resumable progress; creator-first onboarding; and the Studio, Review, Settings, and Diagnostics surfaces. v0.1.0, v0.1.1, v0.2.0, and v0.2.1 remain immutable historical releases.
+ClipGauge v0.4.0 is the managed-runtime and creator-workflow release. It adds one consented Download Manager for every runtime and analysis asset; self-service FFmpeg; explicit faster-whisper/alignment setup; managed YouTube compatibility with portable Node.js and a loopback PO-token provider; optional authenticated-browser retrieval; streamed/cancellable Setup Center operations; and no hidden large downloads during compute. v0.1.0, v0.1.1, v0.2.0, v0.2.1, and v0.3.0 remain immutable historical releases.
 
-The v0.3.0 release artifacts are unsigned unless the release notes explicitly prove otherwise. Windows SmartScreen warnings and non-notarized macOS Gatekeeper warnings are expected. The updater remains disabled because no real signing key is configured. ClipGauge Local remains optional until its pinned runtime and selected model are installed and verified.
+The v0.4.0 release artifacts are unsigned unless the release notes explicitly prove otherwise. Windows SmartScreen warnings and non-notarized macOS Gatekeeper warnings are expected. The updater remains disabled because no real signing key is configured. ClipGauge Local remains optional until its pinned runtime and selected model are installed and verified.
 
 ## Provider options
 
@@ -27,13 +27,13 @@ See [`docs/providers/README.md`](docs/providers/README.md) and [`docs/providers/
 
 ## Public artifacts
 
-The v0.3.0 release workflow is the source of truth for downloadable artifacts. It publishes platform artifacts only after native build, metadata, checksum, SBOM, provenance, attestation, and secret-scan gates pass. Review release notes and checksums before installing any unsigned artifact.
+The v0.4.0 release workflow is the source of truth for downloadable artifacts. It publishes platform artifacts only after native build, metadata, checksum, SBOM, provenance, attestation, and secret-scan gates pass. Review release notes and checksums before installing any unsigned artifact.
 
 Every public binary is accompanied by `SHA256SUMS`. The release also includes a CycloneDX SBOM and a human-readable provenance record. A checksum is not a cryptographic attestation, and neither is a substitute for Windows code signing or Apple signing/notarization.
 
 ## Requirements
 
-Building from source requires Git, Node.js 22 or newer, Rust via [rustup](https://rustup.rs/), Python 3.12, and [uv](https://docs.astral.sh/uv/). Linux packaging additionally requires the Tauri system libraries listed in [`INSTALL.md`](INSTALL.md). Runtime, analysis-model, and ClipGauge Local downloads require network access the first time a selected feature is used. Once verified assets are installed, ClipGauge Local scoring runs against the loopback-owned runtime without a cloud credential.
+Building from source requires Git, Node.js 22 or newer, Rust via [rustup](https://rustup.rs/), Python 3.12, and [uv](https://docs.astral.sh/uv/). Linux packaging additionally requires the Tauri system libraries listed in [`INSTALL.md`](INSTALL.md). Runtime, analysis-model, speech, alignment, YouTube compatibility, and ClipGauge Local downloads require network access only during an explicit Setup Center action. Setup lists the exact asset group, byte estimate, license, provenance, and destination before download; verified assets are reused thereafter. Compute stages do not silently fetch large files. Once verified assets are installed, ClipGauge Local scoring runs against the loopback-owned runtime without a cloud credential.
 
 ## Install from source
 
@@ -52,7 +52,7 @@ The unsigned Debian artifact is written beneath `app/src-tauri/target/release/bu
 npm run tauri dev
 ```
 
-On first run, ClipGauge performs local preflight checks and guides you through the selected scoring mode. Models and pinned runtime components are fetched into the managed local data directory only when required. The default data root is `~/.clipgauge`; older `~/.publikclip` data is treated as a migration source and is not deleted automatically.
+On first run, ClipGauge performs local preflight checks and guides you through the selected scoring mode. Setup Center groups managed assets into Video engine, Speech recognition, Clip analysis, YouTube compatibility, ClipGauge Local, and optional provider components. Each group requires explicit user approval; downloads are resumable, cancellable, SHA-256 verified, and stored below `~/.clipgauge`. Older `~/.publikclip` and library cache data may be reused only after hash verification and are never deleted automatically.
 
 ## Python pipeline and CLI
 
@@ -66,13 +66,15 @@ uv run clipgauge --help
 uv run clipgauge preflight --provider ollama
 uv run clipgauge provider-test --provider openrouter --model openrouter/free
 uv run clipgauge run "https://www.youtube.com/watch?v=..." --provider ollama
+uv run clipgauge setup install-group --group core:youtube
+uv run clipgauge run "https://www.youtube.com/watch?v=..." --provider ollama --cookies-from-browser chrome  # explicit opt-in only
 ```
 
 The desktop shell invokes the same CLI through `uv` in development and through the packaged resource environment in a bundle. The Rust bridge owns job lifecycle, cancellation, diagnostics, and filesystem boundaries; the Python sidecar emits structured JSONL events.
 
 ## Privacy and credentials
 
-ClipGauge has no default telemetry and no mandatory subscription. Local processing includes source media, transcripts, model inference, scoring inputs, and rendered output. Network activity can occur when you provide a source URL, allow pinned runtime/model downloads, use a selected cloud provider, use Pexels, or opt into Instagram. The in-app **Privacy Activity** view describes the selected provider, model, endpoint, and whether frames may leave the device.
+ClipGauge has no default telemetry and no mandatory subscription. Local processing includes source media, transcripts, model inference, scoring inputs, and rendered output. Network activity can occur when you provide a source URL, approve a managed asset group, use a selected cloud provider, use Pexels, or opt into Instagram. Browser-session cookies are never read by default; `--cookies-from-browser` is an explicit opt-in and is recorded in the job settings snapshot. The in-app **Privacy Activity** view describes the selected provider, model, endpoint, and whether frames may leave the device.
 
 Credentials are stored through the operating system credential store when available and are injected into child processes only for the operation that needs them. Do not place API keys in source files, issue reports, support bundles, or shell history. The support bundle is redacted and excludes raw source media, raw transcripts, and known credential material, but review it before sharing.
 
@@ -110,7 +112,7 @@ The test suite includes Rust security and lifecycle tests, Python pipeline tests
 
 ## Documentation and support
 
-Read [`INSTALL.md`](INSTALL.md) for platform prerequisites, [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for preflight and runtime failures, [`docs/providers/README.md`](docs/providers/README.md) for provider setup, and [`CHANGELOG.md`](CHANGELOG.md) for the v0.3.0 release record. License and provenance information is available in [`NOTICE.md`](NOTICE.md), [`ORIGIN.md`](ORIGIN.md), and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Use the in-app support-bundle action when reporting a failure, and redact any remaining personal or source-specific information before sharing.
+Read [`INSTALL.md`](INSTALL.md) for platform prerequisites, [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for preflight and runtime failures, [`docs/providers/README.md`](docs/providers/README.md) for provider setup, [`docs/v0.4/V0_4_USER_WORKFLOW.md`](docs/v0.4/V0_4_USER_WORKFLOW.md) for managed assets and migration, and [`CHANGELOG.md`](CHANGELOG.md) for the v0.4.0 release record. License and provenance information is available in [`NOTICE.md`](NOTICE.md), [`ORIGIN.md`](ORIGIN.md), and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Use the in-app support-bundle action when reporting a failure, and redact any remaining personal or source-specific information before sharing.
 
 ## License
 

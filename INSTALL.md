@@ -1,6 +1,6 @@
 # Installing ClipGauge v0.1.1
 
-ClipGauge v0.1.1 is a public release-engineering closure release distributed from source and, when the native release gates succeed, as unsigned Linux Debian and Windows NSIS artifacts. Native macOS builds are qualification artifacts unless a release explicitly says otherwise; no signing or notarization is implied.
+ClipGauge v0.4.0 is distributed from source and, when the native release gates succeed, as unsigned Linux Debian, Windows NSIS, and macOS qualification artifacts. No signing or notarization is implied unless the release evidence explicitly proves it.
 
 ## Source-build prerequisites
 
@@ -63,15 +63,21 @@ The release workflow also attempts native Apple Silicon and Intel macOS qualific
 
 ## First launch and data directories
 
-ClipGauge stores managed jobs, checkpoints, downloaded runtime components, credentials metadata, diagnostics, and support bundles under `~/.clipgauge`. First-run preflight reports missing tools, model/runtime readiness, disk-space concerns, and selected-provider configuration before a job starts. Older data under `~/.publikclip` is considered for one-way migration into the new root; the legacy source is preserved and a migration marker is written only after a collision-free copy.
+ClipGauge stores managed jobs, checkpoints, consented runtime/model components, credentials metadata, diagnostics, and support bundles under `~/.clipgauge`. Setup Center presents exact managed groups and byte estimates before downloading. Each download is resumable, cancellable, SHA-256 verified, and atomically installed; compute stages do not silently fetch large files. First-run preflight reports missing assets, disk-space concerns, hardware, and selected-provider configuration before a job starts. Older data under `~/.publikclip` and verified library caches are considered for one-way migration; the source is preserved and only complete hash matches are reused.
 
-The application does not silently promise a fixed download size or runtime duration. Model availability, source length, selected LLM, and local hardware affect first-run cost and processing time. The UI reports stage progress and preserves safe checkpoints for resumable jobs.
+The application shows measured asset sizes where upstream metadata is available and identifies any bounded estimate. Model availability, source length, selected LLM, and local hardware affect processing time. Setup reports download progress, speed, elapsed time, ETA when known, cache reuse, and cancellation state; the pipeline reports an actionable setup error instead of beginning a hidden download.
 
 ## Choosing a scoring mode
 
 Gemini requires a user-provided API key and sends the documented transcript slices, scoring context, and sampled finalist frames to the provider. Ollama uses a loopback service and keeps scoring requests on the local machine. Both modes are optional; the app cannot promise identical scores across providers.
 
-For local scoring, install [Ollama](https://ollama.com/), start it, and pull a compatible chat model. ClipGauge’s preflight screen reports whether a local model is available. For Gemini, enter the key through onboarding or the in-app credential modal; do not put the key in `.env` files or commit it.
+For local scoring, either approve the ClipGauge Local group in Setup Center or install [Ollama](https://ollama.com/) / LM Studio separately and point ClipGauge at the documented loopback endpoint. ClipGauge probes local services and does not silently start or download models for Ollama or LM Studio. For Gemini, enter the key through onboarding or the in-app credential modal; do not put the key in `.env` files or commit it.
+
+## YouTube compatibility and browser authentication
+
+YouTube workflows use the explicit `core:youtube` Setup Center group, which contains the pinned yt-dlp binary, a portable Node.js runtime, and the GPL-3.0-only bgutil PO-token provider. The provider binds to `127.0.0.1` only. Browser cookies are never read by default. If you intentionally need an authenticated browser session, select a supported browser through the explicit `--cookies-from-browser` option; the choice is recorded in the job snapshot and raw cookies are not copied into ClipGauge data.
+
+See [`docs/v0.4/V0_4_USER_WORKFLOW.md`](docs/v0.4/V0_4_USER_WORKFLOW.md) for the complete asset layout and recovery contract.
 
 ## Optional Instagram integration
 

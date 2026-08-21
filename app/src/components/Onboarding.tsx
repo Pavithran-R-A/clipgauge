@@ -25,6 +25,7 @@ export default function Onboarding({ onDone }: Props) {
   const [inventory, setInventory] = useState<LocalSetupInventory | null>(null)
   const [busy, setBusy] = useState(false)
   const [setupMessage, setSetupMessage] = useState<string | null>(null)
+  const [downloadConsent, setDownloadConsent] = useState(false)
 
   const refreshInventory = () => {
     api.setupInventory()
@@ -45,6 +46,10 @@ export default function Onboarding({ onDone }: Props) {
   const storageEstimate = inventory?.storage?.required_bytes
 
   const installRuntime = async () => {
+    if (!downloadConsent) {
+      setSetupMessage('Please approve the one-time managed download plan first.')
+      return
+    }
     setBusy(true)
     setSetupMessage('Installing the verified local runtime…')
     try {
@@ -59,6 +64,10 @@ export default function Onboarding({ onDone }: Props) {
   }
 
   const downloadModel = async () => {
+    if (!downloadConsent) {
+      setSetupMessage('Please approve the one-time managed download plan first.')
+      return
+    }
     setBusy(true)
     setSetupMessage('Downloading the balanced local model. You can leave this running and come back.')
     try {
@@ -98,9 +107,10 @@ export default function Onboarding({ onDone }: Props) {
                 <span>{runtimeReady ? 'runtime verified' : 'runtime not installed'}</span>
                 <span>{modelReady ? 'balanced model verified' : 'balanced model not installed'}</span>
               </div>
+              <div className="ob-consent-inline"><label><input type="checkbox" checked={downloadConsent} onChange={(event) => setDownloadConsent(event.target.checked)} /> I approve ClipGauge downloading the listed one-time assets to this computer after each explicit action.</label></div>
               <div className="ob-actions">
-                {!runtimeReady && <button className="btn-secondary" disabled={busy} onClick={installRuntime}>{busy ? 'Working…' : 'Install runtime'}</button>}
-                {runtimeReady && !modelReady && <button className="btn-secondary" disabled={busy} onClick={downloadModel}>{busy ? 'Working…' : `Download balanced model (${formatBytes(balancedModel?.size_bytes)})`}</button>}
+                {!runtimeReady && <button className="btn-secondary" disabled={busy || !downloadConsent} onClick={installRuntime}>{busy ? 'Working…' : 'Install runtime'}</button>}
+                {runtimeReady && !modelReady && <button className="btn-secondary" disabled={busy || !downloadConsent} onClick={downloadModel}>{busy ? 'Working…' : `Download balanced model (${formatBytes(balancedModel?.size_bytes)})`}</button>}
               </div>
               <p className="ob-fine">The runtime is loopback-only and the model is SHA-256 verified before use.</p>
             </div>
@@ -114,7 +124,7 @@ export default function Onboarding({ onDone }: Props) {
             </div>
           </div>
           {setupMessage && <p className="ob-notice" role="status">{setupMessage}</p>}
-          <p className="ob-fine">You can switch providers per run. Existing jobs retain their provider snapshot when resumed.</p>
+          <p className="ob-fine">You can switch providers per run. Existing jobs retain their provider snapshot when resumed. The consent checkbox above is required before any managed download begins.</p>
           <button className="btn-primary" onClick={() => setStep(2)}>Continue</button>
         </section>
       )}

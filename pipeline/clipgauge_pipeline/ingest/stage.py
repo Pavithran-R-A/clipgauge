@@ -49,14 +49,17 @@ class IngestStage(Stage):
 
         heatmap = None
         title = None
+        browser_session = ctx.settings.provider_metadata.get("cookies_from_browser")
+        if browser_session is not None and not isinstance(browser_session, str):
+            browser_session = None
         if job.source_type == "url":
             try:
-                meta = ytdlp.fetch_meta(job.source, prog)
+                meta = ytdlp.fetch_meta(job.source, prog, cookies_from_browser=browser_session)
                 heatmap = meta.heatmap
                 title = meta.title
                 media_path = ctx.job_dir / "media.mp4"
                 if not media_path.exists():
-                    ytdlp.download(job.source, media_path, prog)
+                    ytdlp.download(job.source, media_path, prog, cookies_from_browser=browser_session)
             except ytdlp.YtDlpError as err:
                 message = str(err)
                 code = getattr(err, "code", None) or ("YTDLP_LOGIN_REQUIRED" if ytdlp.is_auth_error(message) else "YTDLP_METADATA_FAILED")

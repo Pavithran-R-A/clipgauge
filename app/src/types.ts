@@ -256,11 +256,53 @@ export interface PreflightResult {
   storage?: PreflightStorage
 }
 
+export interface ManagedAssetRow {
+  asset_id: string
+  display_name: string
+  purpose: string
+  destination: string
+  url: string
+  size_bytes: number
+  required: boolean
+  one_time: boolean
+  license: string
+  source: string
+  consent_group: string
+  installed?: boolean
+  cached?: boolean
+  status?: string
+  state?: string
+  installed_sha256?: string | null
+  managed_path?: string
+  consent_granted?: boolean
+}
+
+export interface SetupProgressEvent {
+  event?: string
+  asset_id?: string
+  display_name?: string
+  operation?: string
+  bytes_done?: number
+  bytes_total?: number | null
+  bytes_per_second?: number
+  fraction?: number | null
+  eta_seconds?: number | null
+  elapsed_seconds?: number
+  one_time_download?: boolean
+  cached?: boolean
+  state?: string
+  status?: string
+  code?: string
+  ok?: boolean
+  message?: string
+}
+
 export interface LocalSetupInventory {
   state: 'ready' | 'setup-required' | string
   runtime: Record<string, unknown> & { installed?: boolean; display_name?: string; size_bytes?: number }
   models: Array<Record<string, unknown> & { asset_id?: string; installed?: boolean; display_name?: string; size_bytes?: number; license?: string }>
   core_assets: Array<Record<string, unknown> & { asset_id?: string; installed?: boolean; display_name?: string; purpose?: string; integrity?: string; license?: string }>
+  managed_assets?: ManagedAssetRow[]
   storage: PreflightStorage
   catalog: Array<Record<string, unknown>>
 }

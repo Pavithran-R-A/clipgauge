@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
 import stat
 import tarfile
 import time
@@ -25,6 +26,14 @@ ProgressFn = Callable[[float, str], None]
 
 class RuntimeIntegrityError(RuntimeError):
     """A downloaded runtime artifact failed an explicit integrity policy."""
+
+
+class RuntimeDownloadCancelled(RuntimeError):
+    """A managed download was cancelled before verification."""
+
+
+class RuntimeDiskSpaceError(RuntimeError):
+    """The target filesystem cannot stage the requested artifact safely."""
 
 
 def sha256_file(path: Path) -> str:
@@ -54,9 +63,13 @@ def download_verified(
     timeout: float = 300.0,
     progress: ProgressFn | None = None,
     mode: int | None = None,
+    expected_size: int | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> Path:
     if not expected_sha256 or len(expected_sha256) != 64:
         raise RuntimeIntegrityError("a concrete SHA-256 is required for managed runtime artifacts")
+    if expected_size is not None and expected_size < 0:
+        raise RuntimeIntegrityError("expected artifact size must be non-negative")
     destination.parent.mkdir(parents=True, exist_ok=True)
     part = destination.with_name(f".{destination.name}.part")
     offset = part.stat().st_size if part.exists() else 0
@@ -65,27 +78,59 @@ def download_verified(
         offset = 0
     headers = {"Range": f"bytes={offset}-"} if offset else {}
     try:
+        if cancelled and cancelled():
+            raise RuntimeDownloadCancelled("runtime download cancelled before start")
         with httpx.stream("GET", url, headers=headers, follow_redirects=True, timeout=timeout) as response:
-            if offset and response.status_code == 200:
+            if offset and response.status_code in (200, 416):
+                # The server cannot safely continue this partial; restart cleanly.
                 part.unlink(missing_ok=True)
                 offset = 0
-            elif response.status_code not in (200, 206):
-                raise RuntimeIntegrityError(f"runtime download failed: HTTP {response.status_code}")
-            announced = _safe_size(offset, response.headers.get("content-length"), max_bytes)
-            total = offset + announced if announced else 0
-            seen = offset
-            with part.open("ab" if offset else "wb") as handle:
-                for chunk in response.iter_bytes():
-                    seen += len(chunk)
-                    if seen > max_bytes:
-                        raise RuntimeIntegrityError("runtime artifact exceeded the configured size limit")
-                    handle.write(chunk)
-                    if progress and total:
-                        progress(min(1.0, seen / total), "Downloading verified runtime artifact…")
-                handle.flush()
-                os.fsync(handle.fileno())
+                response.close()
+                with httpx.stream("GET", url, follow_redirects=True, timeout=timeout) as restart:
+                    if restart.status_code != 200:
+                        raise RuntimeIntegrityError(f"runtime download failed: HTTP {restart.status_code}")
+                    announced = _safe_size(0, restart.headers.get("content-length"), max_bytes)
+                    total = announced or (expected_size or 0)
+                    seen = 0
+                    with part.open("wb") as handle:
+                        for chunk in restart.iter_bytes():
+                            if cancelled and cancelled():
+                                raise RuntimeDownloadCancelled("runtime download cancelled")
+                            seen += len(chunk)
+                            if seen > max_bytes:
+                                raise RuntimeIntegrityError("runtime artifact exceeded the configured size limit")
+                            handle.write(chunk)
+                            if progress and total:
+                                progress(min(1.0, seen / total), "Downloading verified runtime artifact…")
+                        handle.flush()
+                        os.fsync(handle.fileno())
+            else:
+                if response.status_code not in (200, 206):
+                    raise RuntimeIntegrityError(f"runtime download failed: HTTP {response.status_code}")
+                announced = _safe_size(offset, response.headers.get("content-length"), max_bytes)
+                total = offset + announced if announced else (expected_size or 0)
+                seen = offset
+                with part.open("ab" if offset else "wb") as handle:
+                    for chunk in response.iter_bytes():
+                        if cancelled and cancelled():
+                            raise RuntimeDownloadCancelled("runtime download cancelled")
+                        seen += len(chunk)
+                        if seen > max_bytes:
+                            raise RuntimeIntegrityError("runtime artifact exceeded the configured size limit")
+                        handle.write(chunk)
+                        if progress and total:
+                            progress(min(1.0, seen / total), "Downloading verified runtime artifact…")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+    except RuntimeDownloadCancelled:
+        raise
     except (httpx.HTTPError, OSError) as exc:
         raise RuntimeIntegrityError(f"runtime download interrupted: {exc}") from exc
+    actual_size = part.stat().st_size
+    if expected_size is not None and actual_size != expected_size:
+        raise RuntimeIntegrityError(
+            f"runtime artifact length mismatch: expected {expected_size} bytes, received {actual_size}"
+        )
     digest = sha256_file(part)
     if digest.lower() != expected_sha256.lower():
         part.unlink(missing_ok=True)
@@ -173,7 +218,7 @@ def extract_archive_verified(
     extracted: list[Path] = []
 
     def safe_member(name: str) -> Path:
-        normalized = name.replace("\\\\", "/")
+        normalized = name.replace("\\", "/")
         path = Path(normalized)
         if not normalized or path.is_absolute() or ".." in path.parts:
             raise RuntimeIntegrityError("archive contains an absolute or traversal member")
@@ -197,24 +242,62 @@ def extract_archive_verified(
                         for chunk in iter(lambda: source.read(1024 * 1024), b""):
                             target.write(chunk)
                     extracted.append(output)
-        elif archive_type in {"tar.gz", "tgz", "tar"}:
-            mode = "r:gz" if archive_type in {"tar.gz", "tgz"} else "r:"
+        elif archive_type in {"tar.gz", "tgz", "tar.xz", "txz", "tar"}:
+            mode = "r:gz" if archive_type in {"tar.gz", "tgz"} else ("r:xz" if archive_type in {"tar.xz", "txz"} else "r:")
             with tarfile.open(archive, mode) as handle:
-                for member in handle.getmembers():
+                members = handle.getmembers()
+                regular: dict[Path, tarfile.TarInfo] = {}
+                aliases: dict[Path, Path] = {}
+                for member in members:
                     path = safe_member(member.name)
                     if member.isdir():
                         (staging / path).mkdir(parents=True, exist_ok=True)
                         continue
-                    if not member.isfile():
-                        raise RuntimeIntegrityError("archive contains an unexpected non-file entry")
-                    output = staging / path
-                    output.parent.mkdir(parents=True, exist_ok=True)
+                    if member.isfile():
+                        if path in regular or path in aliases:
+                            raise RuntimeIntegrityError(f"archive contains a duplicate member: {path}")
+                        regular[path] = member
+                        continue
+                    if member.issym() or member.islnk():
+                        link_name = str(member.linkname).replace("\\\\", "/")
+                        target_name = posixpath.normpath(posixpath.join(path.parent.as_posix(), link_name))
+                        target = safe_member(target_name)
+                        if path in regular or path in aliases or target == path:
+                            raise RuntimeIntegrityError("archive contains an invalid link member")
+                        aliases[path] = target
+                        continue
+                    raise RuntimeIntegrityError("archive contains an unexpected non-file entry")
+
+                resolved: dict[Path, Path] = {}
+
+                def resolve_target(path: Path, seen: set[Path] | None = None) -> Path:
+                    if path in regular:
+                        return path
+                    if path not in aliases:
+                        raise RuntimeIntegrityError(f"archive link target is missing: {path}")
+                    seen = set() if seen is None else seen
+                    if path in seen:
+                        raise RuntimeIntegrityError("archive contains a cyclic link chain")
+                    seen.add(path)
+                    return resolve_target(aliases[path], seen)
+
+                def write_from_member(source_path: Path, output_path: Path) -> None:
+                    member = regular[resolve_target(source_path)]
                     source = handle.extractfile(member)
                     if source is None:
                         raise RuntimeIntegrityError("archive member could not be read")
-                    with source, output.open("wb") as target:
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    with source, output_path.open("wb") as target:
                         for chunk in iter(lambda: source.read(1024 * 1024), b""):
                             target.write(chunk)
+
+                for path in regular:
+                    output = staging / path
+                    write_from_member(path, output)
+                    extracted.append(output)
+                for path in aliases:
+                    output = staging / path
+                    write_from_member(path, output)
                     extracted.append(output)
         else:
             raise RuntimeIntegrityError(f"unsupported archive type: {archive_type}")

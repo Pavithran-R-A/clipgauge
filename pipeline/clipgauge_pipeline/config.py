@@ -26,7 +26,20 @@ def jobs_dir() -> Path:
 
 
 def bin_dir() -> Path:
+    """Legacy executable root retained for non-destructive migration."""
     return home_dir() / "bin"
+
+
+def runtimes_dir() -> Path:
+    return home_dir() / "runtimes"
+
+
+def data_dir() -> Path:
+    return home_dir() / "data"
+
+
+def nltk_data_dir() -> Path:
+    return data_dir() / "nltk"
 
 
 def models_dir() -> Path:
@@ -39,7 +52,7 @@ def db_path() -> Path:
 
 def ensure_home() -> Path:
     root = home_dir()
-    for d in (root, jobs_dir(), bin_dir(), models_dir()):
+    for d in (root, jobs_dir(), bin_dir(), runtimes_dir(), data_dir(), nltk_data_dir(), models_dir()):
         d.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -116,6 +129,7 @@ class Settings:
     provider_locality: str = "cloud"
     provider_metadata: dict[str, Any] = field(default_factory=dict)
     provider_schema_version: int = 0
+    cookies_from_browser: str | None = None
     caption_preset: str = "classic"
     laughter_specialist: bool = False
 
@@ -152,6 +166,7 @@ class Settings:
             "provider_locality": snapshot.get("locality", "cloud"),
             "provider_metadata": dict(snapshot.get("metadata", {})),
             "provider_schema_version": int(snapshot.get("schema_version", 1)),
+            "cookies_from_browser": self.cookies_from_browser,
             "caption_preset": self.caption_preset,
             "laughter_specialist": self.laughter_specialist,
         }
@@ -187,6 +202,7 @@ class Settings:
             provider_locality=str(snapshot.get("locality", "cloud")),
             provider_metadata=dict(snapshot.get("metadata", {})),
             provider_schema_version=int(snapshot.get("schema_version", 1)),
+            cookies_from_browser=data.get("cookies_from_browser"),
             caption_preset=data.get("caption_preset", "classic"),
             laughter_specialist=data.get("laughter_specialist", False),
         )

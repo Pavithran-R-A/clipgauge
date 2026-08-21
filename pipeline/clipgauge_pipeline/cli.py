@@ -173,6 +173,30 @@ def _setup_model_asset(model: local_runtime.LocalModel) -> downloads.ManagedAsse
     )
 
 
+def _managed_asset_objects() -> list[downloads.ManagedAsset]:
+    from .ingest import ytdlp
+    from .models import managed, registry, specs  # noqa: F401 - register concrete analysis assets
+    from .render import ffmpeg_bin
+
+    assets = [*managed.all_assets(), *(registry.managed_asset(spec) for spec in registry.REGISTRY.values()), ytdlp.managed_asset()]
+    ffmpeg_asset = ffmpeg_bin.managed_asset()
+    if ffmpeg_asset:
+        assets.append(ffmpeg_asset)
+    return assets
+
+
+def _managed_asset_inventory(extra: list[downloads.ManagedAsset] | None = None) -> list[dict[str, object]]:
+    from .ingest import ytdlp
+    from .models import managed
+    from .render import ffmpeg_bin
+
+    assets = _managed_asset_objects()
+    if extra:
+        assets.extend(extra)
+    manager = downloads.DownloadManager()
+    return manager.inventory(assets)
+
+
 def _core_setup_inventory(manager: local_runtime.LocalRuntime) -> list[dict[str, object]]:
     from .ingest import ytdlp
     from .models import registry, specs  # noqa: F401 - ensure concrete specs are registered
@@ -275,7 +299,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 },
                 "models": rows,
                 "core_assets": _core_setup_inventory(manager),
-                "storage": downloads_manager.estimate([runtime_asset, *model_assets]),
+                "managed_assets": _managed_asset_inventory([runtime_asset, *model_assets]),
+                "storage": downloads_manager.estimate([runtime_asset, *model_assets, *[asset for asset in _managed_asset_objects()]]),
                 "catalog": [
                     {
                         "model_id": model.model_id,
@@ -294,6 +319,61 @@ def cmd_setup(args: argparse.Namespace) -> int:
             archive = downloads_manager.download(runtime_asset)
             binary = manager.install_runtime(archive)
             print(json.dumps({"ok": True, "asset_id": runtime_asset.asset_id, "path": str(binary)}))
+            return 0
+        if args.setup_cmd == "install-ffmpeg":
+            from .render import ffmpeg_bin
+            asset = ffmpeg_bin.managed_asset()
+            if asset is None:
+                print(json.dumps({"ok": False, "code": "FFMPEG_PLATFORM_UNSUPPORTED", "message": "No verified managed FFmpeg archive is available for this platform."}))
+                return 2
+            downloads_manager.grant_consent(asset.consent_group, [asset])
+            ok = ffmpeg_bin.install_managed(event=setup_event, require_consent=True)
+            print(json.dumps({"ok": ok, "asset_id": asset.asset_id, "message": "FFmpeg installed and capability-tested." if ok else "FFmpeg installation needs repair."}))
+            return 0 if ok else 1
+        if args.setup_cmd == "install-group":
+            from .models import managed, registry, specs  # noqa: F401 - register concrete analysis assets
+            from .ingest import youtube_compat
+
+            group_assets = {
+                "core:asr": managed.all_assets(),
+                "core:analysis": [registry.managed_asset(spec) for spec in registry.REGISTRY.values()],
+                "core:youtube": youtube_compat.assets(),
+            }.get(args.group)
+            if not group_assets:
+                print(json.dumps({"ok": False, "code": "SETUP_GROUP_NOT_FOUND", "message": "The selected managed asset group is not available."}))
+                return 2
+            downloads_manager.grant_consent(args.group, group_assets)
+            if args.group == "core:analysis":
+                paths = downloads_manager.download_group(group_assets, group_id=args.group)
+                print(json.dumps({"ok": True, "group": args.group, "paths": [str(path) for path in paths]}))
+                return 0
+            if args.group == "core:youtube":
+                result = youtube_compat.install(event=setup_event, require_consent=True)
+                print(json.dumps({"ok": True, "group": args.group, **result}))
+                return 0
+            paths = downloads_manager.download_group(group_assets, group_id=args.group)
+            # punkt data is an archive; its adapter installs the extracted tree.
+            if args.group == "core:asr":
+                from .models import managed
+                managed._safe_extract_punkt(config.nltk_data_dir() / "punkt_tab.zip")
+                managed._ensure_silero_hub_cache()
+            print(json.dumps({"ok": True, "group": args.group, "paths": [str(path) for path in paths]}))
+            return 0
+        if args.setup_cmd == "install-asset":
+            from .models import managed
+
+            assets = {asset.asset_id: asset for asset in managed.all_assets()}
+            asset = assets.get(args.asset_id)
+            if asset is None:
+                print(json.dumps({"ok": False, "code": "SETUP_ASSET_NOT_FOUND", "message": "The selected managed asset is not in the verified catalog."}))
+                return 2
+            downloads_manager.grant_consent(asset.consent_group, [asset])
+            path = downloads_manager.download(asset)
+            if asset.asset_id == "data:nltk:punkt-tab":
+                managed._safe_extract_punkt(path)
+            if asset.asset_id == managed.silero_asset().asset_id:
+                managed._ensure_silero_hub_cache()
+            print(json.dumps({"ok": True, "asset_id": asset.asset_id, "path": str(path)}))
             return 0
         if args.setup_cmd == "download-model":
             try:
@@ -367,6 +447,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         settings.caption_preset = args.captions
     if args.camera:
         settings.camera.speaker_change = args.camera
+    if args.cookies_from_browser:
+        settings.cookies_from_browser = args.cookies_from_browser
+        settings.provider_metadata["cookies_from_browser"] = args.cookies_from_browser
     try:
         job = queue.create_job(source_type, source, json.dumps(settings.to_json()))
     except Exception as err:  # noqa: BLE001 — pre-job protocol boundary
@@ -389,6 +472,9 @@ def cmd_resume(args: argparse.Namespace) -> int:
             settings.caption_preset = args.captions
         if args.camera:
             settings.camera.speaker_change = args.camera
+        if args.cookies_from_browser:
+            settings.cookies_from_browser = args.cookies_from_browser
+            settings.provider_metadata["cookies_from_browser"] = args.cookies_from_browser
         new_json = json.dumps(settings.to_json())
         with queue._connect() as conn:  # noqa: SLF001 — CLI is a queue friend
             conn.execute("UPDATE jobs SET settings_json = ? WHERE id = ?", (new_json, job.id))
@@ -658,6 +744,11 @@ def main(argv: list[str] | None = None) -> int:
     setup_sub = p_setup.add_subparsers(dest="setup_cmd", required=True)
     setup_sub.add_parser("inventory", help="show verified runtime/model inventory")
     setup_sub.add_parser("install-runtime", help="download and install the verified llama.cpp runtime")
+    setup_sub.add_parser("install-ffmpeg", help="download, install, and capability-test the managed FFmpeg engine")
+    p_install_group = setup_sub.add_parser("install-group", help="download one consented managed asset group")
+    p_install_group.add_argument("--group", choices=["core:asr", "core:analysis", "core:youtube"], required=True)
+    p_install_asset = setup_sub.add_parser("install-asset", help="download one consented managed asset")
+    p_install_asset.add_argument("asset_id")
     p_download_model = setup_sub.add_parser("download-model", help="download a verified local model")
     p_download_model.add_argument("model_id", choices=sorted(local_runtime.MODEL_CATALOG))
     p_setup.set_defaults(fn=cmd_setup)
@@ -682,6 +773,7 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--secret-header", default=None, help=argparse.SUPPRESS)
     p_run.add_argument("--captions", default=None, help="caption preset name")
     p_run.add_argument("--camera", choices=["cut", "pan", "locked"], default=None)
+    p_run.add_argument("--cookies-from-browser", choices=sorted(__import__("clipgauge_pipeline.ingest.ytdlp", fromlist=["SUPPORTED_BROWSER_SESSIONS"]).SUPPORTED_BROWSER_SESSIONS), default=None, help="explicitly use a supported browser session for authenticated video access")
     p_run.set_defaults(fn=cmd_run)
 
     p_resume = sub.add_parser("resume", help="resume a job from its checkpoints")
@@ -694,6 +786,7 @@ def main(argv: list[str] | None = None) -> int:
     p_resume.add_argument("--secret-header", default=None, help=argparse.SUPPRESS)
     p_resume.add_argument("--captions", default=None, help="caption preset name")
     p_resume.add_argument("--camera", choices=["cut", "pan", "locked"], default=None)
+    p_resume.add_argument("--cookies-from-browser", choices=sorted(__import__("clipgauge_pipeline.ingest.ytdlp", fromlist=["SUPPORTED_BROWSER_SESSIONS"]).SUPPORTED_BROWSER_SESSIONS), default=None, help="explicitly use a supported browser session for authenticated video access")
     p_resume.set_defaults(fn=cmd_resume)
 
     p_jobs = sub.add_parser("jobs", help="list jobs")

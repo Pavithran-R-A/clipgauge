@@ -49,7 +49,8 @@
           "platform": "windows",
           "architecture": "x86_64",
           "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-18-15-03/ffmpeg-N-126207-g21bbd98e7b-win64-gpl.zip",
-          "sha256": "0dfc1c04a5b8c15e56e3e2245d3b0a1fb5f22242591e1b2c4a1cb6fa0cd0230b"
+          "sha256": "0dfc1c04a5b8c15e56e3e2245d3b0a1fb5f22242591e1b2c4a1cb6fa0cd0230b",
+          "size": 170656398
         }
       },
       "macos": {

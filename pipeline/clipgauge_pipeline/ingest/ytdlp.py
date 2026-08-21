@@ -24,14 +24,51 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit
 
 import httpx
 
-from .. import config, runtime
+from .. import config, downloads, runtime
+from . import youtube_compat
 
 _MANIFEST = Path(__file__).resolve().parents[2] / "runtime-manifest.json"
 
 ProgressFn = Callable[[float, str], None]  # (fraction 0..1 or -1, message)
+_provider_supervisor = youtube_compat.ProviderSupervisor()
+
+
+def _needs_youtube_provider(url: str) -> bool:
+    host = (urlsplit(url).hostname or "").lower()
+    return host == "youtu.be" or host.endswith("youtube.com") or host.endswith("youtube-nocookie.com")
+
+
+SUPPORTED_BROWSER_SESSIONS = {"chrome", "chromium", "edge", "firefox", "brave", "opera", "safari", "vivaldi"}
+
+
+def _browser_auth_args(browser: str | None) -> list[str]:
+    if not browser:
+        return []
+    normalized = browser.strip().lower()
+    if normalized not in SUPPORTED_BROWSER_SESSIONS:
+        raise YtDlpError("The selected browser session is not supported. Choose a supported browser or leave authentication off.", code="YTDLP_BROWSER_AUTH_INVALID", retryable=False)
+    return ["--cookies-from-browser", normalized]
+
+
+def _youtube_provider_args(url: str) -> list[str]:
+    if not _needs_youtube_provider(url):
+        return []
+    status = _provider_supervisor.self_test()
+    if not status.get("ok"):
+        raise YtDlpError(
+            "YouTube compatibility is not ready. Open Setup Center, install the PO-token provider, and run its Test action.",
+            code="YTDLP_PROVIDER_NOT_READY",
+            retryable=True,
+        )
+    _provider_supervisor.start()
+    return [
+        "--plugin-dirs", str(youtube_compat.plugin_dir()),
+        "--extractor-args", f"youtubepot-bgutilhttp:base_url=http://127.0.0.1:{youtube_compat.DEFAULT_PORT}",
+    ]
 
 
 class YtDlpError(Exception):
@@ -54,43 +91,73 @@ def _binary_name() -> str:
     return "yt-dlp_linux"
 
 
+def _manifest_record() -> tuple[dict, dict, str]:
+    try:
+        manifest = runtime.load_manifest(_MANIFEST)
+        runtime_manifest = manifest["runtimes"]["yt-dlp"]
+        name = _binary_name()
+        return manifest, runtime_manifest["assets"][name], name
+    except (KeyError, TypeError) as exc:
+        raise YtDlpError("The pinned yt-dlp runtime manifest is incomplete.") from exc
+
+
 def binary_path() -> Path:
-    return config.bin_dir() / _binary_name()
+    try:
+        manifest = runtime.load_manifest(_MANIFEST)
+        version = str(manifest["runtimes"]["yt-dlp"]["version"])
+        path = config.runtimes_dir() / "yt-dlp" / version / _binary_name()
+        if path != config.home_dir() and config.home_dir() not in path.parents:
+            raise ValueError("managed yt-dlp path escapes the ClipGauge data root")
+        return path
+    except (OSError, ValueError, runtime.RuntimeIntegrityError, KeyError, TypeError):
+        return config.bin_dir() / _binary_name()
+
+
+def managed_asset() -> downloads.ManagedAsset:
+    manifest, record, name = _manifest_record()
+    version = str(manifest["runtimes"]["yt-dlp"]["version"])
+    path = binary_path()
+    return downloads.ManagedAsset(
+        asset_id=f"runtime:yt-dlp:{name}",
+        display_name="YouTube downloader",
+        purpose="Retrieves public video metadata and media",
+        destination=str(path.relative_to(config.home_dir())),
+        url=str(record["url"]),
+        size_bytes=int(record.get("size", 0) or 0),
+        sha256=str(record["sha256"]),
+        required=True,
+        one_time=True,
+        license=str(manifest["runtimes"]["yt-dlp"].get("license", "See upstream")),
+        source=str(manifest["runtimes"]["yt-dlp"].get("provenance", "")),
+        consent_group="core:youtube",
+        source_revision=version,
+        platform=str(record.get("platform", "")),
+    )
 
 
 def ensure_ytdlp(progress: ProgressFn) -> Path:
-    """Install only the platform asset pinned by runtime-manifest.json."""
-    name = _binary_name()
-    try:
-        manifest = runtime.load_manifest(_MANIFEST)
-        asset = manifest["runtimes"]["yt-dlp"]["assets"][name]
-        expected = asset["sha256"]
-        url = asset["url"]
-    except (KeyError, TypeError) as exc:
-        raise YtDlpError("The pinned yt-dlp runtime manifest is incomplete.") from exc
+    """Install the pinned yt-dlp asset through the common manager."""
+    manifest, record, name = _manifest_record()
+    version = str(manifest["runtimes"]["yt-dlp"]["version"])
     path = binary_path()
-    if path.exists():
-        try:
-            if runtime.sha256_file(path).lower() == expected.lower():
-                path.chmod(0o755)
-                return path
-        except OSError:
-            pass
-    progress(-1, f"Downloading yt-dlp {manifest['runtimes']['yt-dlp']['version']}…")
+    asset = managed_asset()
+    manager = downloads.DownloadManager(event=lambda payload: progress(float(payload.get("fraction", -1.0) if payload.get("fraction") is not None else -1.0), str(payload.get("message", "Downloading yt-dlp…"))))
     config.ensure_home()
+    # Reuse v0.3's verified bin/ copy non-destructively before any network call.
+    legacy = config.bin_dir() / name
+    if legacy != path and legacy.is_file():
+        manager.migrate_legacy_asset(asset, [legacy])
     try:
-        runtime.download_verified(
-            url,
-            path,
-            expected_sha256=expected,
-            max_bytes=128 * 1024 * 1024,
-            timeout=config.HTTP_TIMEOUT,
-            progress=lambda f, message: progress(f * 0.15, message),
-            mode=0o755,
-        )
-    except runtime.RuntimeIntegrityError as exc:
-        raise YtDlpError(f"Could not install verified yt-dlp: {exc}") from exc
-    return path
+        result = manager.download(asset, require_consent=True)
+    except downloads.ConsentRequiredError as exc:
+        raise YtDlpError("YouTube compatibility is not installed. Open Setup Center and approve the YouTube compatibility download group.", code="YTDLP_ASSET_CONSENT_REQUIRED", retryable=True) from exc
+    except (runtime.RuntimeIntegrityError, runtime.RuntimeDiskSpaceError) as exc:
+        raise YtDlpError(f"Could not install verified yt-dlp: {exc}", code="YTDLP_RUNTIME_INSTALL_FAILED", retryable=True) from exc
+    try:
+        result.chmod(0o755)
+    except OSError:
+        pass
+    return result
 
 
 def _clean_error(stderr: str) -> str:
@@ -216,11 +283,12 @@ def _pick_playlist_entry(data: dict) -> dict:
     return merged
 
 
-def fetch_meta(url: str, progress: ProgressFn) -> UrlMeta:
+def fetch_meta(url: str, progress: ProgressFn, cookies_from_browser: str | None = None) -> UrlMeta:
     bin_path = ensure_ytdlp(progress)
 
     def _go() -> str:
-        return _run(bin_path, ["-J", "--no-playlist", "--no-warnings", url])
+        args = [*_youtube_provider_args(url), *_browser_auth_args(cookies_from_browser)]
+        return _run(bin_path, [*args, "-J", "--no-playlist", "--no-warnings", url])
 
     out = _with_self_update_retry(bin_path, progress, _go)
     data = json.loads(out)
@@ -259,10 +327,12 @@ DOWNLOAD_FORMAT = (
 _PCT_RE = re.compile(r"\[download\]\s+([\d.]+)%")
 
 
-def download(url: str, out_path: Path, progress: ProgressFn) -> None:
+def download(url: str, out_path: Path, progress: ProgressFn, cookies_from_browser: str | None = None) -> None:
     bin_path = ensure_ytdlp(progress)
     ffmpeg = shutil.which("ffmpeg")
     args = [
+        *_youtube_provider_args(url),
+        *_browser_auth_args(cookies_from_browser),
         "-f", DOWNLOAD_FORMAT,
         "--merge-output-format", "mp4",
         "--no-playlist",

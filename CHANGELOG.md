@@ -2,6 +2,30 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.4.0] — 2026-08-21
+
+ClipGauge v0.4.0 is the managed-runtime and creator-workflow release. It makes runtime, speech, analysis, YouTube compatibility, and local-provider setup explicit, consented, repairable, and observable.
+
+### Managed runtime and downloads
+
+- Adds one verified Download Manager for runtime and analysis assets, grouped consent, disk-space checks, cancellation, progress/ETA events, repair, cache reuse, and v0.3 cache migration.
+- Adds self-service managed FFmpeg and fails closed with an actionable Setup Center message instead of downloading during rendering.
+- Adds explicit faster-whisper, Silero VAD, English alignment, NLTK `punkt_tab`, analysis-model, local-runtime, and local-GGUF setup paths. Silero VAD is pinned, SHA-256 verified, atomically materialized into the managed torch.hub cache, and loaded offline.
+- Adds bounded local ClipGauge Local runtime startup with one llama-server slot, a 4096-token context, and Qwen3 reasoning disabled for predictable structured scoring requests.
+
+### YouTube and provider workflow
+
+- Adds managed portable Node.js and bgutil PO-token compatibility with loopback-only supervision and health checks.
+- Adds explicit browser-auth opt-in through an allow-listed `--cookies-from-browser` option; browser cookies are never read by default and the choice is recorded in the job snapshot.
+- Adds Simple/Advanced provider mode. Simple mode presents creator-facing ClipGauge Local, Ollama, LM Studio, and Gemini choices without raw model IDs or endpoints; Advanced mode exposes the full provider configuration.
+- Adds streamed, cancellable Setup Center operations and explicit download-consent confirmation before managed downloads.
+
+### Validation and caveats
+
+- A real model-backed local-file E2E completed through ingest, faster-whisper transcription, Silero VAD, alignment, diarization, analysis, candidate selection, local Qwen scoring, camera direction, and verified vertical MP4 rendering. The controlled validation render used the documented caption-free mode and allow-listed low-resolution/fast-encode overrides; the production default remains captioned 1080×1920 output.
+- Windows acceptance remains a native `windows-latest` CI responsibility; Linux local validation is not presented as Windows acceptance. Live YouTube retrieval remains environment-dependent and is documented separately when datacenter policy blocks it.
+- Release artifacts remain unsigned unless release evidence explicitly proves otherwise. AGPL-3.0-or-later licensing, upstream attribution to `Blueturboguy07/publikclip`, and the GPL-3.0-only bgutil notice are preserved.
+
 ## [0.3.0] — 2026-08-21
 
 ClipGauge v0.3.0 is the creator-experience release: a calmer, privacy-first desktop workflow with ClipGauge Local, managed runtime setup, typed diagnostics, resumable progress, and native Windows installer acceptance.
