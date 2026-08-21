@@ -12,6 +12,17 @@ from clipgauge_pipeline.captions import ass as ass_mod
 from clipgauge_pipeline.render import ffmpeg_bin, renderer
 
 
+def test_windows_ffmpeg_managed_path_uses_one_filesystem_safe_version_component(monkeypatch, tmp_path):
+    monkeypatch.setattr(ffmpeg_bin.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(ffmpeg_bin.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(ffmpeg_bin.config, "runtimes_dir", lambda: tmp_path / "runtimes")
+
+    managed = ffmpeg_bin._managed_dir()
+
+    assert managed == tmp_path / "runtimes" / "ffmpeg" / "autobuild-2026-08-18-15-03-N-126207-g21bbd98e7b" / "win64-gpl"
+    assert len(managed.relative_to(tmp_path / "runtimes" / "ffmpeg").parts) == 2
+
+
 def test_crop_boxes_even_and_bounded():
     frames = [[10.7, 5.3, 607.9, 1080.0], [1900.0, 0.0, 608.0, 1080.0]]
     boxes = renderer.crop_boxes(frames, 1920, 1080)

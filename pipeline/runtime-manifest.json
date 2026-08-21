@@ -41,7 +41,7 @@
       }
     },
     "ffmpeg": {
-      "version": "autobuild-2026-08-18-15-03 / N-126207-g21bbd98e7b",
+      "version": "autobuild-2026-08-18-15-03-N-126207-g21bbd98e7b",
       "provenance": "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-08-18-15-03",
       "license": "GPL build; see BtbN archive and FFmpeg licensing notices",
       "assets": {
