@@ -2,6 +2,22 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.2.1] — 2026-08-21
+
+ClipGauge v0.2.1 is a maintenance and verification release. It preserves the v0.2.0 provider architecture and closes the project-owned findings from the independent A-to-Z audit.
+
+### Defect closure
+
+- Resolves strict Rust Clippy findings through production-definition ordering, removal of dead exported diagnostics API, generic custom-secret redaction coverage, and typed `RunJobRequest`/`ResumeJobRequest` Tauri boundaries with unknown-field rejection.
+- Adds `clipgauge --version` and `clipgauge -V` from authoritative Python package metadata while preserving `--help` and all existing subcommands.
+- Runs normal Cargo dependency resolution and documents the remaining GTK3/glib RustSec warnings transparently. RUSTSEC-2024-0429 remains an upstream dependency blocker/known risk because the supported stable Tauri/Wry graph still resolves glib 0.18.x and the GTK4/WebKit6 migration is not a compatible drop-in update.
+- Adds fresh typed-command, diagnostics, CLI, dependency, and native/provider acceptance evidence for the v0.2.1 release decision.
+
+### Caveats
+
+- Windows installed-app acceptance, live provider calls, local Ollama/LM Studio inference, and full model-backed video completion are reported only when their real environments and credentials are available; blocked tests are not marked PASS.
+- Release artifacts remain unsigned unless release evidence explicitly proves otherwise. Platform qualification is not signing or notarization.
+
 ## [0.2.0] — 2026-08-20
 
 ### Universal AI provider architecture

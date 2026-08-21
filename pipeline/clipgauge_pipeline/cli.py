@@ -12,7 +12,7 @@ import base64
 import json
 import sys
 
-from . import config, protocol
+from . import __version__, config, protocol
 from .jobs import queue
 from .scoring import providers as providers_mod
 
@@ -433,6 +433,7 @@ def cmd_ig(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="clipgauge")
+    parser.add_argument("--version", "-V", action="version", version=f"ClipGauge {__version__}")
     parser.add_argument("--jsonl", action="store_true", help="machine-readable progress on stdout")
     sub = parser.add_subparsers(dest="cmd", required=True)
 

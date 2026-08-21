@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -30,6 +31,48 @@ impl AppState {
             processes: Arc::new(Mutex::new(process_manager::ProcessManager::new())),
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunJobRequest {
+    source: String,
+    #[serde(default)]
+    llm: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    endpoint: Option<String>,
+    #[serde(default)]
+    auth: Option<String>,
+    #[serde(default)]
+    secret_header: Option<String>,
+    #[serde(default)]
+    captions: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeJobRequest {
+    job_id: String,
+    #[serde(default)]
+    llm: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    endpoint: Option<String>,
+    #[serde(default)]
+    auth: Option<String>,
+    #[serde(default)]
+    secret_header: Option<String>,
+    #[serde(default)]
+    captions: Option<String>,
+    #[serde(default)]
+    camera: Option<String>,
 }
 
 fn home_dir() -> PathBuf {
@@ -456,15 +499,18 @@ fn test_connection(
 fn run_job(
     app: AppHandle,
     state: State<'_, AppState>,
-    source: String,
-    llm: Option<String>,
-    provider: Option<String>,
-    model: Option<String>,
-    endpoint: Option<String>,
-    auth: Option<String>,
-    secret_header: Option<String>,
-    captions: Option<String>,
+    request: RunJobRequest,
 ) -> Result<(), String> {
+    let RunJobRequest {
+        source,
+        llm,
+        provider,
+        model,
+        endpoint,
+        auth,
+        secret_header,
+        captions,
+    } = request;
     let (program, base_args) = pipeline_invocation();
     let processes = state.processes.clone();
     let key = format!("run:{}", diagnostics::diagnostic_id());
@@ -504,16 +550,19 @@ fn run_job(
 fn resume_job(
     app: AppHandle,
     state: State<'_, AppState>,
-    job_id: String,
-    llm: Option<String>,
-    provider: Option<String>,
-    model: Option<String>,
-    endpoint: Option<String>,
-    auth: Option<String>,
-    secret_header: Option<String>,
-    captions: Option<String>,
-    camera: Option<String>,
+    request: ResumeJobRequest,
 ) -> Result<(), String> {
+    let ResumeJobRequest {
+        job_id,
+        llm,
+        provider,
+        model,
+        endpoint,
+        auth,
+        secret_header,
+        captions,
+        camera,
+    } = request;
     validate_job_id(&job_id)?;
     let (program, base_args) = pipeline_invocation();
     let processes = state.processes.clone();
@@ -1264,7 +1313,9 @@ mod tests {
 
     use super::{
         generate_support_bundle_at, ig_connect_args, ig_failure_message, migrate_legacy_data_from,
+        ResumeJobRequest, RunJobRequest,
     };
+    use serde_json::json;
 
     #[test]
     fn meta_secret_is_not_part_of_child_arguments() {
@@ -1356,5 +1407,41 @@ mod tests {
         assert!(public.contains("Instagram connection failed"));
         assert!(public.contains("401"));
         assert!(public.contains("provider=Meta"));
+    }
+
+    #[test]
+    fn typed_job_requests_reject_unknown_fields() {
+        let run = json!({"source": "clip.mp4", "provider": "ollama", "unexpected": true});
+        let resume = json!({"job_id": "20260819-120000-abcdef", "unexpected": true});
+        assert!(serde_json::from_value::<RunJobRequest>(run).is_err());
+        assert!(serde_json::from_value::<ResumeJobRequest>(resume).is_err());
+    }
+
+    #[test]
+    fn typed_job_requests_accept_provider_fields() {
+        let run = json!({
+            "source": "clip.mp4",
+            "llm": "ollama",
+            "provider": "ollama",
+            "model": "llama3.2",
+            "endpoint": "http://127.0.0.1:11434",
+            "auth": "none",
+            "secret_header": null,
+            "captions": "classic"
+        });
+        let parsed = serde_json::from_value::<RunJobRequest>(run).unwrap();
+        assert_eq!(parsed.source, "clip.mp4");
+        assert_eq!(parsed.provider.as_deref(), Some("ollama"));
+        assert_eq!(parsed.model.as_deref(), Some("llama3.2"));
+
+        let resume = json!({
+            "job_id": "20260819-120000-abcdef",
+            "provider": "custom",
+            "model": "manual",
+            "camera": "locked"
+        });
+        let parsed = serde_json::from_value::<ResumeJobRequest>(resume).unwrap();
+        assert_eq!(parsed.job_id, "20260819-120000-abcdef");
+        assert_eq!(parsed.camera.as_deref(), Some("locked"));
     }
 }

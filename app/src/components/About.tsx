@@ -16,7 +16,7 @@ export default function About({ onBack }: Props) {
       <main className="about-card" aria-labelledby="about-title">
         <header className="modal-head">
           <div>
-            <p className="ob-kicker">ClipGauge v0.2.0</p>
+            <p className="ob-kicker">ClipGauge v0.2.1</p>
             <h1 id="about-title" className="ob-h2">ABOUT / LICENSES</h1>
           </div>
           <button className="btn-ghost" onClick={onBack}>back</button>
@@ -65,7 +65,7 @@ export default function About({ onBack }: Props) {
         <footer className="about-footer">
           <span className="mono">Data root: ~/.clipgauge</span>
           <span className="mono">Bundle: io.github.pavithranra.clipgauge</span>
-          <span className="mono">Linux v0.2.0 artifact: unsigned</span>
+          <span className="mono">Linux v0.2.1 artifact: unsigned</span>
         </footer>
       </main>
     </div>

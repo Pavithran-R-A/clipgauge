@@ -43,8 +43,9 @@ impl BoundedTail {
 }
 
 fn secret_key(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase().replace('-', "_");
     matches!(
-        name.to_ascii_lowercase().as_str(),
+        normalized.as_str(),
         "key"
             | "api_key"
             | "apikey"
@@ -56,7 +57,7 @@ fn secret_key(name: &str) -> bool {
             | "hf_token"
             | "cerebras_api_key"
             | "provider_secret"
-            | "x-api-key"
+            | "x_api_key"
             | "pexels_key"
             | "pexels_api_key"
             | "access_token"
@@ -67,7 +68,9 @@ fn secret_key(name: &str) -> bool {
             | "app_secret"
             | "client_secret"
             | "secret"
-    )
+    ) || normalized.contains("secret")
+        || normalized.ends_with("_key")
+        || normalized.ends_with("_token")
 }
 
 fn redact_query_token(mut token: String) -> String {
@@ -94,14 +97,6 @@ fn redact_query_token(mut token: String) -> String {
         }
     }
     token
-}
-
-pub fn redact_with_secrets(input: &str, secrets: &[&str]) -> String {
-    let mut result = input.to_string();
-    for secret in secrets.iter().filter(|value| !value.is_empty()) {
-        result = result.replace(secret, "[REDACTED]");
-    }
-    redact(&result)
 }
 
 pub fn redact(input: &str) -> String {
@@ -168,7 +163,7 @@ pub fn write_log(directory: &Path, id: &str, text: &str) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{diagnostic_id, redact, redact_with_secrets, write_log, BoundedTail};
+    use super::{diagnostic_id, redact, write_log, BoundedTail};
     use std::fs;
 
     #[test]
@@ -193,8 +188,9 @@ mod tests {
 
     #[test]
     fn custom_provider_secret_values_are_redacted_even_with_custom_header_names() {
-        let clean = redact_with_secrets("x-custom-secret=never-show-this", &["never-show-this"]);
+        let clean = redact("x-custom-secret=never-show-this x-provider-key=provider-value");
         assert!(!clean.contains("never-show-this"));
+        assert!(!clean.contains("provider-value"));
         assert!(clean.contains("[REDACTED]"));
     }
 

@@ -19,9 +19,13 @@ export const api = {
     invoke<PrivacySummary>('privacy_summary', { llm: legacyMode(provider), provider, model, endpoint }),
   generateSupportBundle: (jobId?: string) => invoke<string>('generate_support_bundle', { jobId }),
   runJob: (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
-    invoke<void>('run_job', { source, llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader, captions }),
+    invoke<void>('run_job', {
+      request: { source, llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader, captions },
+    }),
   resumeJob: (jobId: string, provider?: string, captions?: string, camera?: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
-    invoke<void>('resume_job', { jobId, llm: provider ? legacyMode(provider) : undefined, provider, model, endpoint, auth, secret_header: secretHeader, captions, camera }),
+    invoke<void>('resume_job', {
+      request: { job_id: jobId, llm: provider ? legacyMode(provider) : undefined, provider, model, endpoint, auth, secret_header: secretHeader, captions, camera },
+    }),
   testConnection: (provider: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
     invoke<ProviderTestResult>('test_connection', { llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader }),
   saveProviderKey: (profileId: string, key: string) => invoke<boolean>('save_provider_key', { profileId, key }),
