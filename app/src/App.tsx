@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { api } from './api'
-import type { JobResults, JobSummary, PipelineEvent, SetupState } from './types'
+import type { JobResults, JobSummary, PipelineEvent, SetupState, StageProgress } from './types'
 import Onboarding from './components/Onboarding'
 import Studio from './components/Studio'
 import Review from './components/Review'
@@ -17,7 +17,7 @@ export default function App() {
   const [jobs, setJobs] = useState<JobSummary[]>([])
   const [activeJob, setActiveJob] = useState<string | null>(null)
   const [results, setResults] = useState<JobResults | null>(null)
-  const [stages, setStages] = useState<Record<string, { fraction: number; message: string }>>({})
+  const [stages, setStages] = useState<Record<string, StageProgress>>({})
   const [running, setRunning] = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null)
@@ -59,13 +59,24 @@ export default function App() {
         setActiveJob(payload.job_id)
         setResults(null)
       } else if (payload.event === 'progress' && payload.stage) {
-        setStages((prev) => ({
-          ...prev,
-          [payload.stage!]: {
-            fraction: payload.fraction ?? -1,
-            message: payload.message ?? ''
-          }
-        }))
+          setStages((prev) => ({
+            ...prev,
+            [payload.stage!]: {
+              fraction: payload.fraction ?? -1,
+              message: payload.message ?? '',
+              displayStage: payload.display_stage,
+              operation: payload.operation,
+              indeterminate: payload.indeterminate ?? (payload.fraction ?? -1) < 0,
+              elapsedSeconds: payload.elapsed_seconds,
+              stageElapsedSeconds: payload.stage_elapsed_seconds,
+              etaSeconds: payload.eta_seconds,
+              bytesDone: payload.bytes_done,
+              bytesTotal: payload.bytes_total,
+              bytesPerSecond: payload.bytes_per_second,
+              accelerator: payload.accelerator,
+              oneTimeDownload: payload.one_time_download
+            }
+          }))
       } else if (payload.event === 'terminal') {
         setRunning(false)
         setCancelling(false)

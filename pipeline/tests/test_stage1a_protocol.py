@@ -65,6 +65,19 @@ class ExplodingStage(queue.Stage):
         raise RuntimeError("secret=AIza-test Authorization: Bearer meta-test")
 
 
+class SpeakerLoadFailureStage(queue.Stage):
+    name = "diarize"
+    schema_version = 2
+
+    def run(self, ctx):
+        cause = RuntimeError("checkpoint=invalid secret=AIza-speaker-test")
+        raise queue.StageError(
+            "Speaker analysis couldn’t start. The speaker model could not be loaded. Retry the model download or continue without speaker-aware reframing.",
+            code="SPEAKER_MODEL_LOAD_FAILED",
+            retryable=True,
+        ) from cause
+
+
 class SuccessStage(queue.Stage):
     name = "ingest"
     schema_version = 1
@@ -80,12 +93,26 @@ def _assert_one_terminal(events):
     return terminal[0]
 
 
+def test_progress_protocol_v2_exposes_creator_fields(capsys):
+    emit = cli._progress_printer(True)
+    emit("diarize", -1.0, "Downloading speaker model…")
+    event = json.loads(capsys.readouterr().out)
+    assert event["event"] == "progress"
+    assert event["protocol_version"] == 2
+    assert event["stage_id"] == "diarize"
+    assert event["display_stage"] == "Identifying speakers"
+    assert event["indeterminate"] is True
+    assert event["one_time_download"] is True
+    assert event["elapsed_seconds"] >= 0
+    assert event["stage_elapsed_seconds"] >= 0
+
+
 def test_missing_local_source_is_structured_terminal(monkeypatch, capsys):
     code = _run(monkeypatch, MissingSourceStage())
     events = _events(capsys)
     assert code == 1
     terminal = _assert_one_terminal(events)
-    assert terminal["protocol_version"] == 1
+    assert terminal["protocol_version"] == 2
     assert terminal["ok"] is False
     assert terminal["stage"] == "ingest"
     assert terminal["code"] == "INPUT_FILE_NOT_FOUND"
@@ -102,6 +129,27 @@ def test_yt_dlp_failure_is_actionable_and_retryable(monkeypatch, capsys):
     assert terminal["code"].startswith("YTDLP_")
     assert terminal["retryable"] is True
     assert "yt-dlp" in terminal["message"] or "video" in terminal["message"]
+
+
+def test_speaker_failure_is_typed_retryable_and_has_diagnostic(monkeypatch, capsys):
+    code = _run(monkeypatch, SpeakerLoadFailureStage())
+    events = _events(capsys)
+    assert code == 1
+    terminal = _assert_one_terminal(events)
+    assert terminal["stage"] == "diarize"
+    assert terminal["code"] == "SPEAKER_MODEL_LOAD_FAILED"
+    assert terminal["retryable"] is True
+    assert terminal["diagnostic_id"]
+    assert terminal["code"] != "INTERNAL_ERROR"
+    output = capsys.readouterr().out
+    assert "AIza-speaker-test" not in output
+
+    job_event = next(e for e in events if e.get("event") == "job")
+    diagnostics = list(queue.get_job(job_event["job_id"]).dir.glob("diagnostics/*.log"))
+    assert diagnostics
+    diagnostic_text = diagnostics[0].read_text()
+    assert "AIza-speaker-test" not in diagnostic_text
+    assert "RuntimeError" in diagnostic_text
 
 
 def test_unexpected_exception_is_redacted_and_has_diagnostic(monkeypatch, capsys):
@@ -130,7 +178,7 @@ def test_success_has_exactly_one_terminal_event(monkeypatch, capsys):
     events = _events(capsys)
     assert code == 0
     terminal = _assert_one_terminal(events)
-    assert terminal["protocol_version"] == 1
+    assert terminal["protocol_version"] == 2
     assert terminal["ok"] is True
     assert terminal["job_id"]
     assert terminal["stage"] == "pipeline"

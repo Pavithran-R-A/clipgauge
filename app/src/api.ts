@@ -17,7 +17,7 @@ export const api = {
     invoke<PreflightResult>('preflight', { llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader }),
   privacySummary: (provider: string, model?: string, endpoint?: string) =>
     invoke<PrivacySummary>('privacy_summary', { llm: legacyMode(provider), provider, model, endpoint }),
-  generateSupportBundle: (jobId?: string) => invoke<string>('generate_support_bundle', { jobId }),
+  generateSupportBundle: (jobId?: string, diagnosticId?: string) => invoke<string>('generate_support_bundle', { jobId, diagnosticId }),
   runJob: (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
     invoke<void>('run_job', {
       request: { source, llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader, captions },

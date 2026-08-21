@@ -255,11 +255,13 @@ class StageError(Exception):
         code: str = "STAGE_FAILED",
         retryable: bool = True,
         stage: str | None = None,
+        diagnostic_id: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
         self.stage = stage
+        self.diagnostic_id = diagnostic_id
 
 
 class StageExecutionError(Exception):

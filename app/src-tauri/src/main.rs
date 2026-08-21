@@ -298,9 +298,76 @@ fn sanitized_job_metadata(root: &Path) -> Value {
     json!({"jobs": jobs})
 }
 
-fn generate_support_bundle_at(root: &Path, job_id: Option<String>) -> Result<String, String> {
+fn valid_diagnostic_id(id: &str) -> bool {
+    let Some(suffix) = id.strip_prefix("diag-") else {
+        return false;
+    };
+    matches!(suffix.len(), 16 | 32) && suffix.chars().all(|value| value.is_ascii_hexdigit())
+}
+
+fn diagnostic_tail(path: &Path) -> Result<String, String> {
+    let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let redacted = diagnostics::redact(&text);
+    let safe_lines = redacted
+        .lines()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            !lower.contains("transcript") && !line.contains("S0:") && !line.contains("S1:")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(safe_lines
+        .chars()
+        .rev()
+        .take(64 * 1024)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect())
+}
+
+fn append_diagnostic_file(
+    archive: &mut zip::ZipWriter<fs::File>,
+    options: zip::write::SimpleFileOptions,
+    path: &Path,
+    archive_name: String,
+    included: &mut Vec<String>,
+) -> Result<bool, String> {
+    if path.extension().and_then(|value| value.to_str()) != Some("log") {
+        return Ok(false);
+    }
+    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+        return Ok(false);
+    };
+    let Some(diagnostic_id) = file_name.strip_suffix(".log") else {
+        return Ok(false);
+    };
+    if !valid_diagnostic_id(diagnostic_id) {
+        return Ok(false);
+    }
+    let tail = diagnostic_tail(path)?;
+    archive
+        .start_file(archive_name, options)
+        .map_err(|error| error.to_string())?;
+    archive
+        .write_all(tail.as_bytes())
+        .map_err(|error| error.to_string())?;
+    included.push(diagnostic_id.to_string());
+    Ok(true)
+}
+
+fn generate_support_bundle_at(
+    root: &Path,
+    job_id: Option<String>,
+    diagnostic_id: Option<String>,
+) -> Result<String, String> {
     if let Some(id) = &job_id {
         let _ = path_security::resolve_job_dir(root, id)?;
+    }
+    if let Some(id) = &diagnostic_id {
+        if !valid_diagnostic_id(id) {
+            return Err("invalid diagnostic identifier".into());
+        }
     }
     let directory = root.join("support");
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
@@ -311,69 +378,98 @@ fn generate_support_bundle_at(root: &Path, job_id: Option<String>) -> Result<Str
     let mut archive = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
+    let mut included_diagnostics = Vec::new();
+    let root_diagnostics = root.join("diagnostics");
+    if let Ok(entries) = fs::read_dir(&root_diagnostics) {
+        for entry in entries.flatten().take(8) {
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if let Some(requested) = &diagnostic_id {
+                if file_name != format!("{requested}.log") {
+                    continue;
+                }
+            }
+            let _ = append_diagnostic_file(
+                &mut archive,
+                options,
+                &path,
+                format!("diagnostics/{file_name}"),
+                &mut included_diagnostics,
+            )?;
+        }
+    }
+    if let Some(id) = &job_id {
+        let job_dir = path_security::resolve_job_dir(root, id)?;
+        let job_diagnostics = job_dir.join("diagnostics");
+        if let Ok(entries) = fs::read_dir(&job_diagnostics) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                if let Some(requested) = &diagnostic_id {
+                    if file_name != format!("{requested}.log") {
+                        continue;
+                    }
+                }
+                let _ = append_diagnostic_file(
+                    &mut archive,
+                    options,
+                    &path,
+                    format!("jobs/{id}/diagnostics/{file_name}"),
+                    &mut included_diagnostics,
+                )?;
+            }
+        }
+    }
+    let requested_missing = diagnostic_id.as_ref().filter(|requested| {
+        !included_diagnostics
+            .iter()
+            .any(|included| included == *requested)
+    });
     let report = json!({
         "app_version": env!("CARGO_PKG_VERSION"),
         "os": std::env::consts::OS,
         "architecture": std::env::consts::ARCH,
-        "protocol_version": 1,
+        "protocol_version": 2,
+        "support_bundle_version": 2,
         "bundle_id": bundle_id,
         "job_id": job_id,
+        "requested_diagnostic_id": diagnostic_id,
+        "included_diagnostic_ids": included_diagnostics,
+        "missing_diagnostic": requested_missing,
         "jobs": sanitized_job_metadata(root),
-        "exclusions": ["API keys", "OAuth tokens", "raw transcripts", "source media", "arbitrary filesystem contents"],
+        "exclusions": ["API keys", "OAuth tokens", "browser cookies", "raw transcripts", "source media", "unrelated job diagnostics", "arbitrary filesystem contents"],
     });
     archive
         .start_file("report.json", options)
         .map_err(|error| error.to_string())?;
     archive
-        .write_all(serde_json::to_string_pretty(&report).unwrap().as_bytes())
+        .write_all(
+            serde_json::to_string_pretty(&report)
+                .map_err(|error| error.to_string())?
+                .as_bytes(),
+        )
         .map_err(|error| error.to_string())?;
     archive
         .start_file("README.txt", options)
         .map_err(|error| error.to_string())?;
-    archive.write_all(b"ClipGauge support bundle. This archive contains sanitized metadata and redacted diagnostic tails only.\n").map_err(|error| error.to_string())?;
-    if let Ok(entries) = fs::read_dir(root.join("diagnostics")) {
-        for entry in entries.flatten().take(8) {
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("log") {
-                continue;
-            }
-            let Ok(text) = fs::read_to_string(&path) else {
-                continue;
-            };
-            let redacted = diagnostics::redact(&text);
-            let safe_lines = redacted
-                .lines()
-                .filter(|line| {
-                    let lower = line.to_ascii_lowercase();
-                    !lower.contains("transcript") && !line.contains("S0:") && !line.contains("S1:")
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let tail: String = safe_lines
-                .chars()
-                .rev()
-                .take(64 * 1024)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect();
-            let name = format!("diagnostics/{}", entry.file_name().to_string_lossy());
-            archive
-                .start_file(name, options)
-                .map_err(|error| error.to_string())?;
-            archive
-                .write_all(tail.as_bytes())
-                .map_err(|error| error.to_string())?;
-        }
-    }
+    archive
+        .write_all(b"ClipGauge support bundle. This archive contains sanitized metadata and redacted bounded diagnostic tails only. It excludes credentials, browser cookies, transcripts, media, and unrelated job diagnostics.\n")
+        .map_err(|error| error.to_string())?;
     archive.finish().map_err(|error| error.to_string())?;
     fs::rename(&temp, &path).map_err(|error| error.to_string())?;
     Ok(path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-fn generate_support_bundle(job_id: Option<String>) -> Result<String, String> {
-    generate_support_bundle_at(&home_dir(), job_id)
+fn generate_support_bundle(
+    job_id: Option<String>,
+    diagnostic_id: Option<String>,
+) -> Result<String, String> {
+    generate_support_bundle_at(&home_dir(), job_id, diagnostic_id)
 }
 
 fn append_provider_args(
@@ -1331,13 +1427,15 @@ mod tests {
             "clipgauge-support-{}",
             super::diagnostics::diagnostic_id()
         ));
+        let diagnostic_id = super::diagnostics::diagnostic_id();
         fs::create_dir_all(root.join("diagnostics")).unwrap();
         fs::write(
-            root.join("diagnostics/sample.log"),
+            root.join("diagnostics")
+                .join(format!("{diagnostic_id}.log")),
             "key=AIzaKnownSecret Authorization: Bearer oauth-known transcript=private words",
         )
         .unwrap();
-        let bundle = generate_support_bundle_at(&root, None).unwrap();
+        let bundle = generate_support_bundle_at(&root, None, None).unwrap();
         let file = fs::File::open(bundle).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let mut report = String::new();
@@ -1347,8 +1445,9 @@ mod tests {
             .read_to_string(&mut report)
             .unwrap();
         let mut diagnostic = String::new();
+        let diagnostic_name = format!("diagnostics/{diagnostic_id}.log");
         archive
-            .by_name("diagnostics/sample.log")
+            .by_name(&diagnostic_name)
             .unwrap()
             .read_to_string(&mut diagnostic)
             .unwrap();
@@ -1356,6 +1455,99 @@ mod tests {
         assert!(!contents.contains("AIzaKnownSecret"));
         assert!(!contents.contains("oauth-known"));
         assert!(!contents.contains("private words"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn support_bundle_includes_requested_job_diagnostic() {
+        let root = std::env::temp_dir().join(format!(
+            "clipgauge-support-job-{}",
+            super::diagnostics::diagnostic_id()
+        ));
+        let job_id = "20260818-155237-c6b118";
+        let diagnostic_id = super::diagnostics::diagnostic_id();
+        let diagnostic_dir = root.join("jobs").join(job_id).join("diagnostics");
+        fs::create_dir_all(&diagnostic_dir).unwrap();
+        fs::write(
+            diagnostic_dir.join(format!("{diagnostic_id}.log")),
+            "stage=speakers code=SPEAKER_MODEL_LOAD_FAILED",
+        )
+        .unwrap();
+        let bundle = generate_support_bundle_at(
+            &root,
+            Some(job_id.to_string()),
+            Some(diagnostic_id.clone()),
+        )
+        .unwrap();
+        let file = fs::File::open(bundle).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let name = format!("jobs/{job_id}/diagnostics/{diagnostic_id}.log");
+        assert!(archive.by_name(&name).is_ok());
+        let mut report = String::new();
+        archive
+            .by_name("report.json")
+            .unwrap()
+            .read_to_string(&mut report)
+            .unwrap();
+        assert!(report.contains(&diagnostic_id));
+        assert!(report.contains("\"missing_diagnostic\": null"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn support_bundle_excludes_unrelated_job_diagnostics() {
+        let root = std::env::temp_dir().join(format!(
+            "clipgauge-support-jobs-{}",
+            super::diagnostics::diagnostic_id()
+        ));
+        let requested_job = "20260818-155237-c6b118";
+        let unrelated_job = "20260818-155238-d7c229";
+        let requested_id = super::diagnostics::diagnostic_id();
+        let unrelated_id = super::diagnostics::diagnostic_id();
+        for (job_id, diagnostic_id) in [
+            (requested_job, &requested_id),
+            (unrelated_job, &unrelated_id),
+        ] {
+            let directory = root.join("jobs").join(job_id).join("diagnostics");
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(directory.join(format!("{diagnostic_id}.log")), "stage=test").unwrap();
+        }
+        let bundle = generate_support_bundle_at(
+            &root,
+            Some(requested_job.to_string()),
+            Some(requested_id.clone()),
+        )
+        .unwrap();
+        let file = fs::File::open(bundle).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let requested_name = format!("jobs/{requested_job}/diagnostics/{requested_id}.log");
+        let unrelated_name = format!("jobs/{unrelated_job}/diagnostics/{unrelated_id}.log");
+        assert!(archive.by_name(&requested_name).is_ok());
+        assert!(archive.by_name(&unrelated_name).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn support_bundle_reports_missing_requested_diagnostic() {
+        let root = std::env::temp_dir().join(format!(
+            "clipgauge-support-missing-{}",
+            super::diagnostics::diagnostic_id()
+        ));
+        let job_id = "20260818-155237-c6b118";
+        let requested_id = super::diagnostics::diagnostic_id();
+        fs::create_dir_all(root.join("jobs").join(job_id).join("diagnostics")).unwrap();
+        let bundle =
+            generate_support_bundle_at(&root, Some(job_id.to_string()), Some(requested_id.clone()))
+                .unwrap();
+        let file = fs::File::open(bundle).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut report = String::new();
+        archive
+            .by_name("report.json")
+            .unwrap()
+            .read_to_string(&mut report)
+            .unwrap();
+        assert!(report.contains(&format!("\"missing_diagnostic\": \"{requested_id}\"")));
         let _ = fs::remove_dir_all(root);
     }
 

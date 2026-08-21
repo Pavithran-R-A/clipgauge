@@ -10,7 +10,9 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import sys
+import time
 
 from . import __version__, config, protocol
 from .jobs import queue
@@ -43,17 +45,44 @@ def _stages() -> list[queue.Stage]:
 
 
 def _progress_printer(jsonl: bool):
+    started_at = time.monotonic()
+    stage_started: dict[str, float] = {}
+
     def emit(stage: str, fraction: float, message: str) -> None:
+        now = time.monotonic()
+        stage_started.setdefault(stage, now)
+        elapsed = max(0.0, now - started_at)
+        stage_elapsed = max(0.0, now - stage_started[stage])
+        indeterminate = fraction < 0
+        eta = None
+        if fraction > 0.0 and fraction < 1.0 and stage_elapsed > 0.0:
+            eta = max(0.0, stage_elapsed * (1.0 - fraction) / fraction)
+        one_time_download = "download" in message.lower() or "install" in message.lower()
         if jsonl:
-            print(
-                json.dumps(
-                    {"event": "progress", "stage": stage, "fraction": fraction, "message": message}
-                ),
-                flush=True,
-            )
+            event = {
+                "event": "progress",
+                "protocol_version": protocol.PROTOCOL_VERSION,
+                "stage": stage,
+                "stage_id": stage,
+                "display_stage": protocol.DISPLAY_STAGES.get(stage, stage.replace("_", " ").title()),
+                "operation": message,
+                "fraction": fraction,
+                "indeterminate": indeterminate,
+                "message": message,
+                "elapsed_seconds": round(elapsed, 3),
+                "stage_elapsed_seconds": round(stage_elapsed, 3),
+                "one_time_download": one_time_download,
+            }
+            if eta is not None:
+                event["eta_seconds"] = round(eta, 3)
+            accelerator = os.environ.get("CLIPGAUGE_ACCELERATOR")
+            if accelerator:
+                event["accelerator"] = protocol.safe_message(accelerator, limit=80)
+            print(json.dumps(event), flush=True)
         else:
             pct = f"{fraction * 100:5.1f}%" if fraction >= 0 else "  ...."
-            print(f"[{stage:<10}] {pct} {message}", file=sys.stderr, flush=True)
+            eta_label = f" ETA {eta:4.0f}s" if eta is not None else ""
+            print(f"[{stage:<10}] {pct}{eta_label} {message}", file=sys.stderr, flush=True)
 
     return emit
 
@@ -205,6 +234,9 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
     try:
         results = queue.run_stages(job, _stages(), emit)
     except queue.StageError as err:
+        diagnostic = err.diagnostic_id
+        if diagnostic is None and err.__cause__ is not None:
+            diagnostic = protocol.write_diagnostic(job.dir, err.stage or "pipeline", err.__cause__)
         if jsonl:
             terminal.terminal(
                 ok=False,
@@ -212,6 +244,7 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
                 message=str(err),
                 retryable=err.retryable,
                 stage=err.stage,
+                diagnostic=diagnostic,
             )
         else:
             _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": str(err)})

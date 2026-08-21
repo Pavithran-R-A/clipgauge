@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { api } from '../api'
-import type { JobSummary, PrivacySummary, ProviderTestResult } from '../types'
+import type { JobSummary, PrivacySummary, ProviderTestResult, StageProgress } from '../types'
 import KeyModal from './KeyModal'
 
 const STAGE_ORDER = [
@@ -9,14 +9,14 @@ const STAGE_ORDER = [
 ]
 
 const STAGE_LABELS: Record<string, string> = {
-  ingest: 'INGEST',
-  asr: 'TRANSCRIBE',
-  diarize: 'SPEAKERS',
-  events: 'LISTEN',
-  candidates: 'SCAN',
-  score: 'JUDGE',
-  camera: 'DIRECT',
-  render: 'RENDER'
+  ingest: 'Preparing video',
+  asr: 'Transcribing speech',
+  diarize: 'Identifying speakers',
+  events: 'Understanding audio',
+  candidates: 'Finding strong moments',
+  score: 'Scoring clips',
+  camera: 'Smart reframing',
+  render: 'Creating clips'
 }
 
 const CAPTION_PRESETS = ['classic', 'beast', 'hormozi', 'minimal', 'karaoke-pop']
@@ -37,7 +37,7 @@ interface Props {
   running: boolean
   cancelling: boolean
   startedAt: number | null
-  stages: Record<string, { fraction: number; message: string }>
+  stages: Record<string, StageProgress>
   error: string | null
   notice: string | null
   onRun: (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) => void
@@ -314,23 +314,26 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
             {STAGE_ORDER.filter((s) => stages[s] || running).map((name, i) => {
               const st = stages[name]
               const state = !st ? 'idle' : st.fraction >= 1 ? 'done' : 'live'
+              const label = st?.displayStage ?? STAGE_LABELS[name] ?? name.replace('_', ' ')
+              const eta = st?.etaSeconds != null ? ` · ETA ${Math.max(0, Math.round(st.etaSeconds))}s` : ''
+              const accelerator = st?.accelerator ? ` · ${st.accelerator}` : ''
               return (
                 <div className={`deck-row ${state}`} key={name} style={{ animationDelay: `${i * 40}ms` }}>
-                  <span className="deck-name mono">{STAGE_LABELS[name] ?? name.toUpperCase()}</span>
+                  <span className="deck-name mono">{label}</span>
                   <div
                     className="deck-bar"
                     role="progressbar"
                     aria-label={`${STAGE_LABELS[name] ?? name} stage progress`}
                     aria-valuemin={0}
                     aria-valuemax={100}
-                    aria-valuenow={st && st.fraction >= 0 ? Math.round(Math.min(1, st.fraction) * 100) : undefined}
+                    aria-valuenow={st && !st.indeterminate && st.fraction >= 0 ? Math.round(Math.min(1, st.fraction) * 100) : undefined}
                   >
                     <div
-                      className={`deck-fill ${st && st.fraction < 0 ? 'indeterminate' : ''}`}
-                      style={st && st.fraction >= 0 ? { width: `${Math.min(100, st.fraction * 100)}%` } : undefined}
+                      className={`deck-fill ${st && (st.indeterminate || st.fraction < 0) ? 'indeterminate' : ''}`}
+                      style={st && !st.indeterminate && st.fraction >= 0 ? { width: `${Math.min(100, st.fraction * 100)}%` } : undefined}
                     />
                   </div>
-                  <span className="deck-msg">{st?.message ?? ''}</span>
+                  <span className="deck-msg">{st?.operation ?? st?.message ?? ''}{eta}{accelerator}</span>
                 </div>
               )
             })}
