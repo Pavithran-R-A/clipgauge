@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { api } from '../api'
-import type { JobSummary, PrivacySummary, ProviderTestResult, StageProgress } from '../types'
+import type { JobSummary, LocalSetupInventory, PrivacySummary, ProviderTestResult, StageProgress } from '../types'
 import KeyModal from './KeyModal'
 
 const STAGE_ORDER = [
@@ -21,6 +21,7 @@ const STAGE_LABELS: Record<string, string> = {
 
 const CAPTION_PRESETS = ['classic', 'beast', 'hormozi', 'minimal', 'karaoke-pop']
 const PROVIDER_DEFAULTS: Record<string, { model: string; endpoint?: string; locality: string }> = {
+  'clipgauge-local': { model: 'clipgauge-local/qwen3-4b-q4_k_m', endpoint: 'http://127.0.0.1:8080/v1', locality: 'local' },
   gemini: { model: 'gemini-flash-latest', locality: 'cloud' },
   ollama: { model: 'auto', endpoint: 'http://127.0.0.1:11434', locality: 'local' },
   lmstudio: { model: 'auto', endpoint: 'http://127.0.0.1:1234/v1', locality: 'local' },
@@ -50,15 +51,18 @@ interface Props {
 
 export default function Studio({ jobs, running, cancelling, startedAt, stages, error, notice, onRun, onCancel, onOpenLoop, onOpenAbout, onOpenJob, onResume }: Props) {
   const [source, setSource] = useState('')
-  const [provider, setProvider] = useState('gemini')
-  const [model, setModel] = useState(PROVIDER_DEFAULTS.gemini.model)
-  const [endpoint, setEndpoint] = useState(PROVIDER_DEFAULTS.gemini.endpoint ?? '')
+  const [provider, setProvider] = useState('clipgauge-local')
+  const [model, setModel] = useState(PROVIDER_DEFAULTS['clipgauge-local'].model)
+  const [endpoint, setEndpoint] = useState(PROVIDER_DEFAULTS['clipgauge-local'].endpoint ?? '')
   const [providerKey, setProviderKey] = useState('')
-  const [auth, setAuth] = useState(provider === 'custom' ? 'none' : 'bearer')
+  const [auth, setAuth] = useState('none')
   const [secretHeader, setSecretHeader] = useState('x-api-key')
   const [testResult, setTestResult] = useState<ProviderTestResult | null>(null)
   const [captions, setCaptions] = useState('classic')
   const [showKey, setShowKey] = useState(false)
+  const [showSetup, setShowSetup] = useState(false)
+  const [setupInventory, setSetupInventory] = useState<LocalSetupInventory | null>(null)
+  const [setupBusy, setSetupBusy] = useState(false)
   const [privacy, setPrivacy] = useState<PrivacySummary | null>(null)
   const [supportMessage, setSupportMessage] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
@@ -81,12 +85,34 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
     }
   }
 
+  async function openSetup() {
+    setShowSetup(true)
+    try {
+      setSetupInventory((await api.setupInventory()) as unknown as LocalSetupInventory)
+    } catch (error) {
+      setSupportMessage(`Setup inventory unavailable: ${String(error)}`)
+    }
+  }
+
+  async function runSetupAction(action: () => Promise<Record<string, unknown>>, success: string) {
+    setSetupBusy(true)
+    try {
+      await action()
+      setSupportMessage(success)
+      setSetupInventory((await api.setupInventory()) as unknown as LocalSetupInventory)
+    } catch (error) {
+      setSupportMessage(`Setup needs attention: ${String(error)}`)
+    } finally {
+      setSetupBusy(false)
+    }
+  }
+
   function chooseProvider(next: string) {
     setProvider(next)
     const defaults = PROVIDER_DEFAULTS[next] ?? PROVIDER_DEFAULTS.custom
     setModel(defaults.model)
     setEndpoint(defaults.endpoint ?? '')
-    setAuth(next === 'custom' ? 'none' : 'bearer')
+    setAuth(next === 'custom' || defaults.locality === 'local' ? 'none' : 'bearer')
     setSecretHeader('x-api-key')
     setProviderKey('')
     setTestResult(null)
@@ -102,7 +128,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
   }
 
   async function saveProviderKey() {
-    if (!providerKey.trim() || provider === 'ollama') return
+    if (!providerKey.trim() || ['ollama', 'lmstudio', 'clipgauge-local'].includes(provider)) return
     try {
       await api.saveProviderKey(`preset-${provider}`, providerKey.trim())
       setProviderKey('')
@@ -142,6 +168,31 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
     <div className="studio">
       <div className="grain" />
       {showKey && <KeyModal onClose={() => setShowKey(false)} />}
+      {showSetup && (
+        <div className="modal-scrim" onClick={() => setShowSetup(false)}>
+          <div className="modal setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-title" onClick={(event) => event.stopPropagation()}>
+            <header className="modal-head">
+              <div><p id="setup-title" className="audit-kicker">SETUP CENTER</p><p className="ig-intro">Verified local AI, one controlled download at a time.</p></div>
+              <button className="btn-ghost" onClick={() => setShowSetup(false)}>close</button>
+            </header>
+            <div className="setup-panel">
+              <div className="setup-panel-row"><strong>ClipGauge Local runtime</strong><span className={`chip ${setupInventory?.runtime?.installed ? 'chip-green' : 'chip-amber'}`}>{setupInventory?.runtime?.installed ? 'VERIFIED' : 'NOT INSTALLED'}</span></div>
+              <p className="ig-message">llama.cpp runs on loopback only. The archive is pinned and SHA-256 checked before extraction.</p>
+              {!setupInventory?.runtime?.installed && <button className="btn-secondary" disabled={setupBusy} onClick={() => runSetupAction(api.installLocalRuntime, 'ClipGauge Local runtime installed and verified.')}>{setupBusy ? 'WORKING…' : 'INSTALL RUNTIME'}</button>}
+            </div>
+            <div className="setup-panel">
+              <div className="setup-panel-row"><strong>Local models</strong><span className="mono setup-size">{setupInventory?.storage?.required_bytes ? `${(setupInventory.storage.required_bytes / 1024 ** 3).toFixed(1)} GB required` : 'size check pending'}</span></div>
+              {setupInventory?.models?.map((asset) => (
+                <div className="setup-asset" key={String(asset.asset_id)}>
+                  <div><strong>{asset.display_name ?? asset.asset_id}</strong><span className="mono">{asset.license ?? 'license in source manifest'}</span></div>
+                  {asset.installed ? <span className="chip chip-green">VERIFIED</span> : <button className="btn-secondary" disabled={setupBusy} onClick={() => runSetupAction(() => api.downloadLocalModel(String(asset.asset_id)), 'Local model downloaded and verified.')}>{setupBusy ? 'WORKING…' : 'DOWNLOAD'}</button>}
+                </div>
+              ))}
+            </div>
+            <p className="ob-fine">Catalog entries show the upstream license and provenance. Catalog-only models remain unavailable until their exact downloadable artifact is approved.</p>
+          </div>
+        </div>
+      )}
       {privacy && (
         <div className="modal-scrim" onClick={() => setPrivacy(null)}>
           <div className="modal privacy-modal" role="dialog" aria-modal="true" aria-labelledby="privacy-title" onClick={(event) => event.stopPropagation()}>
@@ -186,6 +237,9 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
         <footer className="rail-foot">
                       <button className="btn-ghost" onClick={() => setShowKey(true)}>
             ◈ provider settings
+          </button>
+          <button className="btn-ghost" onClick={openSetup}>
+            ▣ setup center
           </button>
 
           <button className="btn-ghost" onClick={onOpenLoop}>
@@ -258,7 +312,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
                   disabled={running}
                   aria-pressed={provider === kind}
                 >
-                  {kind}
+                  {kind === 'clipgauge-local' ? 'ClipGauge Local' : kind}
                 </button>
               ))}
             </div>
@@ -283,7 +337,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
                   {auth === 'custom_secret_header' && <input value={secretHeader} onChange={(event) => setSecretHeader(event.target.value)} disabled={running} placeholder="secret header name" aria-label="Custom secret header name" />}
                 </>
               )}
-              {provider !== 'ollama' && auth !== 'none' && (
+              {!['ollama', 'lmstudio', 'clipgauge-local'].includes(provider) && auth !== 'none' && (
                 <>
                   <label className="field-label" htmlFor="provider-key">credential</label>
                   <input id="provider-key" type="password" value={providerKey} onChange={(event) => setProviderKey(event.target.value)} disabled={running} placeholder="stored in OS vault; optional until Test Connection" autoComplete="off" />
