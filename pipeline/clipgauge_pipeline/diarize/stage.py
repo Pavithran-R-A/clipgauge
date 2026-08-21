@@ -29,17 +29,51 @@ class DiarizeStage(Stage):
         from . import campplus, cluster
 
         ctx.emit(-1, "Loading speaker model…")
-        ckpt = registry.ensure(specs.CAMPPLUS, lambda f, m: ctx.emit(f * 0.2, m))
+        try:
+            ckpt = registry.ensure(specs.CAMPPLUS, lambda f, m: ctx.emit(f * 0.2, m))
+        except Exception as exc:  # noqa: BLE001 - convert into an actionable stage contract
+            detail = str(exc).lower()
+            code = (
+                "SPEAKER_MODEL_VERIFY_FAILED"
+                if "verif" in detail or "sha" in detail or "hash" in detail
+                else "SPEAKER_MODEL_DOWNLOAD_FAILED"
+            )
+            raise StageError(
+                "Speaker analysis couldn’t start. The speaker model could not be downloaded or verified. Retry the download or repair the speaker model in Setup Center.",
+                code=code,
+                retryable=True,
+            ) from exc
         device = torch.device("cpu")
-        model = campplus.load_model(str(ckpt), device)
+        try:
+            model = campplus.load_model(str(ckpt), device)
+        except Exception as exc:  # noqa: BLE001 - model boundary is intentionally typed
+            raise StageError(
+                "Speaker analysis couldn’t start. The speaker model could not be loaded. Retry the model download or continue without speaker-aware reframing.",
+                code="SPEAKER_MODEL_LOAD_FAILED",
+                retryable=True,
+            ) from exc
 
         import librosa
 
-        y16k, _ = librosa.load(str(audio_path), sr=16000, mono=True)
-        duration = len(y16k) / 16000.0
+        try:
+            y16k, _ = librosa.load(str(audio_path), sr=16000, mono=True)
+            duration = len(y16k) / 16000.0
+        except Exception as exc:  # noqa: BLE001 - audio boundary is intentionally typed
+            raise StageError(
+                "Speaker analysis couldn’t read the analysis audio. Re-run ingest or choose another video.",
+                code="SPEAKER_AUDIO_LOAD_FAILED",
+                retryable=True,
+            ) from exc
 
         segments = asr["segments"]
-        windows = campplus.speech_windows(segments, duration)
+        try:
+            windows = campplus.speech_windows(segments, duration)
+        except Exception as exc:  # noqa: BLE001 - malformed ASR data is actionable
+            raise StageError(
+                "Speaker analysis couldn’t prepare speech windows from the transcript. Retry transcription, then resume speaker analysis.",
+                code="SPEAKER_ANALYSIS_FAILED",
+                retryable=True,
+            ) from exc
         if not windows:
             return {"speakers": 0, "turns": [], "segments": segments}
 
@@ -49,22 +83,43 @@ class DiarizeStage(Stage):
         cache_path = ctx.job_dir / "diar_embeddings.npy"
         embeddings = None
         if cache_path.exists():
-            cached = np.load(cache_path)
+            try:
+                cached = np.load(cache_path)
+            except Exception as exc:  # noqa: BLE001 - stale cache is recoverable
+                raise StageError(
+                    "Speaker analysis found a damaged embedding cache. Repair this job and resume speaker analysis.",
+                    code="SPEAKER_CHECKPOINT_CORRUPT",
+                    retryable=True,
+                ) from exc
             if len(cached) == len(windows):
                 embeddings = cached
                 ctx.emit(0.8, "Embeddings cached")
         if embeddings is None:
             ctx.emit(0.25, f"Embedding {len(windows)} speech windows…")
-            embeddings = campplus.embed_windows(
-                model, y16k, windows, device,
-                progress=lambda f: ctx.emit(0.25 + f * 0.55, "Embedding speech…"),
-            )
-            np.save(cache_path, embeddings)
+            try:
+                embeddings = campplus.embed_windows(
+                    model, y16k, windows, device,
+                    progress=lambda f: ctx.emit(0.25 + f * 0.55, "Embedding speech…"),
+                )
+                np.save(cache_path, embeddings)
+            except Exception as exc:  # noqa: BLE001 - embedding boundary is intentionally typed
+                raise StageError(
+                    "Speaker analysis couldn’t analyze the speech windows. Retry speaker analysis or continue without speaker-aware reframing.",
+                    code="SPEAKER_ANALYSIS_FAILED",
+                    retryable=True,
+                ) from exc
 
         ctx.emit(0.85, "Clustering speakers…")
-        labels = cluster.cluster_windows(embeddings)
-        turns = cluster.build_turns(windows, labels)
-        cluster.assign_words(segments, turns)
+        try:
+            labels = cluster.cluster_windows(embeddings)
+            turns = cluster.build_turns(windows, labels)
+            cluster.assign_words(segments, turns)
+        except Exception as exc:  # noqa: BLE001 - clustering boundary is intentionally typed
+            raise StageError(
+                "Speaker analysis couldn’t group the speakers. Retry speaker analysis or continue without speaker-aware reframing.",
+                code="SPEAKER_CLUSTER_FAILED",
+                retryable=True,
+            ) from exc
 
         speakers = int(len(np.unique(labels))) if len(labels) else 0
         return {

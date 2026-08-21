@@ -64,7 +64,7 @@ describe('structured pipeline terminal events', () => {
       }
     })
     expect(await screen.findByTestId('studio-error')).toHaveTextContent('yt-dlp could not process this video.')
-    expect(screen.getByTestId('studio-error')).toHaveTextContent('YTDLP_METADATA_FAILED')
+    expect(screen.getByTestId('studio-error')).not.toHaveTextContent('YTDLP_METADATA_FAILED')
     expect(screen.getByTestId('studio-error')).toHaveTextContent('diag-test-123')
   })
 

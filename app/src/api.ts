@@ -17,7 +17,7 @@ export const api = {
     invoke<PreflightResult>('preflight', { llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader }),
   privacySummary: (provider: string, model?: string, endpoint?: string) =>
     invoke<PrivacySummary>('privacy_summary', { llm: legacyMode(provider), provider, model, endpoint }),
-  generateSupportBundle: (jobId?: string) => invoke<string>('generate_support_bundle', { jobId }),
+  generateSupportBundle: (jobId?: string, diagnosticId?: string) => invoke<string>('generate_support_bundle', { jobId, diagnosticId }),
   runJob: (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
     invoke<void>('run_job', {
       request: { source, llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader, captions },
@@ -36,6 +36,9 @@ export const api = {
   setupState: () => invoke<SetupState>('get_setup_state'),
   markOnboarded: () => invoke<void>('mark_onboarded'),
   checkOllama: () => invoke<{ state: 'service-stopped' | 'model-missing' | 'service-healthy'; running: boolean; models: string[]; message?: string }>('check_ollama'),
+  setupInventory: () => invoke<Record<string, unknown>>('setup_tool', { args: ['inventory'] }),
+  installLocalRuntime: () => invoke<Record<string, unknown>>('setup_tool', { args: ['install-runtime'] }),
+  downloadLocalModel: (modelId: string) => invoke<Record<string, unknown>>('setup_tool', { args: ['download-model', modelId] }),
   saveClipEdits: (jobId: string, input: SaveClipEditsInput) => invoke<void>('save_clip_edits', { jobId, input }),
   exportClip: (jobId: string, clip: number, title?: string) => invoke<string>('export_clip', { jobId, clip, title }),
   igStatus: () => invoke<{ connected: boolean; username?: string }>('ig_status'),

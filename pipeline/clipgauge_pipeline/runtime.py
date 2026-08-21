@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import stat
+import tarfile
 import time
 import zipfile
 from pathlib import Path
@@ -158,6 +159,91 @@ def extract_zip_selected_verified(
             return outputs
     except (OSError, zipfile.BadZipFile) as exc:
         raise RuntimeIntegrityError(f"archive extraction failed: {exc}") from exc
+
+
+def extract_archive_verified(
+    archive: Path,
+    destination_dir: Path,
+    *,
+    archive_type: str,
+) -> list[Path]:
+    """Safely extract every regular archive member into a staged directory."""
+    staging = destination_dir.with_name(f".{destination_dir.name}.{int(time.time_ns())}.staging")
+    staging.mkdir(parents=True, exist_ok=False)
+    extracted: list[Path] = []
+
+    def safe_member(name: str) -> Path:
+        normalized = name.replace("\\\\", "/")
+        path = Path(normalized)
+        if not normalized or path.is_absolute() or ".." in path.parts:
+            raise RuntimeIntegrityError("archive contains an absolute or traversal member")
+        return path
+
+    try:
+        if archive_type == "zip":
+            with zipfile.ZipFile(archive) as handle:
+                members = handle.infolist()
+                for info in members:
+                    path = safe_member(info.filename)
+                    mode = (info.external_attr >> 16) & 0o170000
+                    if mode == stat.S_IFLNK:
+                        raise RuntimeIntegrityError("archive contains an unexpected symlink entry")
+                    if info.is_dir():
+                        (staging / path).mkdir(parents=True, exist_ok=True)
+                        continue
+                    output = staging / path
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    with handle.open(info) as source, output.open("wb") as target:
+                        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                            target.write(chunk)
+                    extracted.append(output)
+        elif archive_type in {"tar.gz", "tgz", "tar"}:
+            mode = "r:gz" if archive_type in {"tar.gz", "tgz"} else "r:"
+            with tarfile.open(archive, mode) as handle:
+                for member in handle.getmembers():
+                    path = safe_member(member.name)
+                    if member.isdir():
+                        (staging / path).mkdir(parents=True, exist_ok=True)
+                        continue
+                    if not member.isfile():
+                        raise RuntimeIntegrityError("archive contains an unexpected non-file entry")
+                    output = staging / path
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    source = handle.extractfile(member)
+                    if source is None:
+                        raise RuntimeIntegrityError("archive member could not be read")
+                    with source, output.open("wb") as target:
+                        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                            target.write(chunk)
+                    extracted.append(output)
+        else:
+            raise RuntimeIntegrityError(f"unsupported archive type: {archive_type}")
+        destination_dir.parent.mkdir(parents=True, exist_ok=True)
+        if destination_dir.exists():
+            for path in sorted(destination_dir.rglob("*"), reverse=True):
+                if path.is_file() or path.is_symlink():
+                    path.unlink(missing_ok=True)
+                elif path.is_dir():
+                    path.rmdir()
+        else:
+            destination_dir.mkdir(parents=True)
+        final_paths: list[Path] = []
+        for staged in extracted:
+            final = destination_dir / staged.relative_to(staging)
+            final.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged, final)
+            final_paths.append(final)
+        return final_paths
+    except (OSError, tarfile.TarError, zipfile.BadZipFile) as exc:
+        raise RuntimeIntegrityError(f"archive extraction failed: {exc}") from exc
+    finally:
+        if staging.exists():
+            for path in sorted(staging.rglob("*"), reverse=True):
+                if path.is_file() or path.is_symlink():
+                    path.unlink(missing_ok=True)
+                elif path.is_dir():
+                    path.rmdir()
+            staging.rmdir()
 
 
 def extract_zip_verified(

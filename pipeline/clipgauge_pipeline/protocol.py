@@ -9,7 +9,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
+
+DISPLAY_STAGES = {
+    "ingest": "Preparing video",
+    "asr": "Transcribing speech",
+    "diarize": "Identifying speakers",
+    "events": "Understanding audio",
+    "candidates": "Finding strong moments",
+    "score": "Scoring clips",
+    "camera": "Smart reframing",
+    "render": "Creating clips",
+}
 
 _SECRET_PATTERNS = (
     re.compile(r"(?i)\bAIza[0-9A-Za-z_\-]{12,}"),

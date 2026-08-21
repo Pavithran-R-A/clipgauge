@@ -20,7 +20,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from .. import config, protocol
+from .. import config, local_runtime, protocol
 
 Capability = bool | None
 StructuredLevel = Literal["native_schema", "json_mode", "text_compatibility"]
@@ -620,6 +620,44 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         raise last or ProviderError("INTERNAL_PROVIDER_ERROR", "Provider request failed.")
 
 
+class ClipGaugeLocalAdapter(OpenAICompatibleAdapter):
+    backend = "clipgauge-local"
+
+    def __init__(self, profile: ProviderProfile, secret: str | None = None) -> None:
+        super().__init__(profile, secret)
+        self._runtime = local_runtime.LocalRuntime()
+        self._endpoint = profile.endpoint_identity
+
+    def _url(self, path: str) -> str:
+        return self._endpoint.rstrip("/") + "/" + path.lstrip("/")
+
+    def _ensure_runtime(self) -> None:
+        if self.profile.metadata.get("managed", True) is False:
+            return
+        health_url = self._endpoint.rsplit("/v1", 1)[0] + "/health"
+        try:
+            response = httpx.get(health_url, timeout=0.5, follow_redirects=False)
+            if response.status_code in {200, 204}:
+                return
+        except httpx.HTTPError:
+            pass
+        try:
+            self._endpoint = self._runtime.start(self.model)
+        except local_runtime.LocalRuntimeError as exc:
+            raise ProviderError("PROVIDER_UNAVAILABLE", str(exc)) from exc
+
+    def model_listing(self) -> list[str]:
+        self._ensure_runtime()
+        return [self.model]
+
+    def infer(self, request: InferenceRequest) -> InferenceResult:
+        self._ensure_runtime()
+        return super().infer(request)
+
+    def stop(self) -> None:
+        self._runtime.stop()
+
+
 class GeminiAdapter(ProviderAdapter):
     backend = "gemini"
 
@@ -762,7 +800,7 @@ def secret_from_environment(profile: ProviderProfile) -> str | None:
 
 def profile_from_snapshot(snapshot: dict[str, Any]) -> ProviderProfile:
     kind = str(snapshot.get("kind", "gemini"))
-    defaults = legacy_profile(kind if kind in {"gemini", "ollama"} else "gemini")
+    defaults = preset_profile(kind) if kind == "clipgauge-local" else legacy_profile(kind if kind in {"gemini", "ollama"} else "gemini")
     base_url = str(snapshot.get("endpoint_identity") or defaults.base_url)
     auth_strategy = str(snapshot.get("auth_strategy") or defaults.auth_strategy)
     locality = str(snapshot.get("locality") or defaults.locality)
@@ -811,6 +849,7 @@ def preset_profile(
             )
         return base
     defaults: dict[str, tuple[str, str, str]] = {
+        "clipgauge-local": ("ClipGauge Local", "http://127.0.0.1:8080/v1", "clipgauge-local/qwen3-4b-q4_k_m"),
         "lmstudio": ("LM Studio", "http://127.0.0.1:1234/v1", "auto"),
         "openrouter": ("OpenRouter", "https://openrouter.ai/api/v1", "openrouter/free"),
         "groq": ("Groq", "https://api.groq.com/openai/v1", "openai/gpt-oss-20b"),
@@ -828,18 +867,19 @@ def preset_profile(
     selected_model = model or default_model
     if not selected_model:
         raise ValueError(f"provider {kind} requires a model")
-    selected_auth = auth_strategy or ("none" if kind in {"custom", "lmstudio"} else "bearer")
+    selected_auth = auth_strategy or ("none" if kind in {"custom", "lmstudio", "clipgauge-local"} else "bearer")
     selected_metadata = dict(metadata or {})
     if secret_header_name:
         selected_metadata["secret_header_name"] = secret_header_name
     capability_defaults = {
+        "clipgauge-local": {"structured_json": True, "json_schema": True, "vision": False},
         "groq": {"structured_json": True, "json_schema": True, "vision": None},
         "cloudflare": {"structured_json": True, "json_schema": None, "vision": None},
         "huggingface": {"structured_json": True, "json_schema": True, "vision": None},
         "cerebras": {"structured_json": True, "json_schema": True, "vision": False},
     }
     selected_caps = capability_defaults.get(kind, {"structured_json": None, "json_schema": None, "vision": None})
-    local = kind == "lmstudio"
+    local = kind in {"lmstudio", "clipgauge-local"}
     caps = CapabilitySet(
         structured_json=selected_caps["structured_json"],
         json_schema=selected_caps["json_schema"],
@@ -859,15 +899,20 @@ def preset_profile(
         secret_ref=f"provider:{kind}",
         capabilities=caps,
         locality="local" if local else "cloud",
-        metadata=selected_metadata,
+        metadata={"managed": kind == "clipgauge-local", **selected_metadata},
     )
 
 
 def make_adapter(profile_or_mode: ProviderProfile | str, secret: str | None = None) -> ProviderAdapter:
-    profile = legacy_profile(profile_or_mode) if isinstance(profile_or_mode, str) else profile_or_mode
+    if isinstance(profile_or_mode, str):
+        profile = preset_profile(profile_or_mode) if profile_or_mode.strip().lower() == "clipgauge-local" else legacy_profile(profile_or_mode)
+    else:
+        profile = profile_or_mode
     secret = secret if secret is not None else secret_from_environment(profile)
     if profile.kind == "gemini":
         return GeminiAdapter(profile, secret)
     if profile.kind == "ollama":
         return OllamaAdapter(profile, secret)
+    if profile.kind == "clipgauge-local":
+        return ClipGaugeLocalAdapter(profile, secret)
     return OpenAICompatibleAdapter(profile, secret)

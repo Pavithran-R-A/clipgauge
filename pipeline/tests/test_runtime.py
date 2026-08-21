@@ -1,5 +1,6 @@
 import hashlib
 import io
+import tarfile
 import zipfile
 from pathlib import Path
 
@@ -111,6 +112,28 @@ def test_manifest_and_registry_have_concrete_model_hashes():
         entry = manifest["models"][key]
         assert entry["sha256"] == spec.sha256
         assert entry["size"] > 0
+
+
+def test_safe_tar_archive_installation(tmp_path):
+    archive = tmp_path / "good.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        payload = tarfile.TarInfo("llama-b10545/llama-server")
+        payload.size = len(b"server")
+        handle.addfile(payload, io.BytesIO(b"server"))
+    output = tmp_path / "installed"
+    installed = runtime.extract_archive_verified(archive, output, archive_type="tar.gz")
+    assert [path.relative_to(output).as_posix() for path in installed] == ["llama-b10545/llama-server"]
+    assert (output / "llama-b10545/llama-server").read_bytes() == b"server"
+
+
+def test_safe_archive_rejects_tar_traversal(tmp_path):
+    archive = tmp_path / "bad.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        payload = tarfile.TarInfo("../escape")
+        payload.size = len(b"blocked")
+        handle.addfile(payload, io.BytesIO(b"blocked"))
+    with pytest.raises(runtime.RuntimeIntegrityError, match="traversal"):
+        runtime.extract_archive_verified(archive, tmp_path / "installed", archive_type="tar.gz")
 
 
 def test_valid_staged_archive_installation(tmp_path):

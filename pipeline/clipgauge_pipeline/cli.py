@@ -10,9 +10,12 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import sys
+import time
+from pathlib import Path
 
-from . import __version__, config, protocol
+from . import __version__, config, downloads, local_runtime, protocol, runtime
 from .jobs import queue
 from .scoring import providers as providers_mod
 
@@ -43,17 +46,44 @@ def _stages() -> list[queue.Stage]:
 
 
 def _progress_printer(jsonl: bool):
+    started_at = time.monotonic()
+    stage_started: dict[str, float] = {}
+
     def emit(stage: str, fraction: float, message: str) -> None:
+        now = time.monotonic()
+        stage_started.setdefault(stage, now)
+        elapsed = max(0.0, now - started_at)
+        stage_elapsed = max(0.0, now - stage_started[stage])
+        indeterminate = fraction < 0
+        eta = None
+        if fraction > 0.0 and fraction < 1.0 and stage_elapsed > 0.0:
+            eta = max(0.0, stage_elapsed * (1.0 - fraction) / fraction)
+        one_time_download = "download" in message.lower() or "install" in message.lower()
         if jsonl:
-            print(
-                json.dumps(
-                    {"event": "progress", "stage": stage, "fraction": fraction, "message": message}
-                ),
-                flush=True,
-            )
+            event = {
+                "event": "progress",
+                "protocol_version": protocol.PROTOCOL_VERSION,
+                "stage": stage,
+                "stage_id": stage,
+                "display_stage": protocol.DISPLAY_STAGES.get(stage, stage.replace("_", " ").title()),
+                "operation": message,
+                "fraction": fraction,
+                "indeterminate": indeterminate,
+                "message": message,
+                "elapsed_seconds": round(elapsed, 3),
+                "stage_elapsed_seconds": round(stage_elapsed, 3),
+                "one_time_download": one_time_download,
+            }
+            if eta is not None:
+                event["eta_seconds"] = round(eta, 3)
+            accelerator = os.environ.get("CLIPGAUGE_ACCELERATOR")
+            if accelerator:
+                event["accelerator"] = protocol.safe_message(accelerator, limit=80)
+            print(json.dumps(event), flush=True)
         else:
             pct = f"{fraction * 100:5.1f}%" if fraction >= 0 else "  ...."
-            print(f"[{stage:<10}] {pct} {message}", file=sys.stderr, flush=True)
+            eta_label = f" ETA {eta:4.0f}s" if eta is not None else ""
+            print(f"[{stage:<10}] {pct}{eta_label} {message}", file=sys.stderr, flush=True)
 
     return emit
 
@@ -105,6 +135,180 @@ def _apply_profile(settings: config.Settings, profile: providers_mod.ProviderPro
     settings.provider_locality = profile.locality
     settings.provider_metadata = dict(profile.metadata)
     settings.provider_schema_version = profile.schema_version
+
+
+def _setup_runtime_asset(manager: local_runtime.LocalRuntime) -> downloads.ManagedAsset:
+    spec = manager.runtime_asset()
+    version = str(manager.manifest["runtimes"]["llama-server"]["version"])
+    platform_key = manager._platform_key()
+    archive_type = str(spec["archive_type"])
+    return downloads.ManagedAsset(
+        asset_id=f"runtime:llama-server:{platform_key}",
+        display_name=f"ClipGauge Local runtime · llama.cpp {version}",
+        purpose="Owned loopback local inference runtime",
+        destination=f"downloads/llama-server-{version}-{platform_key}.{archive_type.replace('.', '-')}",
+        url=str(spec["url"]),
+        size_bytes=int(spec["size"]),
+        sha256=str(spec["sha256"]),
+        required=True,
+        one_time=True,
+        license=str(manager.manifest["runtimes"]["llama-server"]["license"]),
+        source=str(manager.manifest["runtimes"]["llama-server"]["provenance"]),
+    )
+
+
+def _setup_model_asset(model: local_runtime.LocalModel) -> downloads.ManagedAsset:
+    return downloads.ManagedAsset(
+        asset_id=model.model_id,
+        display_name=model.display_name,
+        purpose="ClipGauge Local structured clip scoring",
+        destination=f"models/clipgauge-local/{model.filename}",
+        url=model.url,
+        size_bytes=model.size_bytes,
+        sha256=model.sha256,
+        required=False,
+        one_time=True,
+        license=model.license,
+        source=model.provenance,
+    )
+
+
+def _core_setup_inventory(manager: local_runtime.LocalRuntime) -> list[dict[str, object]]:
+    from .ingest import ytdlp
+    from .models import registry, specs  # noqa: F401 - ensure concrete specs are registered
+    from .render import ffmpeg_bin
+
+    rows: list[dict[str, object]] = []
+    try:
+        yt_manifest = manager.manifest["runtimes"]["yt-dlp"]
+        yt_name = ytdlp._binary_name()
+        yt_asset = yt_manifest["assets"][yt_name]
+        yt_path = ytdlp.binary_path()
+        yt_installed = yt_path.is_file() and runtime.sha256_file(yt_path).lower() == str(yt_asset["sha256"]).lower()
+        rows.append({
+            "asset_id": "core:yt-dlp",
+            "display_name": "YouTube compatibility",
+            "purpose": "Retrieves public video metadata and media through the managed yt-dlp runtime.",
+            "version": yt_manifest["version"],
+            "size_bytes": yt_asset.get("size"),
+            "installed": yt_installed,
+            "integrity": "verified" if yt_installed else "not-installed",
+            "source": yt_manifest["provenance"],
+            "license": yt_manifest["license"],
+            "location": str(yt_path),
+            "one_time": True,
+            "required": True,
+        })
+    except (KeyError, OSError):
+        rows.append({"asset_id": "core:yt-dlp", "display_name": "YouTube compatibility", "installed": False, "integrity": "manifest-error", "required": True})
+
+    ffmpeg_path, captions = ffmpeg_bin.resolve()
+    rows.append({
+        "asset_id": "core:ffmpeg",
+        "display_name": "Video engine",
+        "purpose": "Reads, processes, and renders video clips.",
+        "version": manager.manifest.get("runtimes", {}).get("ffmpeg", {}).get("version", "system or managed"),
+        "size_bytes": manager.manifest.get("runtimes", {}).get("ffmpeg", {}).get("assets", {}).get("win64-gpl", {}).get("size"),
+        "installed": bool(ffmpeg_path and (ffmpeg_path == "ffmpeg" or Path(ffmpeg_path).is_file())),
+        "integrity": "system-or-verified" if captions else "available-without-caption-filter",
+        "source": manager.manifest.get("runtimes", {}).get("ffmpeg", {}).get("provenance"),
+        "license": manager.manifest.get("runtimes", {}).get("ffmpeg", {}).get("license"),
+        "location": ffmpeg_path,
+        "one_time": True,
+        "required": True,
+    })
+
+    purposes = {
+        "campplus": "Identifies who is speaking so reframing can follow the active speaker.",
+        "laughter": "Adds laughter and energy signals to moment discovery.",
+        "panns": "Understands useful audio events beyond speech.",
+        "ultraface": "Finds faces for safe vertical reframing.",
+        "lr-asd": "Estimates active-speaker motion for camera direction.",
+    }
+    for key, spec in registry.REGISTRY.items():
+        path = registry.model_path(spec)
+        installed = path.is_file()
+        integrity = "not-installed"
+        if installed and spec.sha256:
+            try:
+                integrity = "verified" if runtime.sha256_file(path).lower() == spec.sha256.lower() else "failed"
+            except OSError:
+                integrity = "unreadable"
+        rows.append({
+            "asset_id": f"analysis:{key}",
+            "display_name": spec.name.replace("-", " ").replace("_", " ").title(),
+            "purpose": next((text for token, text in purposes.items() if token in spec.name), "Supports ClipGauge analysis."),
+            "version": spec.revision,
+            "size_bytes": spec.approx_mb * 1024 * 1024 if spec.approx_mb else None,
+            "installed": installed and integrity == "verified",
+            "integrity": integrity,
+            "source": spec.url,
+            "license": spec.license,
+            "location": str(path),
+            "one_time": True,
+            "required": True,
+        })
+    return rows
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    manager = local_runtime.LocalRuntime()
+
+    def setup_event(payload: dict[str, object]) -> None:
+        if args.jsonl:
+            print(json.dumps({"event": "setup-progress", "protocol_version": protocol.PROTOCOL_VERSION, **payload}), flush=True)
+
+    downloads_manager = downloads.DownloadManager(event=setup_event)
+    try:
+        runtime_asset = _setup_runtime_asset(manager)
+        model_assets = [_setup_model_asset(model) for model in local_runtime.MODEL_CATALOG.values()]
+        if args.setup_cmd == "inventory":
+            runtime_binary = manager.binary_path()
+            rows = downloads_manager.inventory(model_assets)
+            payload = {
+                "state": "ready" if runtime_binary.is_file() else "setup-required",
+                "runtime": {
+                    **runtime_asset.to_json(),
+                    "installed": runtime_binary.is_file(),
+                    "managed_path": str(runtime_binary),
+                    "version": manager.manifest["runtimes"]["llama-server"]["version"],
+                },
+                "models": rows,
+                "core_assets": _core_setup_inventory(manager),
+                "storage": downloads_manager.estimate([runtime_asset, *model_assets]),
+                "catalog": [
+                    {
+                        "model_id": model.model_id,
+                        "display_name": model.display_name,
+                        "license": model.license,
+                        "context_window": model.context_window,
+                        "capabilities": list(model.capabilities),
+                        "provenance": model.provenance,
+                    }
+                    for model in local_runtime.MODEL_CATALOG.values()
+                ],
+            }
+            print(json.dumps(payload))
+            return 0
+        if args.setup_cmd == "install-runtime":
+            archive = downloads_manager.download(runtime_asset)
+            binary = manager.install_runtime(archive)
+            print(json.dumps({"ok": True, "asset_id": runtime_asset.asset_id, "path": str(binary)}))
+            return 0
+        if args.setup_cmd == "download-model":
+            try:
+                model = local_runtime.MODEL_CATALOG[args.model_id]
+            except KeyError as exc:
+                print(json.dumps({"ok": False, "code": "MODEL_NOT_FOUND", "message": "The selected local model is not in the verified catalog."}))
+                return 2
+            asset = _setup_model_asset(model)
+            path = downloads_manager.download(asset)
+            print(json.dumps({"ok": True, "asset_id": asset.asset_id, "path": str(path), "license": asset.license, "source": asset.source}))
+            return 0
+    except Exception as err:  # noqa: BLE001 - setup commands return one actionable JSON result
+        print(json.dumps({"ok": False, "code": "SETUP_DOWNLOAD_FAILED", "message": protocol.safe_message(str(err), limit=300)}))
+        return 1
+    return 2
 
 
 def cmd_preflight(args: argparse.Namespace) -> int:
@@ -205,6 +409,9 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
     try:
         results = queue.run_stages(job, _stages(), emit)
     except queue.StageError as err:
+        diagnostic = err.diagnostic_id
+        if diagnostic is None and err.__cause__ is not None:
+            diagnostic = protocol.write_diagnostic(job.dir, err.stage or "pipeline", err.__cause__)
         if jsonl:
             terminal.terminal(
                 ok=False,
@@ -212,6 +419,7 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
                 message=str(err),
                 retryable=err.retryable,
                 stage=err.stage,
+                diagnostic=diagnostic,
             )
         else:
             _emit_result(jsonl, {"ok": False, "job_id": job.id, "error": str(err)})
@@ -445,6 +653,14 @@ def main(argv: list[str] | None = None) -> int:
     p_preflight.add_argument("--auth", choices=["none", "bearer", "api_key_header", "custom_secret_header"], default=None)
     p_preflight.add_argument("--secret-header", default=None, help=argparse.SUPPRESS)
     p_preflight.set_defaults(fn=cmd_preflight)
+
+    p_setup = sub.add_parser("setup", help="inspect or install managed local-AI assets")
+    setup_sub = p_setup.add_subparsers(dest="setup_cmd", required=True)
+    setup_sub.add_parser("inventory", help="show verified runtime/model inventory")
+    setup_sub.add_parser("install-runtime", help="download and install the verified llama.cpp runtime")
+    p_download_model = setup_sub.add_parser("download-model", help="download a verified local model")
+    p_download_model.add_argument("model_id", choices=sorted(local_runtime.MODEL_CATALOG))
+    p_setup.set_defaults(fn=cmd_setup)
 
     p_test = sub.add_parser("provider-test", help="test a configured provider connection")
     p_test.add_argument("--llm", choices=["gemini", "ollama"], default=None, help=argparse.SUPPRESS)

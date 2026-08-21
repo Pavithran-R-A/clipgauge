@@ -2,8 +2,20 @@ export interface PipelineEvent {
   event: string
   protocol_version?: number
   stage?: string
+  stage_id?: string
+  display_stage?: string
+  operation?: string
   fraction?: number
+  indeterminate?: boolean
   message?: string
+  elapsed_seconds?: number
+  stage_elapsed_seconds?: number
+  eta_seconds?: number
+  bytes_done?: number
+  bytes_total?: number
+  bytes_per_second?: number
+  accelerator?: string
+  one_time_download?: boolean
   job_id?: string
   ok?: boolean
   code?: string
@@ -12,6 +24,22 @@ export interface PipelineEvent {
   diagnostic_id?: string
   exit_code?: number | null
   [key: string]: unknown
+}
+
+export interface StageProgress {
+  fraction: number
+  message: string
+  displayStage?: string
+  operation?: string
+  indeterminate?: boolean
+  elapsedSeconds?: number
+  stageElapsedSeconds?: number
+  etaSeconds?: number
+  bytesDone?: number
+  bytesTotal?: number
+  bytesPerSecond?: number
+  accelerator?: string
+  oneTimeDownload?: boolean
 }
 
 export interface Adjustment {
@@ -211,11 +239,30 @@ export interface PrivacySummary {
   source: string
 }
 
+export interface PreflightStorage {
+  required_bytes: number
+  optional_bytes?: number
+  available_bytes?: number | null
+  consent_required: boolean
+  assets: Array<Record<string, unknown>>
+}
+
 export interface PreflightResult {
   state: 'ready' | 'warning' | 'blocked'
   selected_llm: string
   checks: PreflightCheck[]
   provider?: ProviderProfile
+  hardware?: Record<string, unknown>
+  storage?: PreflightStorage
+}
+
+export interface LocalSetupInventory {
+  state: 'ready' | 'setup-required' | string
+  runtime: Record<string, unknown> & { installed?: boolean; display_name?: string; size_bytes?: number }
+  models: Array<Record<string, unknown> & { asset_id?: string; installed?: boolean; display_name?: string; size_bytes?: number; license?: string }>
+  core_assets: Array<Record<string, unknown> & { asset_id?: string; installed?: boolean; display_name?: string; purpose?: string; integrity?: string; license?: string }>
+  storage: PreflightStorage
+  catalog: Array<Record<string, unknown>>
 }
 
 export interface SetupState {

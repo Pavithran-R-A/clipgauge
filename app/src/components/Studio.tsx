@@ -1,26 +1,29 @@
 import { useEffect, useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { api } from '../api'
-import type { JobSummary, PrivacySummary, ProviderTestResult } from '../types'
+import type { JobSummary, LocalSetupInventory, PrivacySummary, ProviderTestResult, StageProgress } from '../types'
 import KeyModal from './KeyModal'
+import clipgaugeMark from '../assets/clipgauge-mark.svg'
 
 const STAGE_ORDER = [
   'ingest', 'asr', 'diarize', 'events', 'candidates', 'score', 'camera', 'render'
 ]
 
 const STAGE_LABELS: Record<string, string> = {
-  ingest: 'INGEST',
-  asr: 'TRANSCRIBE',
-  diarize: 'SPEAKERS',
-  events: 'LISTEN',
-  candidates: 'SCAN',
-  score: 'JUDGE',
-  camera: 'DIRECT',
-  render: 'RENDER'
+  ingest: 'Preparing video',
+  asr: 'Transcribing speech',
+  diarize: 'Identifying speakers',
+  events: 'Understanding audio',
+  candidates: 'Finding strong moments',
+  score: 'Scoring clips',
+  camera: 'Smart reframing',
+  render: 'Creating clips'
 }
 
 const CAPTION_PRESETS = ['classic', 'beast', 'hormozi', 'minimal', 'karaoke-pop']
+const CAPTION_LABELS: Record<string, string> = { classic: 'Clean', beast: 'Bold Pop', hormozi: 'Punch', minimal: 'Minimal', 'karaoke-pop': 'Karaoke' }
 const PROVIDER_DEFAULTS: Record<string, { model: string; endpoint?: string; locality: string }> = {
+  'clipgauge-local': { model: 'clipgauge-local/qwen3-4b-q4_k_m', endpoint: 'http://127.0.0.1:8080/v1', locality: 'local' },
   gemini: { model: 'gemini-flash-latest', locality: 'cloud' },
   ollama: { model: 'auto', endpoint: 'http://127.0.0.1:11434', locality: 'local' },
   lmstudio: { model: 'auto', endpoint: 'http://127.0.0.1:1234/v1', locality: 'local' },
@@ -37,7 +40,7 @@ interface Props {
   running: boolean
   cancelling: boolean
   startedAt: number | null
-  stages: Record<string, { fraction: number; message: string }>
+  stages: Record<string, StageProgress>
   error: string | null
   notice: string | null
   onRun: (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) => void
@@ -50,15 +53,18 @@ interface Props {
 
 export default function Studio({ jobs, running, cancelling, startedAt, stages, error, notice, onRun, onCancel, onOpenLoop, onOpenAbout, onOpenJob, onResume }: Props) {
   const [source, setSource] = useState('')
-  const [provider, setProvider] = useState('gemini')
-  const [model, setModel] = useState(PROVIDER_DEFAULTS.gemini.model)
-  const [endpoint, setEndpoint] = useState(PROVIDER_DEFAULTS.gemini.endpoint ?? '')
+  const [provider, setProvider] = useState('clipgauge-local')
+  const [model, setModel] = useState(PROVIDER_DEFAULTS['clipgauge-local'].model)
+  const [endpoint, setEndpoint] = useState(PROVIDER_DEFAULTS['clipgauge-local'].endpoint ?? '')
   const [providerKey, setProviderKey] = useState('')
-  const [auth, setAuth] = useState(provider === 'custom' ? 'none' : 'bearer')
+  const [auth, setAuth] = useState('none')
   const [secretHeader, setSecretHeader] = useState('x-api-key')
   const [testResult, setTestResult] = useState<ProviderTestResult | null>(null)
   const [captions, setCaptions] = useState('classic')
   const [showKey, setShowKey] = useState(false)
+  const [showSetup, setShowSetup] = useState(false)
+  const [setupInventory, setSetupInventory] = useState<LocalSetupInventory | null>(null)
+  const [setupBusy, setSetupBusy] = useState(false)
   const [privacy, setPrivacy] = useState<PrivacySummary | null>(null)
   const [supportMessage, setSupportMessage] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
@@ -81,12 +87,34 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
     }
   }
 
+  async function openSetup() {
+    setShowSetup(true)
+    try {
+      setSetupInventory((await api.setupInventory()) as unknown as LocalSetupInventory)
+    } catch (error) {
+      setSupportMessage(`Setup inventory unavailable: ${String(error)}`)
+    }
+  }
+
+  async function runSetupAction(action: () => Promise<Record<string, unknown>>, success: string) {
+    setSetupBusy(true)
+    try {
+      await action()
+      setSupportMessage(success)
+      setSetupInventory((await api.setupInventory()) as unknown as LocalSetupInventory)
+    } catch (error) {
+      setSupportMessage(`Setup needs attention: ${String(error)}`)
+    } finally {
+      setSetupBusy(false)
+    }
+  }
+
   function chooseProvider(next: string) {
     setProvider(next)
     const defaults = PROVIDER_DEFAULTS[next] ?? PROVIDER_DEFAULTS.custom
     setModel(defaults.model)
     setEndpoint(defaults.endpoint ?? '')
-    setAuth(next === 'custom' ? 'none' : 'bearer')
+    setAuth(next === 'custom' || defaults.locality === 'local' ? 'none' : 'bearer')
     setSecretHeader('x-api-key')
     setProviderKey('')
     setTestResult(null)
@@ -102,7 +130,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
   }
 
   async function saveProviderKey() {
-    if (!providerKey.trim() || provider === 'ollama') return
+    if (!providerKey.trim() || ['ollama', 'lmstudio', 'clipgauge-local'].includes(provider)) return
     try {
       await api.saveProviderKey(`preset-${provider}`, providerKey.trim())
       setProviderKey('')
@@ -142,6 +170,40 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
     <div className="studio">
       <div className="grain" />
       {showKey && <KeyModal onClose={() => setShowKey(false)} />}
+      {showSetup && (
+        <div className="modal-scrim" onClick={() => setShowSetup(false)}>
+          <div className="modal setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-title" onClick={(event) => event.stopPropagation()}>
+            <header className="modal-head">
+              <div><p id="setup-title" className="audit-kicker">SETUP CENTER</p><p className="ig-intro">Verified local AI, one controlled download at a time.</p></div>
+              <button className="btn-ghost" onClick={() => setShowSetup(false)}>close</button>
+            </header>
+            <div className="setup-panel">
+              <div className="setup-panel-row"><strong>ClipGauge Local runtime</strong><span className={`chip ${setupInventory?.runtime?.installed ? 'chip-green' : 'chip-amber'}`}>{setupInventory?.runtime?.installed ? 'VERIFIED' : 'NOT INSTALLED'}</span></div>
+              <p className="ig-message">llama.cpp runs on loopback only. The archive is pinned and SHA-256 checked before extraction.</p>
+              {!setupInventory?.runtime?.installed && <button className="btn-secondary" disabled={setupBusy} onClick={() => runSetupAction(api.installLocalRuntime, 'ClipGauge Local runtime installed and verified.')}>{setupBusy ? 'WORKING…' : 'INSTALL RUNTIME'}</button>}
+            </div>
+            <div className="setup-panel">
+              <div className="setup-panel-row"><strong>Core components</strong><span className="mono setup-size">verified manifest</span></div>
+              {setupInventory?.core_assets?.map((asset) => (
+                <div className="setup-asset" key={String(asset.asset_id)}>
+                  <div><strong>{asset.display_name ?? asset.asset_id}</strong><span>{asset.purpose ?? 'ClipGauge component'}</span></div>
+                  <span className={`chip ${asset.installed ? 'chip-green' : 'chip-amber'}`}>{asset.installed ? 'READY' : String(asset.integrity ?? 'SETUP')}</span>
+                </div>
+              ))}
+            </div>
+            <div className="setup-panel">
+              <div className="setup-panel-row"><strong>Local models</strong><span className="mono setup-size">{setupInventory?.storage?.required_bytes ? `${(setupInventory.storage.required_bytes / 1024 ** 3).toFixed(1)} GB required` : 'size check pending'}</span></div>
+              {setupInventory?.models?.map((asset) => (
+                <div className="setup-asset" key={String(asset.asset_id)}>
+                  <div><strong>{asset.display_name ?? asset.asset_id}</strong><span className="mono">{asset.license ?? 'license in source manifest'}</span></div>
+                  {asset.installed ? <span className="chip chip-green">VERIFIED</span> : <button className="btn-secondary" disabled={setupBusy} onClick={() => runSetupAction(() => api.downloadLocalModel(String(asset.asset_id)), 'Local model downloaded and verified.')}>{setupBusy ? 'WORKING…' : 'DOWNLOAD'}</button>}
+                </div>
+              ))}
+            </div>
+            <p className="ob-fine">Catalog entries show the upstream license and provenance. Catalog-only models remain unavailable until their exact downloadable artifact is approved.</p>
+          </div>
+        </div>
+      )}
       {privacy && (
         <div className="modal-scrim" onClick={() => setPrivacy(null)}>
           <div className="modal privacy-modal" role="dialog" aria-modal="true" aria-labelledby="privacy-title" onClick={(event) => event.stopPropagation()}>
@@ -160,8 +222,8 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
         </div>
       )}
       <aside className="rail">
-        <header className="rail-brand">
-          <span className="rail-logo">ClipGauge</span>
+          <header className="rail-brand">
+            <div className="rail-brand-line"><img className="rail-mark" src={clipgaugeMark} alt="" /><span className="rail-logo">ClipGauge</span></div>
           <span className="rail-sub">local AI video clipper</span>
         </header>
         <div className="rail-jobs">
@@ -187,6 +249,9 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
                       <button className="btn-ghost" onClick={() => setShowKey(true)}>
             ◈ provider settings
           </button>
+          <button className="btn-ghost" onClick={openSetup}>
+            ▣ setup center
+          </button>
 
           <button className="btn-ghost" onClick={onOpenLoop}>
             ⟳ instagram loop
@@ -206,7 +271,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
       <main className="stage-area">
         <section className="input-block">
           <h1 className="input-heading">
-            FEED IT<span className="amber"> AN HOUR.</span>
+            Create clips
           </h1>
           <div
             className="input-row source-drop"
@@ -227,14 +292,14 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
               disabled={running}
               aria-label="Choose a local video file"
             >
-              CHOOSE FILE
+              Choose video
             </button>
             <button
               className="btn-primary"
               onClick={() => onRun(source.trim(), provider, captions, model || undefined, endpoint || undefined, auth, auth === 'custom_secret_header' ? secretHeader : undefined)}
               disabled={running || !source.trim()}
             >
-              {running ? 'WORKING' : 'CUT IT'}
+              {running ? 'Working…' : 'Create clips'}
             </button>
             {running && (
               <button
@@ -258,7 +323,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
                   disabled={running}
                   aria-pressed={provider === kind}
                 >
-                  {kind}
+                  {kind === 'clipgauge-local' ? 'ClipGauge Local' : kind}
                 </button>
               ))}
             </div>
@@ -283,7 +348,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
                   {auth === 'custom_secret_header' && <input value={secretHeader} onChange={(event) => setSecretHeader(event.target.value)} disabled={running} placeholder="secret header name" aria-label="Custom secret header name" />}
                 </>
               )}
-              {provider !== 'ollama' && auth !== 'none' && (
+              {!['ollama', 'lmstudio', 'clipgauge-local'].includes(provider) && auth !== 'none' && (
                 <>
                   <label className="field-label" htmlFor="provider-key">credential</label>
                   <input id="provider-key" type="password" value={providerKey} onChange={(event) => setProviderKey(event.target.value)} disabled={running} placeholder="stored in OS vault; optional until Test Connection" autoComplete="off" />
@@ -302,7 +367,7 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
                   onClick={() => setCaptions(preset)}
                   disabled={running}
                 >
-                  {preset}
+                  {CAPTION_LABELS[preset] ?? preset}
                 </button>
               ))}
             </div>
@@ -314,23 +379,26 @@ export default function Studio({ jobs, running, cancelling, startedAt, stages, e
             {STAGE_ORDER.filter((s) => stages[s] || running).map((name, i) => {
               const st = stages[name]
               const state = !st ? 'idle' : st.fraction >= 1 ? 'done' : 'live'
+              const label = st?.displayStage ?? STAGE_LABELS[name] ?? name.replace('_', ' ')
+              const eta = st?.etaSeconds != null ? ` · ETA ${Math.max(0, Math.round(st.etaSeconds))}s` : ''
+              const accelerator = st?.accelerator ? ` · ${st.accelerator}` : ''
               return (
                 <div className={`deck-row ${state}`} key={name} style={{ animationDelay: `${i * 40}ms` }}>
-                  <span className="deck-name mono">{STAGE_LABELS[name] ?? name.toUpperCase()}</span>
+                  <span className="deck-name mono">{label}</span>
                   <div
                     className="deck-bar"
                     role="progressbar"
                     aria-label={`${STAGE_LABELS[name] ?? name} stage progress`}
                     aria-valuemin={0}
                     aria-valuemax={100}
-                    aria-valuenow={st && st.fraction >= 0 ? Math.round(Math.min(1, st.fraction) * 100) : undefined}
+                    aria-valuenow={st && !st.indeterminate && st.fraction >= 0 ? Math.round(Math.min(1, st.fraction) * 100) : undefined}
                   >
                     <div
-                      className={`deck-fill ${st && st.fraction < 0 ? 'indeterminate' : ''}`}
-                      style={st && st.fraction >= 0 ? { width: `${Math.min(100, st.fraction * 100)}%` } : undefined}
+                      className={`deck-fill ${st && (st.indeterminate || st.fraction < 0) ? 'indeterminate' : ''}`}
+                      style={st && !st.indeterminate && st.fraction >= 0 ? { width: `${Math.min(100, st.fraction * 100)}%` } : undefined}
                     />
                   </div>
-                  <span className="deck-msg">{st?.message ?? ''}</span>
+                  <span className="deck-msg">{st?.operation ?? st?.message ?? ''}{eta}{accelerator}</span>
                 </div>
               )
             })}

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import httpx
 
-from . import config, protocol, runtime
+from . import config, hardware, local_runtime, protocol, runtime
 from .ingest import ytdlp
 from .models import registry, specs  # noqa: F401 - register concrete models
 from .render import ffmpeg_bin
@@ -120,6 +120,27 @@ def _provider(checks: list[dict], profile: providers_mod.ProviderProfile) -> Non
             provider=profile.kind,
         )
         return
+    if profile.kind == "clipgauge-local":
+        try:
+            managed = local_runtime.LocalRuntime()
+            binary = managed.binary_path()
+            model = managed.model_path(profile.model)
+            model_spec = local_runtime.MODEL_CATALOG[profile.model]
+        except (KeyError, local_runtime.LocalRuntimeError) as error:
+            _check(checks, "clipgauge-local", "blocked", "ClipGauge Local is not available for the selected model or platform.", "Open Setup Center and choose a verified local model.", error=str(error), provider=profile.kind)
+            return
+        if not binary.is_file():
+            _check(checks, "clipgauge-local-runtime", "blocked", "ClipGauge Local runtime is not installed yet.", "Open Setup Center to install the verified llama.cpp runtime.", path=str(binary), expected_size=managed.runtime_asset().get("size"), provider=profile.kind)
+            return
+        if not model.is_file():
+            _check(checks, "clipgauge-local-model", "blocked", f"{model_spec.display_name} is not installed yet.", "Open Setup Center to download the verified local model.", expected_size=model_spec.size_bytes, provider=profile.kind, model=profile.model)
+            return
+        digest = runtime.sha256_file(model)
+        if digest.lower() != model_spec.sha256.lower():
+            _check(checks, "clipgauge-local-model", "blocked", "The ClipGauge Local model failed SHA-256 verification.", "Delete the invalid model and retry the verified download.", sha256=digest, expected_size=model_spec.size_bytes, provider=profile.kind, model=profile.model)
+            return
+        _check(checks, "clipgauge-local", "ready", "ClipGauge Local runtime and model are verified.", provider=profile.kind, model=profile.model, endpoint=profile.endpoint_identity, capabilities=profile.capabilities.to_dict())
+        return
     if profile.kind in {"ollama", "lmstudio"}:
         try:
             listing_path = "/api/tags" if profile.kind == "ollama" else "/models"
@@ -152,13 +173,42 @@ def _provider(checks: list[dict], profile: providers_mod.ProviderProfile) -> Non
     )
 
 
+def _storage_estimate(checks: list[dict], free_bytes: int | None) -> dict:
+    assets = []
+    for check in checks:
+        details = check.get("details") or {}
+        expected = details.get("expected_size")
+        if not isinstance(expected, int) or expected <= 0:
+            continue
+        name = str(check.get("name", "asset"))
+        assets.append(
+            {
+                "asset_id": name,
+                "display_name": name.removeprefix("model:").replace("_", " "),
+                "size_bytes": expected,
+                "required": True,
+                "installed": check.get("state") == "ready",
+                "status": check.get("state"),
+            }
+        )
+    required_bytes = sum(item["size_bytes"] for item in assets if not item["installed"])
+    return {
+        "required_bytes": required_bytes,
+        "available_bytes": free_bytes,
+        "consent_required": required_bytes >= 100 * 1024 * 1024,
+        "assets": assets,
+    }
+
+
 def run(selected_llm: providers_mod.ProviderProfile | str = "gemini") -> dict:
     checks: list[dict] = []
     system = platform.system()
     machine = platform.machine()
     _check(checks, "platform", "ready" if system in SUPPORTED_SYSTEMS and machine in SUPPORTED_MACHINES else "warning", f"Detected {system}/{machine}.", "Use a supported desktop build if runtime behavior is unexpected.", system=system, architecture=machine)
+    free_bytes: int | None = None
     try:
         usage = shutil.disk_usage(config.home_dir().parent)
+        free_bytes = usage.free
         if usage.free < MIN_FREE_BYTES:
             _check(checks, "disk", "blocked", "Less than 1 GiB is free on the managed data volume.", "Free disk space before downloading models or rendering.", free_bytes=usage.free)
         else:
@@ -178,9 +228,12 @@ def run(selected_llm: providers_mod.ProviderProfile | str = "gemini") -> dict:
     _provider(checks, profile)
     states = {item["state"] for item in checks}
     overall = "blocked" if "blocked" in states else "warning" if "warning" in states else "ready"
+    capabilities = hardware.snapshot(config.home_dir())
     return {
         "state": overall,
         "checks": checks,
+        "hardware": capabilities,
+        "storage": _storage_estimate(checks, free_bytes),
         "selected_llm": profile.kind,
         "provider": {
             "id": profile.id,

@@ -10,13 +10,16 @@ const CODE_NOTICES = [
 ]
 
 export default function About({ onBack }: Props) {
+  const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent
+  const runtimePlatform = userAgent.includes('Windows') ? 'Windows' : userAgent.includes('Mac') ? 'macOS' : userAgent.includes('Linux') ? 'Linux' : 'Desktop platform'
+
   return (
     <div className="onboarding about-page">
       <div className="grain" />
       <main className="about-card" aria-labelledby="about-title">
         <header className="modal-head">
           <div>
-            <p className="ob-kicker">ClipGauge v0.2.1</p>
+            <p className="ob-kicker">ClipGauge v0.3.0 / creator edition</p>
             <h1 id="about-title" className="ob-h2">ABOUT / LICENSES</h1>
           </div>
           <button className="btn-ghost" onClick={onBack}>back</button>
@@ -65,7 +68,7 @@ export default function About({ onBack }: Props) {
         <footer className="about-footer">
           <span className="mono">Data root: ~/.clipgauge</span>
           <span className="mono">Bundle: io.github.pavithranra.clipgauge</span>
-          <span className="mono">Linux v0.2.1 artifact: unsigned</span>
+          <span className="mono">Platform: {runtimePlatform} · release metadata in Diagnostics</span>
         </footer>
       </main>
     </div>

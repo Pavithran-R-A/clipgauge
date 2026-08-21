@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { api } from './api'
-import type { JobResults, JobSummary, PipelineEvent, SetupState } from './types'
+import type { JobResults, JobSummary, PipelineEvent, SetupState, StageProgress } from './types'
 import Onboarding from './components/Onboarding'
 import Studio from './components/Studio'
 import Review from './components/Review'
@@ -11,13 +11,25 @@ import './styles.css'
 
 type View = 'boot' | 'onboarding' | 'studio' | 'review' | 'loop' | 'about'
 
+const FRIENDLY_FAILURES: Record<string, string> = {
+  SPEAKER_MODEL_DOWNLOAD_FAILED: 'Speaker analysis couldn’t start because its model could not be downloaded. Retry the model download or continue without speaker-aware reframing.',
+  SPEAKER_MODEL_VERIFY_FAILED: 'Speaker analysis couldn’t start because the downloaded model did not pass verification. Open Setup Center and repair the model.',
+  SPEAKER_MODEL_LOAD_FAILED: 'Speaker analysis couldn’t start because the speaker model could not be loaded. Retry the model download or continue without speaker-aware reframing.',
+  SPEAKER_AUDIO_LOAD_FAILED: 'Speaker analysis couldn’t read the audio for this video. Retry the job or continue without speaker-aware reframing.',
+  SPEAKER_ANALYSIS_FAILED: 'Speaker analysis could not complete. Retry the job or continue without speaker-aware reframing.',
+  SPEAKER_CLUSTER_FAILED: 'Speaker grouping could not complete. Retry the job or continue without speaker-aware reframing.',
+  PROVIDER_UNAVAILABLE: 'The selected AI is unavailable. Open Setup Center or choose another provider.',
+  YTDLP_ATTESTATION_REQUIRED: 'YouTube needs an additional playback verification step. Enable YouTube compatibility in Setup Center and retry.',
+  YTDLP_LOGIN_REQUIRED: 'This video requires a signed-in YouTube session. Use a browser session only if you explicitly consent.',
+}
+
 export default function App() {
   const [view, setView] = useState<View>('boot')
   const [setup, setSetup] = useState<SetupState | null>(null)
   const [jobs, setJobs] = useState<JobSummary[]>([])
   const [activeJob, setActiveJob] = useState<string | null>(null)
   const [results, setResults] = useState<JobResults | null>(null)
-  const [stages, setStages] = useState<Record<string, { fraction: number; message: string }>>({})
+  const [stages, setStages] = useState<Record<string, StageProgress>>({})
   const [running, setRunning] = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null)
@@ -59,13 +71,24 @@ export default function App() {
         setActiveJob(payload.job_id)
         setResults(null)
       } else if (payload.event === 'progress' && payload.stage) {
-        setStages((prev) => ({
-          ...prev,
-          [payload.stage!]: {
-            fraction: payload.fraction ?? -1,
-            message: payload.message ?? ''
-          }
-        }))
+          setStages((prev) => ({
+            ...prev,
+            [payload.stage!]: {
+              fraction: payload.fraction ?? -1,
+              message: payload.message ?? '',
+              displayStage: payload.display_stage,
+              operation: payload.operation,
+              indeterminate: payload.indeterminate ?? (payload.fraction ?? -1) < 0,
+              elapsedSeconds: payload.elapsed_seconds,
+              stageElapsedSeconds: payload.stage_elapsed_seconds,
+              etaSeconds: payload.eta_seconds,
+              bytesDone: payload.bytes_done,
+              bytesTotal: payload.bytes_total,
+              bytesPerSecond: payload.bytes_per_second,
+              accelerator: payload.accelerator,
+              oneTimeDownload: payload.one_time_download
+            }
+          }))
       } else if (payload.event === 'terminal') {
         setRunning(false)
         setCancelling(false)
@@ -82,9 +105,9 @@ export default function App() {
           })
         } else if (!payload.ok) {
           setRunNotice(null)
-          const code = payload.code ? ` [${payload.code}]` : ''
-          const diagnostic = payload.diagnostic_id ? ` Diagnostic ID: ${payload.diagnostic_id}.` : ''
-          setRunError(`${payload.message ?? 'Pipeline failed.'}${code}${diagnostic}`)
+          const friendly = payload.code ? FRIENDLY_FAILURES[payload.code] : undefined
+          const diagnostic = payload.diagnostic_id ? ` Technical details: ${payload.diagnostic_id}.` : ''
+          setRunError(`${friendly ?? payload.message ?? 'Pipeline failed.'}${diagnostic}`)
         }
       } else if (payload.event === 'result') {
         // Backward-compatible handling for one-shot edit commands.
