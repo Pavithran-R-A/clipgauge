@@ -212,50 +212,6 @@ fn now_ms() -> u128 {
         .unwrap_or_default()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{LifecycleState, ProcessManager, ReserveError};
-
-    #[test]
-    fn duplicate_and_concurrent_jobs_are_rejected() {
-        let mut manager = ProcessManager::new();
-        manager.reserve("job-a").unwrap();
-        assert_eq!(manager.reserve("job-a"), Err(ReserveError::AlreadyActive));
-        assert_eq!(manager.reserve("job-b"), Err(ReserveError::Busy));
-    }
-
-    #[test]
-    fn cancellation_is_distinct_and_finishes_as_cancelled() {
-        let mut manager = ProcessManager::new();
-        manager.reserve("pending").unwrap();
-        manager
-            .adopt_job_id("pending", "20260819-120000-abcdef")
-            .unwrap();
-        manager.register_process("pending", 123).unwrap();
-        assert_eq!(manager.request_cancel("20260819-120000-abcdef"), Ok(123));
-        assert!(manager.is_cancel_requested("pending"));
-        assert_eq!(
-            manager.finish("pending", false),
-            Some(LifecycleState::Cancelled)
-        );
-    }
-
-    #[test]
-    fn stale_lease_reconciliation_does_not_reuse_live_process_identity() {
-        let mut manager = ProcessManager::new();
-        manager.reserve("job-a").unwrap();
-        manager
-            .adopt_job_id("job-a", "20260819-120000-abcdef")
-            .unwrap();
-        manager.register_process("job-a", 123).unwrap();
-        let lease = manager.lease("job-a", "0.1.0", 1).unwrap();
-        let stale = ProcessManager::mark_interrupted(&lease);
-        assert_eq!(stale.state, LifecycleState::Interrupted);
-        assert_ne!(stale.session_id, "other-session");
-        assert_eq!(stale.process_id, 123);
-    }
-}
-
 pub fn terminate_owned(process_id: u32) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -305,3 +261,47 @@ pub fn configure_process_group(command: &mut std::process::Command) {
 
 #[cfg(not(unix))]
 pub fn configure_process_group(_command: &mut std::process::Command) {}
+
+#[cfg(test)]
+mod tests {
+    use super::{LifecycleState, ProcessManager, ReserveError};
+
+    #[test]
+    fn duplicate_and_concurrent_jobs_are_rejected() {
+        let mut manager = ProcessManager::new();
+        manager.reserve("job-a").unwrap();
+        assert_eq!(manager.reserve("job-a"), Err(ReserveError::AlreadyActive));
+        assert_eq!(manager.reserve("job-b"), Err(ReserveError::Busy));
+    }
+
+    #[test]
+    fn cancellation_is_distinct_and_finishes_as_cancelled() {
+        let mut manager = ProcessManager::new();
+        manager.reserve("pending").unwrap();
+        manager
+            .adopt_job_id("pending", "20260819-120000-abcdef")
+            .unwrap();
+        manager.register_process("pending", 123).unwrap();
+        assert_eq!(manager.request_cancel("20260819-120000-abcdef"), Ok(123));
+        assert!(manager.is_cancel_requested("pending"));
+        assert_eq!(
+            manager.finish("pending", false),
+            Some(LifecycleState::Cancelled)
+        );
+    }
+
+    #[test]
+    fn stale_lease_reconciliation_does_not_reuse_live_process_identity() {
+        let mut manager = ProcessManager::new();
+        manager.reserve("job-a").unwrap();
+        manager
+            .adopt_job_id("job-a", "20260819-120000-abcdef")
+            .unwrap();
+        manager.register_process("job-a", 123).unwrap();
+        let lease = manager.lease("job-a", "0.1.0", 1).unwrap();
+        let stale = ProcessManager::mark_interrupted(&lease);
+        assert_eq!(stale.state, LifecycleState::Interrupted);
+        assert_ne!(stale.session_id, "other-session");
+        assert_eq!(stale.process_id, 123);
+    }
+}
