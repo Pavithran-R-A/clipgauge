@@ -1,152 +1,72 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { ArrowRight, Check, Cloud, Cpu, Download, LockKeyhole, ShieldCheck, Square } from 'lucide-react'
 import { listen } from '@tauri-apps/api/event'
 import { api } from '../api'
 import type { LocalSetupInventory, SetupProgressEvent } from '../types'
 import { formatBytes, formatDuration, formatRate, meaningfulEta, progressPercent } from '../setupFormatting'
 
-interface Props {
-  onDone: () => void
-}
-
-const BALANCED_MODEL = 'clipgauge-local/qwen3-4b-q4_k_m'
+interface Props { onDone: () => void }
 
 export default function Onboarding({ onDone }: Props) {
   const [step, setStep] = useState(0)
   const [inventory, setInventory] = useState<LocalSetupInventory | null>(null)
+  const [approved, setApproved] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [setupMessage, setSetupMessage] = useState<string | null>(null)
-  const [setupOperationId, setSetupOperationId] = useState<string | null>(null)
-  const [lastSetupArgs, setLastSetupArgs] = useState<string[] | null>(null)
-  const [setupProgress, setSetupProgress] = useState<SetupProgressEvent | null>(null)
-  const [downloadConsent, setDownloadConsent] = useState(false)
+  const [operationId, setOperationId] = useState<string | null>(null)
+  const [progress, setProgress] = useState<SetupProgressEvent | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+  const [startedAt, setStartedAt] = useState<number | null>(null)
+  const [now, setNow] = useState(() => Date.now())
+  const queueRef = useRef<string[][]>([])
 
-  const refreshInventory = () => {
-    api.setupInventory()
-      .then((value) => setInventory(value as unknown as LocalSetupInventory))
-      .catch(() => setInventory(null))
-  }
+  const refresh = () => api.setupInventory().then((value) => setInventory(value as unknown as LocalSetupInventory)).catch(() => setInventory(null))
 
   useEffect(() => {
-    refreshInventory()
-    let unlisten: (() => void) | undefined
+    refresh()
+    let stop: (() => void) | undefined
     void listen<SetupProgressEvent>('setup-event', ({ payload }) => {
-      setSetupProgress(payload)
+      setProgress(payload)
       if (payload.event === 'terminal') {
-        setBusy(false)
-        setSetupOperationId(null)
-        setSetupMessage(payload.ok ? (payload.message ?? 'Setup completed and verified.') : (payload.message ?? 'Setup needs attention; retry the selected action.'))
-        refreshInventory()
+        setOperationId(null)
+        const next = queueRef.current.shift()
+        if (next) void begin(next, 'Moving to the next local component.')
+        else { setBusy(false); setMessage(payload.ok ? 'Your local setup is ready.' : payload.message ?? 'Setup needs attention. You can retry it.'); void refresh() }
       }
-    }).then((stop) => { unlisten = stop })
-    return () => { unlisten?.() }
+    }).then((unlisten) => { stop = unlisten })
+    return () => stop?.()
   }, [])
 
+  useEffect(() => {
+    if (!startedAt) return
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [startedAt])
+
   const runtimeReady = Boolean(inventory?.runtime?.installed)
-  const balancedModel = useMemo(
-    () => inventory?.models.find((model) => model.asset_id === BALANCED_MODEL),
-    [inventory]
-  )
-  const modelReady = Boolean(balancedModel?.installed)
-  const storageEstimate = inventory?.storage?.required_bytes
-  const setupPercent = progressPercent(setupProgress)
-  const setupEta = meaningfulEta(setupProgress)
-  const setupRate = formatRate(setupProgress?.bytes_per_second)
+  const balanced = inventory?.models?.find((model) => String(model.display_name ?? '').toLowerCase().includes('balanced')) ?? inventory?.models?.[0]
+  const modelReady = Boolean(balanced?.installed)
+  const remaining = [!runtimeReady, !modelReady].filter(Boolean).length
+  const percent = progressPercent(progress)
+  const eta = meaningfulEta(progress)
+  const elapsed = progress?.elapsed_seconds ?? (startedAt ? Math.max(0, Math.floor((now - startedAt) / 1000)) : 0)
 
-  const installRuntime = async () => {
-    if (!downloadConsent) {
-      setSetupMessage('Please approve the one-time managed download plan first.')
-      return
-    }
-    setLastSetupArgs(['install-runtime'])
+  async function begin(args: string[], text: string) {
     setBusy(true)
-    setSetupProgress({ operation: 'Preparing runtime setup…', message: 'Preparing verified runtime download…', state: 'STARTING', elapsed_seconds: 0, one_time_download: true })
-    try {
-      setSetupOperationId(await api.startSetup(['install-runtime']))
-      setSetupMessage('Runtime setup started; verified progress is shown below.')
-    } catch (error) {
-      setBusy(false)
-      setSetupMessage(`Runtime setup could not start: ${String(error)}`)
-    }
+    setStartedAt((value) => value ?? Date.now())
+    setProgress({ event: 'progress', operation: 'Preparing setup…', message: 'Checking the approved local downloads…', state: 'STARTING', elapsed_seconds: 0, one_time_download: true })
+    setMessage(text)
+    try { setOperationId(await api.startSetup(args)) } catch (error) { setBusy(false); setMessage(`Setup could not start: ${String(error)}`) }
   }
 
-  const downloadModel = async () => {
-    if (!downloadConsent) {
-      setSetupMessage('Please approve the one-time managed download plan first.')
-      return
-    }
-    setLastSetupArgs(['download-model', BALANCED_MODEL])
-    setBusy(true)
-    setSetupProgress({ operation: 'Preparing balanced model setup…', message: 'Preparing verified model download…', state: 'STARTING', elapsed_seconds: 0, one_time_download: true })
-    try {
-      setSetupOperationId(await api.startSetup(['download-model', BALANCED_MODEL]))
-      setSetupMessage('Balanced model setup started; verified progress is shown below.')
-    } catch (error) {
-      setBusy(false)
-      setSetupMessage(`Model setup could not start: ${String(error)}`)
-    }
+  async function installLocal() {
+    if (!approved) { setMessage('Approve the one-time download plan first.'); return }
+    const args: string[][] = []
+    if (!runtimeReady) args.push(['install-runtime'])
+    if (!modelReady && balanced?.asset_id) args.push(['download-model', String(balanced.asset_id)])
+    if (!args.length) { setMessage('ClipGauge Local is already ready.'); return }
+    queueRef.current = args.slice(1)
+    await begin(args[0], 'Installing the local components ClipGauge needs.')
   }
 
-  return (
-    <div className="onboarding">
-      <div className="grain" />
-      {step === 0 && (
-        <section className="ob-step" key="s0">
-          <p className="ob-kicker">ClipGauge / the editing bay</p>
-          <h1 className="ob-title">TURN LONG VIDEO<br />INTO <span className="amber">MOMENTS</span>.</h1>
-          <p className="ob-body">ClipGauge listens for the parts people replay: a sharp line, a laugh, a turn in the story. It shows its work, keeps checkpoints, and lets you choose where intelligence runs.</p>
-          <button className="btn-primary" onClick={() => setStep(1)}>Set up the bay</button>
-        </section>
-      )}
-      {step === 1 && (
-        <section className="ob-step" key="s1">
-          <p className="ob-kicker">01 / choose your first run</p>
-          <h2 className="ob-h2">Start local, bring a key, or bring your own endpoint.</h2>
-          <div className="ob-cards">
-            <div className={`ob-card ${runtimeReady && modelReady ? 'done' : ''}`}>
-              <div className="ob-card-head">
-                <h3>ClipGauge Local <span className={`led ${runtimeReady && modelReady ? 'led-on' : 'led-half'}`} /></h3>
-                <span className="chip chip-amber">PRIVATE BY DEFAULT</span>
-              </div>
-              <p>{runtimeReady && modelReady ? 'Ready on this computer. Transcript scoring stays on the loopback runtime.' : 'A managed llama.cpp runtime and a curated Qwen model run on this computer. No paid API key is required.'}</p>
-              <div className="setup-status mono">
-                <span>{runtimeReady ? 'runtime verified' : 'runtime not installed'}</span>
-                <span>{modelReady ? 'balanced model verified' : 'balanced model not installed'}</span>
-              </div>
-              <div className="ob-consent-inline"><label><input type="checkbox" checked={downloadConsent} onChange={(event) => setDownloadConsent(event.target.checked)} /> I approve ClipGauge downloading the listed one-time assets to this computer after each explicit action.</label></div>
-              <div className="ob-actions">
-                {!runtimeReady && <button className="btn-secondary" disabled={busy || !downloadConsent} onClick={installRuntime}>{busy ? 'Working…' : 'Install runtime'}</button>}
-                {runtimeReady && !modelReady && <button className="btn-secondary" disabled={busy || !downloadConsent} onClick={downloadModel}>{busy ? 'Working…' : `Download balanced model (${formatBytes(balancedModel?.size_bytes)})`}</button>}
-              </div>
-              <p className="ob-fine">The runtime is loopback-only and the model is SHA-256 verified before use.</p>
-            </div>
-            <div className="ob-card">
-              <h3>Curated cloud / bring a key</h3>
-              <p>Gemini, OpenRouter, Groq, Cloudflare Workers AI, Hugging Face, and Cerebras can be configured in Studio. Credentials stay in the operating-system vault.</p>
-            </div>
-            <div className="ob-card">
-              <h3>Custom compatible endpoint</h3>
-              <p>Configure an OpenAI-compatible URL, model, and credential header. Remote HTTP is rejected; loopback HTTP is reserved for local services.</p>
-            </div>
-          </div>
-          {setupMessage && <p className="ob-notice" role="status">{setupMessage}</p>}
-          {setupProgress && <div className="setup-progress onboarding-progress" role="status" aria-live="polite"><div className="setup-panel-row"><strong>{setupProgress.display_name ?? setupProgress.operation ?? 'Setup'}</strong><button className="btn-ghost" disabled={!setupOperationId} onClick={() => setupOperationId && api.cancelSetup(setupOperationId).then(() => setSetupMessage('Cancelling setup; verified files remain reusable.')).catch((error) => setSetupMessage(`Could not cancel setup: ${String(error)}`))}>cancel</button></div><p className="ig-message">{setupProgress.message ?? 'Downloading…'}</p><div className="setup-progress-facts"><span>{setupProgress.bytes_total ? `${formatBytes(setupProgress.bytes_done ?? 0)} / ${formatBytes(setupProgress.bytes_total)}` : 'Downloading…'}</span>{setupPercent != null && <span>{setupPercent}%</span>}{setupRate && <span>{setupRate}</span>}{setupEta && <span>{setupEta} remaining</span>}<span>elapsed {formatDuration(setupProgress.elapsed_seconds)}</span>{setupProgress.one_time_download && <span>One-time download</span>}</div>{setupProgress.bytes_total && setupPercent != null ? <div className="progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={setupPercent}><div className="progress-fill" style={{ width: `${setupPercent}%` }} /></div> : <div className="progress-track" role="progressbar" aria-label="Download in progress"><div className="progress-fill progress-indeterminate" /></div>}{!busy && setupProgress.event !== 'terminal' && lastSetupArgs && <button className="btn-secondary" onClick={() => { setBusy(true); setSetupProgress({ operation: 'Retrying verified setup…', message: 'Retrying the selected managed operation…', state: 'STARTING', elapsed_seconds: 0, one_time_download: true }); api.startSetup(lastSetupArgs).then(setSetupOperationId).catch((error) => { setBusy(false); setSetupMessage(`Retry could not start: ${String(error)}`) }) }}>RETRY</button>}</div>}
-          <p className="ob-fine">You can switch providers per run. Existing jobs retain their provider snapshot when resumed. The consent checkbox above is required before any managed download begins.</p>
-          <button className="btn-primary" onClick={() => setStep(2)}>Continue</button>
-        </section>
-      )}
-      {step === 2 && (
-        <section className="ob-step" key="s2">
-          <p className="ob-kicker">02 / your data, your call</p>
-          <h2 className="ob-h2">A first run may download a few gigabytes.</h2>
-          <p className="ob-body">ClipGauge keeps speech, audio, and local-AI models under <span className="mono">~/.clipgauge</span>. It asks before large downloads, verifies every managed asset, and keeps job checkpoints so an interrupted run can resume.</p>
-          <div className="ob-consent">
-            <span className="ob-consent-label mono">ESTIMATED REQUIRED STORAGE</span>
-            <strong>{formatBytes(storageEstimate)}</strong>
-            <span>Provider credentials remain in the operating-system vault. ClipGauge has no telemetry account.</span>
-          </div>
-          <button className="btn-primary" onClick={onDone}>Open the studio</button>
-        </section>
-      )}
-    </div>
-  )
+  return <div className="onboarding-page"><div className="onboarding-ornament" aria-hidden="true" /><header className="onboarding-brand"><span className="brand-mark" aria-hidden="true"><span /></span><strong>ClipGauge</strong><span>First run</span></header>{step === 0 && <main className="onboarding-hero"><div className="hero-copy"><p className="section-eyebrow">Make moments worth sharing</p><h1>Turn long videos into clips people remember.</h1><p className="page-lede">ClipGauge finds the parts with energy, reframes them for vertical video, and gives you captions you can tune before you export.</p><button type="button" className="button button-primary" onClick={() => setStep(1)}>Set up ClipGauge <ArrowRight size={17} aria-hidden="true" /></button></div><div className="hero-preview"><div className="preview-window"><div className="preview-window-top"><span /><span /><span /></div><div className="preview-video"><span className="preview-caption">make your<br /><b>next moment</b></span><span className="preview-play"><ArrowRight size={18} aria-hidden="true" /></span></div></div></div></main>}{step === 1 && <main className="onboarding-step"><div className="step-heading"><p className="section-eyebrow">Step 1 of 2</p><h1>Start with a private setup.</h1><p className="page-lede">ClipGauge Local runs scoring on this computer. There is no account and no paid API key required.</p></div><section className="onboarding-options"><article className={`onboarding-option ${runtimeReady && modelReady ? 'is-ready' : ''}`}><div className="option-icon"><Cpu size={21} aria-hidden="true" /></div><div className="option-copy"><div className="option-title"><h2>ClipGauge Local</h2><span className="status-pill tone-ready"><span className="status-dot" aria-hidden="true" />{runtimeReady && modelReady ? 'Ready' : 'Recommended'}</span></div><p>Private scoring on this computer. Downloaded components are verified and reused for future videos.</p><div className="option-facts"><span><Check size={14} aria-hidden="true" /> No API key</span><span><Check size={14} aria-hidden="true" /> Works offline after setup</span></div></div></article><article className="onboarding-option subdued"><div className="option-icon"><Cloud size={21} aria-hidden="true" /></div><div className="option-copy"><h2>Use another AI later</h2><p>You can connect OpenRouter Free, Gemini, Groq, Ollama, LM Studio, or another provider from AI Providers.</p></div></article></section><div className="onboarding-consent"><label><input type="checkbox" checked={approved} onChange={(event) => setApproved(event.target.checked)} /><span><strong>Approve the local download plan</strong><small>ClipGauge will download only the components shown here, one time, to this computer.</small></span></label><div className="consent-total"><span>Remaining components</span><strong>{remaining ? `${remaining} to install` : 'Already ready'}</strong></div></div>{(remaining > 0 || busy) && <button type="button" className="button button-primary" onClick={installLocal} disabled={busy || !approved}><Download size={17} aria-hidden="true" />{busy ? 'Installing…' : 'Install required components'}</button>}{message && <p className="inline-message" role="status">{message}</p>}{progress && <section className="download-tray onboarding-tray" aria-live="polite"><div className="download-tray-head"><div><p className="section-eyebrow">Setup progress</p><h2>{progress.display_name ?? progress.operation ?? 'Preparing setup'}</h2></div><button type="button" className="button button-secondary" onClick={() => operationId && api.cancelSetup(operationId)} disabled={!operationId}><Square size={13} aria-hidden="true" /> Cancel</button></div><p className="download-message">{progress.message ?? 'Preparing verified components…'}</p><div className="progress-facts"><span>{progress.bytes_total ? `${formatBytes(progress.bytes_done ?? 0)} / ${formatBytes(progress.bytes_total)}` : 'Calculating size…'}</span>{percent != null && <span>{percent}%</span>}{formatRate(progress.bytes_per_second) && <span>{formatRate(progress.bytes_per_second)}</span>}{eta && <span>{eta} remaining</span>}<span>{formatDuration(elapsed)} elapsed</span></div><div className="progress-track" role="progressbar" aria-label="Setup download progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent ?? undefined}><div className={`progress-fill ${percent == null ? 'is-indeterminate' : ''}`} style={percent != null ? { width: `${percent}%` } : undefined} /></div></section>}<div className="onboarding-next"><span><LockKeyhole size={15} aria-hidden="true" /> You can change AI providers any time.</span><button type="button" className="text-button" onClick={() => setStep(2)}>Continue <ArrowRight size={15} aria-hidden="true" /></button></div></main>}{step === 2 && <main className="onboarding-step final-step"><div className="final-icon"><ShieldCheck size={30} aria-hidden="true" /></div><p className="section-eyebrow">Step 2 of 2</p><h1>You’re ready to create.</h1><p className="page-lede">Your videos and job files stay on this computer unless you choose a cloud provider or a public video link.</p><div className="final-facts"><div><span>Local model</span><strong>{modelReady ? 'Installed and ready' : 'Can be installed from Setup & Storage'}</strong></div><div><span>Storage location</span><strong className="technical-text">~/.clipgauge</strong></div></div><button type="button" className="button button-primary" onClick={onDone}>Open Create <ArrowRight size={17} aria-hidden="true" /></button></main>}</div>
 }

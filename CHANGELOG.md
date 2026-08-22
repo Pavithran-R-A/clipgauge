@@ -2,6 +2,38 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.0] — 2026-08-22
+
+ClipGauge v0.5.0 brings the app back to the creator's workflow: add a video, choose how scoring runs, review the reason for each suggestion, and export the clip you want.
+
+### Added
+
+- A creator-first **Create** screen with video drop zone, link input, provider choice, caption style, and a readable processing timeline.
+- **Sessions**, **AI Providers**, **Integrations**, **Privacy**, and **Help & Diagnostics** screens with clear routes back to Create.
+- A provider center that keeps ClipGauge Local, OpenRouter Free, Gemini, Groq, Cloudflare Workers AI, Hugging Face, Cerebras, Ollama, LM Studio, and Custom OpenAI-compatible endpoints discoverable.
+- A grouped Setup & Storage flow with one consented install action, resumable downloads, and honest size states when an estimate is not yet available.
+- Separate Pexels stock visuals and Instagram performance feedback integrations.
+- A calmer first-run onboarding flow and a human-readable **Why this clip** review screen.
+
+### Changed
+
+- Replaced the previous purple and amber visual identity with a deep-ocean palette using teal, blue, green, coral, and neutral surfaces.
+- Moved provider credentials into the provider center and kept technical model and endpoint details behind an Advanced disclosure.
+- Rewrote public documentation around the creator workflow and added product principles, contributor guidance, and a pull-request checklist.
+- Removed internal agent-phase reports and planning folders from the current public tree while preserving historical Git history and release provenance.
+
+### Fixed
+
+- Removed the misleading zero-byte setup placeholder for sizes that have not been calculated.
+- Preserved explicit missing-render and media-decode diagnostics in the review flow.
+- Kept browser-cookie retrieval opt-in and separate from ordinary source-link processing.
+
+### Known limitations
+
+- Packaged installers remain subject to the platform signing and notarization state documented on each release.
+- Cloud provider quotas, free-route availability, model capabilities, retention, and terms are controlled by those providers and can change.
+- Local model setup and hardware-dependent scoring still require the supported runtime, enough disk space, and suitable hardware.
+
 ## [0.4.1] — 2026-08-21
 
 ClipGauge v0.4.1 is the qualification-and-release-gates patch release. It closes the verified v0.4.0 gaps around setup observability, production-default model-backed output, exact-tag publication, and platform quality enforcement.
