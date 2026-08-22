@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from ..jobs.queue import Stage, StageContext, StageError
+from ..memory import release_cpu_memory
 from ..models import registry, specs
 
 
@@ -75,6 +76,8 @@ class DiarizeStage(Stage):
                 retryable=True,
             ) from exc
         if not windows:
+            del model, y16k
+            release_cpu_memory()
             return {"speakers": 0, "turns": [], "segments": segments}
 
         # Mid-stage cache: embedding an hour of speech costs real minutes and
@@ -122,6 +125,8 @@ class DiarizeStage(Stage):
             ) from exc
 
         speakers = int(len(np.unique(labels))) if len(labels) else 0
+        del model, y16k, embeddings
+        release_cpu_memory()
         return {
             "speakers": speakers,
             "turns": turns,

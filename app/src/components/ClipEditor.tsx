@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { api } from '../api'
+import { traceMedia } from '../mediaDiagnostics'
 
 /**
  * The per-clip timeline editor. One horizontal timeline over a ±45s context
  * window: waveform, word blocks, event badges, free-drag bounds handles,
  * click-to-toggle dead-space cuts, and an overlay track with drag/resize/
- * delete + opt-in animation per item. RE-RENDER CLIP applies everything.
+ * delete + opt-in animation per item. Render updated clip applies everything.
  */
 
 interface Word { word: string; start: number; end: number; speaker?: number }
@@ -25,6 +26,8 @@ interface EditState {
 }
 interface EditContext {
   ok: boolean
+  error?: string
+  diagnostic_id?: string
   window: { start: number; end: number }
   media_path: string
   probe: { width: number; height: number }
@@ -62,6 +65,8 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
   const [renderMsg, setRenderMsg] = useState('')
   const [suggesting, setSuggesting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [mediaUrl, setMediaUrl] = useState<string | null>(null)
+  const [mediaError, setMediaError] = useState<string | null>(null)
   const [selectedOverlay, setSelectedOverlay] = useState<string | null>(null)
   const railRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ kind: string; id?: string; edge?: 'l' | 'r' } | null>(null)
@@ -83,6 +88,12 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
   const reload = useCallback(() => {
     invoke<EditContext>('edit_tool', { args: ['context', jobId, String(clipIndex)] })
       .then((c) => {
+        if (!c.ok || !c.edit || !Array.isArray(c.rms)) {
+          const diagnostic = (c as EditContext).diagnostic_id
+          const message = c.error ?? 'Editor data is unavailable for this clip.'
+          setError(diagnostic ? `${message} Diagnostic ID: ${diagnostic}.` : message)
+          return
+        }
         setCtx(c)
         setEdit(c.edit)
       })
@@ -92,17 +103,32 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
   useEffect(reload, [reload])
 
   useEffect(() => {
+    let active = true
+    setMediaUrl(null)
+    setMediaError(null)
+    if (!ctx?.media_path) return () => { active = false }
+    api.requestPlaybackUrl(jobId, 'source')
+      .then((url) => {
+        if (active) setMediaUrl(url)
+      })
+      .catch((reason) => {
+        if (active) setMediaError(String(reason))
+      })
+    return () => { active = false }
+  }, [ctx?.media_path, jobId])
+
+  useEffect(() => {
     let un: (() => void) | null = null
     listen<{ event: string; message?: string; ok?: boolean; error?: string }>(
       'pipeline-event',
       ({ payload }) => {
         if (payload.event === 'progress') setRenderMsg(payload.message ?? '')
-        if (payload.event === 'result') {
+        if (payload.event === 'terminal' || payload.event === 'result') {
           setRendering(false)
           if (payload.ok) {
             setRenderMsg('done ✓')
             onRendered()
-          } else setError(String(payload.error))
+          } else setError(payload.error ?? payload.message ?? 'Rendering failed.')
         }
       }
     ).then((u) => (un = u))
@@ -318,12 +344,12 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
 
   async function persist(next: EditState) {
     setEdit(next)
-    await invoke('save_clip_edits', { jobId, edits: { [String(clipIndex)]: next } })
+    await invoke('save_clip_edits', { jobId, input: { clip: clipIndex, edit: next } })
   }
 
   async function doRender() {
     if (!edit) return
-    await invoke('save_clip_edits', { jobId, edits: { [String(clipIndex)]: edit } })
+    await invoke('save_clip_edits', { jobId, input: { clip: clipIndex, edit } })
     setRendering(true)
     setRenderMsg('starting…')
     setError(null)
@@ -332,7 +358,7 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
 
   async function doSuggest(prefer: string) {
     if (!edit) return
-    await invoke('save_clip_edits', { jobId, edits: { [String(clipIndex)]: edit } })
+    await invoke('save_clip_edits', { jobId, input: { clip: clipIndex, edit } })
     setSuggesting(true)
     setError(null)
     try {
@@ -350,8 +376,18 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
 
   if (!ctx || !edit || !win) {
     return (
-      <div className="editor-shell">
-        <p className="mono editor-loading">{error ?? 'loading timeline…'}</p>
+      <div className="editor-shell editor-recoverable" role={error ? 'alert' : undefined}>
+        <p className={`mono ${error ? 'editor-err' : 'editor-loading'}`}>
+          {error ?? 'loading timeline…'}
+        </p>
+        {error && (
+          <div className="editor-recovery-actions">
+            <button className="btn-secondary" onClick={() => { setError(null); reload() }}>
+              Try again
+            </button>
+            <button className="btn-ghost" onClick={onClose}>Back to clips</button>
+          </div>
+        )}
       </div>
     )
   }
@@ -367,7 +403,7 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
           {(edit.end - edit.start).toFixed(1)}s source
         </span>
         <button className="btn-primary editor-render" onClick={doRender} disabled={rendering}>
-          {rendering ? 'RENDERING…' : 'RE-RENDER CLIP'}
+          {rendering ? 'Rendering…' : 'Render updated clip'}
         </button>
       </header>
       {rendering && <p className="mono editor-msg">{renderMsg}</p>}
@@ -376,14 +412,34 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
       {/* vertical output monitor: the 9:16 frame, camera-trajectory-following */}
       <div className="monitor-src-wrap">
         <div className="monitor-src-stage" ref={stageRef} onClick={togglePlay}>
-          <video
-            ref={videoRef}
-            className="monitor-src"
-            src={api.fileUrl(ctx.media_path)}
-            preload="auto"
-            muted={false}
-            onLoadedMetadata={() => seekTo(edit.start)}
-          />
+          {mediaUrl ? (
+            <video
+              data-testid="editor-source-video"
+              ref={videoRef}
+              className="monitor-src"
+              src={mediaUrl}
+              preload="auto"
+              muted={false}
+              onLoadStart={(event) => traceMedia('editor', 'loadstart', event.currentTarget)}
+              onLoadedMetadata={(event) => {
+                traceMedia('editor', 'loadedmetadata', event.currentTarget)
+                seekTo(edit.start)
+              }}
+              onLoadedData={(event) => traceMedia('editor', 'loadeddata', event.currentTarget)}
+              onCanPlay={(event) => traceMedia('editor', 'canplay', event.currentTarget)}
+              onCanPlayThrough={(event) => traceMedia('editor', 'canplaythrough', event.currentTarget)}
+              onProgress={(event) => traceMedia('editor', 'progress', event.currentTarget)}
+              onStalled={(event) => traceMedia('editor', 'stalled', event.currentTarget)}
+              onSuspend={(event) => traceMedia('editor', 'suspend', event.currentTarget)}
+              onWaiting={(event) => traceMedia('editor', 'waiting', event.currentTarget)}
+              onError={(event) => {
+                traceMedia('editor', 'error', event.currentTarget)
+                setMediaError('The source video could not be loaded. Try again or go back to clips.')
+              }}
+            />
+          ) : (
+            <p className="mono editor-loading">{mediaError ?? 'loading source media…'}</p>
+          )}
           {/* overlay preview — EXACT render math: left = x*(W-w), top = y*(H-h) */}
           {edit.overlays.map((o) => {
             const v = videoRef.current
@@ -460,7 +516,7 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
           style={{ marginLeft: 14 }}
           onClick={() => persist({ ...edit, remove_dead_space: !edit.remove_dead_space })}
         >
-          ✂ remove dead space
+          Remove dead space
         </button>
       </div>
 
@@ -476,7 +532,7 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
         <div className="tl-playhead" ref={playheadRef} />
         {/* waveform */}
         <svg className="tl-wave" viewBox="0 0 100 30" preserveAspectRatio="none">
-          <path d={wavePath} fill="rgba(255,178,36,0.25)" />
+          <path d={wavePath} fill="var(--teal-soft)" />
         </svg>
 
         {/* out-of-bounds shade */}
@@ -587,10 +643,10 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
         </div>
         <div className="ov-actions">
           <button className="btn-secondary" onClick={() => doSuggest('pexels')} disabled={suggesting}>
-            {suggesting ? 'planning…' : '✚ suggest visuals (stock)'}
+            {suggesting ? 'Planning…' : 'Suggest stock visuals'}
           </button>
           <button className="btn-secondary" onClick={() => doSuggest('gemini')} disabled={suggesting}>
-            ✚ suggest (AI-generated)
+            Suggest AI visuals
           </button>
         </div>
       </div>

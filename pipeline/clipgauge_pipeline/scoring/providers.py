@@ -22,6 +22,58 @@ import httpx
 
 from .. import config, local_runtime, protocol
 
+LOCAL_QA_TRACE_ENV = "CLIPGAUGE_QA_RUNTIME_TRACE"
+LOCAL_QA_TRACE_MAX_BYTES = 24_000
+
+
+def _proc_rss_kb(pid: int) -> int | None:
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _memory_snapshot(server_pid: int | None) -> dict[str, int | None]:
+    available_kb = None
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    available_kb = int(line.split()[1])
+                    break
+    except (OSError, ValueError, IndexError):
+        pass
+    return {
+        "client_rss_kb": _proc_rss_kb(os.getpid()),
+        "server_rss_kb": _proc_rss_kb(server_pid) if server_pid else None,
+        "mem_available_kb": available_kb,
+    }
+
+
+def _local_qa_trace(event: str, **fields: Any) -> None:
+    """Record bounded local-provider facts only under explicit QA opt-in."""
+    if os.environ.get(LOCAL_QA_TRACE_ENV) != "1":
+        return
+    try:
+        directory = config.home_dir() / "diagnostics"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "local-runtime.jsonl"
+        record = {"event": event, "time": round(time.time(), 3), **fields}
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+        if path.stat().st_size > LOCAL_QA_TRACE_MAX_BYTES:
+            data = path.read_bytes()[-LOCAL_QA_TRACE_MAX_BYTES:]
+            path.write_bytes(data[data.find(b"\n") + 1:] if b"\n" in data else data)
+        path.chmod(0o600)
+    except OSError:
+        # Diagnostics must never change provider behavior.
+        return
+
+
 Capability = bool | None
 StructuredLevel = Literal["native_schema", "json_mode", "text_compatibility"]
 
@@ -510,6 +562,10 @@ def _status_error(response: httpx.Response) -> ProviderError:
     return ProviderError("PROVIDER_RESPONSE_INVALID", f"Provider returned HTTP {status}.")
 
 
+LOCAL_PROVIDER_TIMEOUT_SECONDS = 300.0
+LOCAL_PROVIDER_MAX_ATTEMPTS = 1
+
+
 class OpenAICompatibleAdapter(ProviderAdapter):
     backend = "openai-compatible"
 
@@ -582,7 +638,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             body["response_format"] = {"type": "json_schema", "json_schema": {"name": "clipgauge", "strict": True, "schema": request.schema}}
         elif self.structured_level() == "json_mode":
             body["response_format"] = {"type": "json_object"}
-        payload = self._post_json("chat/completions", body)
+        payload = self._post_json("chat/completions", body, request=request)
         try:
             choice = payload["choices"][0]
             message = choice["message"]
@@ -594,28 +650,73 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         except (KeyError, IndexError, TypeError, ValueError, JSONDecodeError) as err:
             raise ProviderError("PROVIDER_RESPONSE_INVALID", "Provider returned no usable JSON content.") from err
 
-    def _post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+    def _post_json(self, path: str, body: dict[str, Any], *, request: InferenceRequest | None = None) -> dict[str, Any]:
         last: ProviderError | None = None
-        for attempt in range(3):
+        trace_local = self.profile.kind == "clipgauge-local"
+        max_attempts = LOCAL_PROVIDER_MAX_ATTEMPTS if trace_local else 3
+        for attempt in range(max_attempts):
+            started = time.monotonic()
+            if trace_local:
+                handle = getattr(getattr(self, "_runtime", None), "handle", None)
+                memory = _memory_snapshot(handle.process.pid if handle else None)
+                _local_qa_trace(
+                    "request_start",
+                    attempt=attempt + 1,
+                    path=path,
+                    timeout_seconds=self.profile.timeout_seconds,
+                    requested_output_token_limit=body.get("max_tokens"),
+                    prompt_chars=len(request.prompt) if request else None,
+                    schema_keys=sorted(request.schema) if request else [],
+                    has_images=bool(request.images) if request else False,
+                    **memory,
+                )
             try:
                 response = httpx.post(self._url(path), headers=self._headers(), json=body, timeout=self.profile.timeout_seconds, follow_redirects=False)
+                duration_ms = int((time.monotonic() - started) * 1000)
                 if response.status_code >= 400 or 300 <= response.status_code < 400:
                     error = _status_error(response)
                     last = error
-                    if error.code in {"RATE_LIMITED", "PROVIDER_UNAVAILABLE", "NETWORK_FAILED", "TIMEOUT"} and attempt < 2:
+                    if trace_local:
+                        _local_qa_trace("request_http_error", attempt=attempt + 1, duration_ms=duration_ms, status_code=response.status_code, error_code=error.code)
+                    if error.code in {"RATE_LIMITED", "PROVIDER_UNAVAILABLE", "NETWORK_FAILED", "TIMEOUT"} and attempt + 1 < max_attempts:
                         time.sleep(error.retry_after if error.retry_after is not None else 2**attempt)
                         continue
                     raise error
-                return response.json()
+                payload = response.json()
+                if trace_local:
+                    usage = payload.get("usage") if isinstance(payload, dict) else None
+                    timings = payload.get("timings") if isinstance(payload, dict) else None
+                    choice = payload.get("choices", [{}])[0] if isinstance(payload, dict) and payload.get("choices") else {}
+                    _local_qa_trace(
+                        "request_success",
+                        attempt=attempt + 1,
+                        duration_ms=duration_ms,
+                        status_code=response.status_code,
+                        prompt_tokens=usage.get("prompt_tokens") if isinstance(usage, dict) else None,
+                        completion_tokens=usage.get("completion_tokens") if isinstance(usage, dict) else None,
+                        total_tokens=usage.get("total_tokens") if isinstance(usage, dict) else None,
+                        timings={key: timings[key] for key in ("prompt_per_second", "predicted_per_second", "prompt_n", "predicted_n") if isinstance(timings, dict) and key in timings},
+                        finish_reason=choice.get("finish_reason") if isinstance(choice, dict) else None,
+                        **_memory_snapshot(handle.process.pid if handle else None),
+                    )
+                return payload
             except ProviderError:
                 raise
-            except httpx.TimeoutException as err:
+            except httpx.TimeoutException:
+                duration_ms = int((time.monotonic() - started) * 1000)
                 last = ProviderError("TIMEOUT", "Provider request timed out.")
-            except httpx.HTTPError as err:
+                if trace_local:
+                    _local_qa_trace("request_timeout", attempt=attempt + 1, duration_ms=duration_ms, timeout_seconds=self.profile.timeout_seconds, **_memory_snapshot(handle.process.pid if handle else None))
+            except httpx.HTTPError:
+                duration_ms = int((time.monotonic() - started) * 1000)
                 last = ProviderError("NETWORK_FAILED", "Provider network request failed.")
+                if trace_local:
+                    _local_qa_trace("request_network_error", attempt=attempt + 1, duration_ms=duration_ms)
             except JSONDecodeError as err:
+                if trace_local:
+                    _local_qa_trace("request_invalid_json", attempt=attempt + 1, duration_ms=int((time.monotonic() - started) * 1000))
                 raise ProviderError("PROVIDER_RESPONSE_INVALID", "Provider returned malformed JSON.") from err
-            if attempt < 2:
+            if attempt + 1 < max_attempts:
                 time.sleep(2**attempt)
         raise last or ProviderError("INTERNAL_PROVIDER_ERROR", "Provider request failed.")
 
@@ -899,6 +1000,7 @@ def preset_profile(
         secret_ref=f"provider:{kind}",
         capabilities=caps,
         locality="local" if local else "cloud",
+        timeout_seconds=LOCAL_PROVIDER_TIMEOUT_SECONDS if kind == "clipgauge-local" else 120.0,
         metadata={"managed": kind == "clipgauge-local", **selected_metadata},
     )
 

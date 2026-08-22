@@ -11,6 +11,10 @@
 - [ ] I did not add secrets, source media, model downloads, generated installers, or internal workflow files.
 - [ ] I kept Pexels and Instagram separate from AI Providers.
 - [ ] I kept license, upstream attribution, dependency notices, and provenance accurate.
+- [ ] No banned ClipGauge purple/yellow brand colors were introduced.
+- [ ] Public UI/docs copy was reviewed for human wording.
+- [ ] No internal agent reports/prompts/workflow artifacts were added to the public tree.
+- [ ] Large downloads remain disclosed and consented.
 
 ## Evidence and limitations
 

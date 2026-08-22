@@ -44,6 +44,9 @@ export const api = {
   cancelSetup: (operationId: string) => invoke<void>('cancel_setup', { operationId }),
   saveClipEdits: (jobId: string, input: SaveClipEditsInput) => invoke<void>('save_clip_edits', { jobId, input }),
   exportClip: (jobId: string, clip: number, title?: string) => invoke<string>('export_clip', { jobId, clip, title }),
+  requestPlaybackUrl: (jobId: string, artifactType: 'render' | 'source', clip?: number) =>
+    invoke<string>('request_playback_url', { jobId, artifactType, clip }),
+  recordMediaEvent: (input: Record<string, unknown>) => invoke<void>('record_media_event', { input }),
   igStatus: () => invoke<{ connected: boolean; username?: string }>('ig_status'),
   igSync: () => invoke<SyncSummary>('ig_tool', { args: ['sync'] }),
   igOverview: () => invoke<LoopOverview>('ig_tool', { args: ['overview'] }),

@@ -20,14 +20,70 @@ fn read_stage(dir: &Path, name: &str) -> Result<Value, String> {
         .ok_or_else(|| format!("malformed {name} checkpoint"))
 }
 
-fn artifact_status(render_root: &Path, value: &mut Map<String, Value>) {
+pub fn render_artifact(home: &Path, job_id: &str, clip: u32) -> Result<PathBuf, String> {
+    let dir = resolve_job_dir(home, job_id)?;
+    let render = read_stage(&dir, "render")?;
+    let output = render
+        .get("outputs")
+        .and_then(Value::as_array)
+        .and_then(|outputs| {
+            outputs
+                .iter()
+                .find(|entry| entry.get("clip").and_then(Value::as_u64) == Some(clip as u64))
+        })
+        .ok_or_else(|| "clip is not part of this job".to_string())?;
+    let raw = output
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "clip has no render artifact".to_string())?;
+    let raw_path = Path::new(raw);
+    let candidate = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        dir.join(raw_path)
+    };
+    let resolved = resolve_existing_file(&dir.join("clips"), &candidate)?;
+    if resolved.extension().and_then(|ext| ext.to_str()) != Some("mp4") {
+        return Err("clip artifact is not an MP4".into());
+    }
+    Ok(resolved)
+}
+
+pub fn source_media_artifact(home: &Path, job_id: &str) -> Result<PathBuf, String> {
+    let dir = resolve_job_dir(home, job_id)?;
+    let ingest = read_stage(&dir, "ingest")?;
+    let raw = ingest
+        .get("media_path")
+        .or_else(|| ingest.get("source_path"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "source media is not declared".to_string())?;
+    let raw_path = Path::new(raw);
+    let candidate = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        dir.join(raw_path)
+    };
+    let resolved = resolve_existing_file(&dir, &candidate)?;
+    match resolved.extension().and_then(|ext| ext.to_str()) {
+        Some("mp4") | Some("webm") | Some("mov") => Ok(resolved),
+        _ => Err("source media is not a supported video file".into()),
+    }
+}
+
+fn artifact_status(job_dir: &Path, value: &mut Map<String, Value>) {
     let raw_path = value.get("path").and_then(Value::as_str).map(PathBuf::from);
     let Some(path) = raw_path else {
         value.insert("artifact_status".into(), json!("invalid"));
         value.insert("path".into(), Value::Null);
         return;
     };
-    match resolve_existing_file(render_root, &path) {
+    let clips_root = job_dir.join("clips");
+    let candidate = if path.is_absolute() {
+        path
+    } else {
+        job_dir.join(path)
+    };
+    match resolve_existing_file(&clips_root, &candidate) {
         Ok(canonical) if canonical.extension().and_then(|e| e.to_str()) == Some("mp4") => {
             value.insert(
                 "path".into(),
@@ -60,10 +116,9 @@ pub fn job_results(home: &Path, job_id: &str) -> Result<Value, String> {
     let candidates = read_stage(&dir, "candidates")?;
 
     if let Some(outputs) = render.get_mut("outputs").and_then(Value::as_array_mut) {
-        let render_root = dir.join("clips");
         for output in outputs {
             if let Some(object) = output.as_object_mut() {
-                artifact_status(&render_root, object);
+                artifact_status(&dir, object);
             }
         }
     } else if !render.is_null() {
@@ -126,7 +181,13 @@ pub fn export_clip(
         .get("path")
         .and_then(Value::as_str)
         .ok_or_else(|| "clip has no render artifact".to_string())?;
-    let source = resolve_existing_file(&dir.join("clips"), Path::new(source))?;
+    let source_path = Path::new(source);
+    let candidate = if source_path.is_absolute() {
+        source_path.to_path_buf()
+    } else {
+        dir.join(source_path)
+    };
+    let source = resolve_existing_file(&dir.join("clips"), &candidate)?;
     if source.extension().and_then(|e| e.to_str()) != Some("mp4") {
         return Err("clip artifact is not an MP4".into());
     }
@@ -144,7 +205,7 @@ pub fn export_clip(
 
 #[cfg(test)]
 mod tests {
-    use super::{export_clip, job_results};
+    use super::{export_clip, job_results, source_media_artifact};
     use serde_json::json;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -180,6 +241,59 @@ mod tests {
         home
     }
 
+    fn relative_fixture() -> std::path::PathBuf {
+        let home = fixture();
+        let job = home.join("jobs/20260818-155237-c6b118");
+        write_render_checkpoint_path(&job, "clips/clip_00.mp4");
+        home
+    }
+
+    fn source_fixture() -> std::path::PathBuf {
+        let home = fixture();
+        let job = home.join("jobs/20260818-155237-c6b118");
+        fs::write(job.join("media.mp4"), b"source").unwrap();
+        fs::write(
+            job.join("ingest.json"),
+            serde_json::to_vec(&json!({"data": {"media_path": "media.mp4"}})).unwrap(),
+        )
+        .unwrap();
+        home
+    }
+
+    #[test]
+    fn resolves_declared_source_media_inside_job() {
+        let home = source_fixture();
+        let source = source_media_artifact(&home, "20260818-155237-c6b118").unwrap();
+        assert_eq!(fs::read(source).unwrap(), b"source");
+    }
+
+    #[test]
+    fn rejects_source_media_outside_job() {
+        let home = source_fixture();
+        let job = home.join("jobs/20260818-155237-c6b118");
+        let outside = home.join("outside-source.mp4");
+        fs::write(&outside, b"outside").unwrap();
+        fs::write(
+            job.join("ingest.json"),
+            serde_json::to_vec(&json!({"data": {"media_path": "../outside-source.mp4"}})).unwrap(),
+        )
+        .unwrap();
+        assert!(source_media_artifact(&home, "20260818-155237-c6b118").is_err());
+    }
+
+    fn write_render_checkpoint_path(job: &std::path::Path, path: &str) {
+        let checkpoint = json!({
+            "data": {
+                "outputs": [{"clip": 0, "path": path}]
+            }
+        });
+        fs::write(
+            job.join("render.json"),
+            serde_json::to_vec(&checkpoint).unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn reports_available_render_artifact() {
         let home = fixture();
@@ -188,6 +302,46 @@ mod tests {
             result["render"]["outputs"][0]["artifact_status"],
             "available"
         );
+    }
+
+    #[test]
+    fn reports_available_relative_render_artifact() {
+        let home = relative_fixture();
+        let result = job_results(&home, "20260818-155237-c6b118").unwrap();
+        assert_eq!(
+            result["render"]["outputs"][0]["artifact_status"],
+            "available"
+        );
+    }
+
+    #[test]
+    fn exports_a_relative_render_artifact() {
+        let home = relative_fixture();
+        let downloads = home.join("Downloads");
+        let exported = export_clip(
+            &home,
+            &downloads,
+            "20260818-155237-c6b118",
+            0,
+            Some("Sample interview".into()),
+        )
+        .unwrap();
+        assert_eq!(fs::read(exported).unwrap(), b"video");
+    }
+
+    #[test]
+    fn rejects_a_job_root_mp4_as_a_render_artifact() {
+        let home = fixture();
+        let job = home.join("jobs/20260818-155237-c6b118");
+        let misplaced = job.join("media.mp4");
+        fs::write(&misplaced, b"not a clip").unwrap();
+        write_render_checkpoint(&job, &misplaced);
+        let result = job_results(&home, "20260818-155237-c6b118").unwrap();
+        assert_eq!(
+            result["render"]["outputs"][0]["artifact_status"],
+            "outside_managed_root"
+        );
+        assert!(result["render"]["outputs"][0]["path"].is_null());
     }
 
     #[test]

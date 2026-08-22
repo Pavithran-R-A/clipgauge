@@ -5,6 +5,7 @@ burn, loudnorm — and verifies the output probes clean."""
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -87,6 +88,33 @@ def test_ass_no_word_scaling():
     lines = [l for l in doc.splitlines() if l.startswith("Dialogue: 0")]
     assert "\\fscx" in lines[0]      # entrance pop on chunk start
     assert "\\fscx" not in lines[1]  # no per-word scaling afterwards
+
+
+def test_render_is_non_interactive(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(renderer, "videotoolbox_available", lambda: False)
+    monkeypatch.setattr(renderer.subprocess, "run", fake_run)
+    renderer.render_clip(
+        "source.mp4",
+        tmp_path / "out.mp4",
+        0.0,
+        1.0,
+        {"fps": 25, "frames": [[100.0, 0.0, 404.0, 720.0]]},
+        None,
+        None,
+        src_w=1280,
+        src_h=720,
+    )
+
+    render_calls = [(args, kwargs) for args, kwargs in calls if "-nostdin" in args]
+    assert len(render_calls) == 1
+    args, kwargs = render_calls[0]
+    assert kwargs["stdin"] is subprocess.DEVNULL
 
 
 @pytest.mark.slow

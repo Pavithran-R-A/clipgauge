@@ -120,7 +120,10 @@ pub fn validate(
         return Err("too many disabled cuts".to_string());
     }
     if let Some(preset) = &edit.caption_preset {
-        if !matches!(preset.as_str(), "classic" | "bold" | "karaoke") {
+        if !matches!(
+            preset.as_str(),
+            "classic" | "beast" | "hormozi" | "minimal" | "karaoke-pop"
+        ) {
             return Err("unsupported caption preset".to_string());
         }
     }
@@ -222,6 +225,18 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn accepts_all_renderer_caption_presets() {
+        for preset in ["classic", "beast", "hormozi", "minimal", "karaoke-pop"] {
+            let mut payload = valid();
+            payload.edit.caption_preset = Some(preset.to_string());
+            assert!(
+                validate(Path::new("/tmp/job"), &payload, &score()).is_ok(),
+                "{preset}"
+            );
+        }
     }
 
     #[test]

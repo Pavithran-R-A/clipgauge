@@ -15,6 +15,43 @@ from urllib.parse import urlsplit
 
 import httpx
 
+QA_TRACE_ENV = "CLIPGAUGE_QA_RUNTIME_TRACE"
+QA_TRACE_MAX_BYTES = 24_000
+
+
+def _qa_trace_enabled() -> bool:
+    return os.environ.get(QA_TRACE_ENV) == "1"
+
+
+def _qa_trace(root: Path, event: str, **fields: Any) -> None:
+    """Write bounded runtime facts only when QA tracing is explicitly enabled."""
+    if not _qa_trace_enabled():
+        return
+    try:
+        directory = root / "diagnostics"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "local-runtime.jsonl"
+        record = {"event": event, "time": round(time.time(), 3), **fields}
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+        if path.stat().st_size > QA_TRACE_MAX_BYTES:
+            data = path.read_bytes()[-QA_TRACE_MAX_BYTES:]
+            path.write_bytes(data[data.find(b"\n") + 1:] if b"\n" in data else data)
+        path.chmod(0o600)
+    except OSError:
+        # Diagnostics must never break a model run.
+        return
+
+
+def _stderr_tail(root: Path, path: Path | None, limit: int = 3_000) -> str | None:
+    if path is None or not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        return text.replace(str(root), "<clipgauge-home>")[-limit:]
+    except OSError:
+        return None
+
 from . import config, runtime
 
 
@@ -173,15 +210,34 @@ class LocalRuntime:
 
     def start(self, model_id: str, endpoint: str | None = None) -> str:
         if self.handle and self.handle.process.poll() is None:
+            _qa_trace(self.root, "runtime_reused", model_id=model_id, endpoint_kind="loopback")
             return self.handle.endpoint
         port = self._port(endpoint)
         command = self.command(model_id, port)
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+        model = self.model_path(model_id)
+        started_at = time.monotonic()
+        stderr_path = self.root / "diagnostics" / "local-runtime.stderr.log" if _qa_trace_enabled() else None
+        if stderr_path:
+            stderr_path.parent.mkdir(parents=True, exist_ok=True)
+        stderr_handle = stderr_path.open("w", encoding="utf-8") if stderr_path else None
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name != "nt" else 0
+        _qa_trace(
+            self.root,
+            "runtime_start",
+            runtime_version=self.manifest["runtimes"]["llama-server"]["version"],
+            model_id=model_id,
+            model_size_bytes=model.stat().st_size,
+            context_size=4096,
+            parallel=1,
+            reasoning="off",
+            cpu_threads_configured=None,
+            endpoint_kind="loopback",
+        )
         popen_kwargs: dict[str, Any] = {
             "cwd": str(self.root),
             "stdin": subprocess.DEVNULL,
             "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
+            "stderr": stderr_handle or subprocess.DEVNULL,
             "creationflags": creationflags,
         }
         if os.name != "nt":
@@ -189,21 +245,46 @@ class LocalRuntime:
         try:
             process = subprocess.Popen(command, **popen_kwargs)
         except OSError as exc:
+            if stderr_handle:
+                stderr_handle.close()
             raise LocalRuntimeError("ClipGauge Local could not start its managed runtime.") from exc
+        if stderr_handle:
+            stderr_handle.close()
         api = self._loopback_endpoint(port)
-        deadline = time.monotonic() + 30.0
+        base_url = api.rsplit("/v1", 1)[0]
+        deadline = started_at + 30.0
         while time.monotonic() < deadline:
             if process.poll() is not None:
+                _qa_trace(self.root, "runtime_exit_before_ready", exit_code=process.returncode, stderr_tail=_stderr_tail(self.root, stderr_path))
                 raise LocalRuntimeError("ClipGauge Local runtime exited before becoming ready.")
             try:
-                response = httpx.get(api.rsplit("/v1", 1)[0] + "/health", timeout=0.5, follow_redirects=False)
+                response = httpx.get(base_url + "/health", timeout=0.5, follow_redirects=False)
+                _qa_trace(self.root, "health", status_code=response.status_code)
                 if response.status_code in {200, 204}:
+                    try:
+                        slots = httpx.get(base_url + "/slots", timeout=1.0, follow_redirects=False)
+                        slots_payload = slots.json()
+                        slots_keys = sorted(slots_payload[0]) if isinstance(slots_payload, list) and slots_payload and isinstance(slots_payload[0], dict) else []
+                        slots_status = slots.status_code
+                    except (httpx.HTTPError, ValueError, TypeError, KeyError):
+                        slots_keys = []
+                        slots_status = None
+                    _qa_trace(
+                        self.root,
+                        "ready",
+                        health_status=response.status_code,
+                        ready_seconds=round(time.monotonic() - started_at, 3),
+                        process_pid=process.pid,
+                        slots_status=slots_status,
+                        slots_keys=slots_keys,
+                    )
                     self.handle = LocalServerHandle(process=process, endpoint=api, model_id=model_id)
                     return api
             except httpx.HTTPError:
                 pass
             time.sleep(0.25)
         self.stop_process(process)
+        _qa_trace(self.root, "runtime_timeout_before_ready", stderr_tail=_stderr_tail(self.root, stderr_path))
         raise LocalRuntimeError("ClipGauge Local runtime did not become ready within 30 seconds.")
 
     @staticmethod
@@ -222,7 +303,10 @@ class LocalRuntime:
 
     def stop(self) -> None:
         if self.handle:
-            self.stop_process(self.handle.process)
+            process = self.handle.process
+            self.stop_process(process)
+            stderr_path = self.root / "diagnostics" / "local-runtime.stderr.log"
+            _qa_trace(self.root, "runtime_exit", exit_code=process.returncode, stderr_tail=_stderr_tail(self.root, stderr_path))
             self.handle = None
 
     def __del__(self) -> None:

@@ -60,6 +60,18 @@ jobs:
       - name: Check authoritative release versions
         run: python3 scripts/check-version-consistency.py
 
+  visual-assets:
+    name: First-party visual assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: latest
+          enable-cache: true
+      - name: Check first-party visual assets
+        run: uv run --project pipeline --with 'pillow>=12.3' python scripts/check-first-party-visual-assets.py --self-test && uv run --project pipeline --with 'pillow>=12.3' python scripts/check-first-party-visual-assets.py
+
   rust:
     name: Rust format, tests, and clippy
     runs-on: ubuntu-22.04

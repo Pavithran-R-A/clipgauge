@@ -135,6 +135,7 @@ def test_clipgauge_local_preset_is_managed_and_structured():
     assert local.locality == "local"
     assert local.capabilities.json_schema is True
     assert local.metadata["managed"] is True
+    assert local.timeout_seconds == providers.LOCAL_PROVIDER_TIMEOUT_SECONDS == 300.0
 
 
 def test_clipgauge_local_adapter_uses_existing_loopback_server(monkeypatch):
@@ -159,6 +160,41 @@ def test_clipgauge_local_adapter_uses_existing_loopback_server(monkeypatch):
     assert result.data == {"ok": True}
     assert seen["url"] == "http://127.0.0.1:8080/v1/chat/completions"
     assert seen["follow_redirects"] is False
+
+
+def test_clipgauge_local_timeout_is_single_attempt(monkeypatch):
+    calls = 0
+
+    def fake_post(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("local runtime stalled")
+
+    monkeypatch.setattr(providers.httpx, "post", fake_post)
+    adapter = providers.make_adapter("clipgauge-local")
+    request = providers.InferenceRequest(
+        prompt="return ok",
+        schema={"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
+    )
+    with pytest.raises(providers.ProviderError) as exc_info:
+        adapter._post_json("chat/completions", {"messages": []}, request=request)
+    assert exc_info.value.code == "TIMEOUT"
+    assert calls == 1
+
+
+def test_local_qa_trace_is_opt_in_and_bounded(monkeypatch):
+    trace_path = config.home_dir() / "diagnostics" / "local-runtime.jsonl"
+    providers._local_qa_trace("disabled", payload="secret-free")
+    assert not trace_path.exists()
+
+    monkeypatch.setenv("CLIPGAUGE_QA_RUNTIME_TRACE", "1")
+    for _ in range(400):
+        providers._local_qa_trace("sample", payload="x" * 200)
+    assert trace_path.stat().st_size <= providers.LOCAL_QA_TRACE_MAX_BYTES
+    records = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    assert records
+    assert records[-1]["event"] == "sample"
+    assert "secret-free" not in trace_path.read_text()
 
 
 def test_clipgauge_local_runtime_command_is_loopback_only(monkeypatch, tmp_path):

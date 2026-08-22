@@ -40,6 +40,12 @@ jobs:
           test "$tag_version" = "$manifest_version"
       - name: Run version consistency check
         run: python3 scripts/check-version-consistency.py
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: latest
+          enable-cache: true
+      - name: Check first-party visual assets
+        run: uv run --project pipeline --with 'pillow>=12.3' python scripts/check-first-party-visual-assets.py --self-test && uv run --project pipeline --with 'pillow>=12.3' python scripts/check-first-party-visual-assets.py
 
   linux-release:
     name: Build unsigned Linux amd64 Debian package

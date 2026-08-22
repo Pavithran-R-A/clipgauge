@@ -56,6 +56,22 @@ export default function App() {
   }, [refreshJobs])
 
   useEffect(() => {
+    const report = (message: string) => {
+      const bounded = message.replace(/\s+/g, ' ').slice(0, 240)
+      console.error('[ClipGauge app QA]', bounded)
+      void api.recordMediaEvent({ label: 'app', event: 'runtime_error', error_message: bounded })
+    }
+    const onError = (event: ErrorEvent) => report(event.error?.message ?? event.message)
+    const onReject = (event: PromiseRejectionEvent) => report(String(event.reason))
+    window.addEventListener('error', onError)
+    window.addEventListener('unhandledrejection', onReject)
+    return () => {
+      window.removeEventListener('error', onError)
+      window.removeEventListener('unhandledrejection', onReject)
+    }
+  }, [])
+
+  useEffect(() => {
     const kick = () => { api.igStatus().then((status) => (status.connected ? api.igSync() : null)).catch(() => null) }
     kick()
     const timer = window.setInterval(kick, 60 * 60 * 1000)
