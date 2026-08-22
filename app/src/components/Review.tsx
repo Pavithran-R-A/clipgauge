@@ -3,12 +3,6 @@ import { api } from '../api'
 import type { Clip, JobResults, RenderOutput } from '../types'
 import ClipEditor from './ClipEditor'
 
-/**
- * The review bay: filmstrip of rendered clips, a 9:16 monitor, and THE
- * AUDIT — the score's full provenance. This panel is the product thesis:
- * never a bare number.
- */
-
 const RESTYLE_PRESETS = ['classic', 'beast', 'hormozi', 'minimal', 'karaoke-pop']
 const CAMERA_MODES: [string, string][] = [
   ['cut', 'hard cut on speaker change'],
@@ -23,13 +17,14 @@ interface Props {
 }
 
 const RULE_LABELS: Record<string, string> = {
-  funny_no_laugh: 'FUNNY, NO LAUGHTER',
-  funny_corroborated: 'LAUGHTER CONFIRMED ×2',
-  shock_no_arousal: 'SHOCK, FLAT DELIVERY',
-  bait_penalty: 'ENGAGEMENT BAIT',
-  heatmap_boost: 'HUMANS REPLAYED THIS'
+  funny_no_laugh: 'Funny moment, no laughter signal',
+  funny_corroborated: 'Laughter confirmed',
+  shock_no_arousal: 'Surprise with a quiet delivery',
+  bait_penalty: 'Engagement bait detected',
+  heatmap_boost: 'People replayed this moment'
 }
 
+const CAPTION_LABELS: Record<string, string> = { classic: 'Clean', beast: 'Bold Pop', hormozi: 'Punch', minimal: 'Minimal', 'karaoke-pop': 'Karaoke' }
 const SIGNAL_LABELS: Record<string, string> = {
   laughter: 'laughter',
   audio_events: 'audio events',
@@ -84,7 +79,6 @@ export default function Review({ results, onBack, onRestyle }: Props) {
   if (editing !== null) {
     return (
       <div className="review">
-        <div className="grain" />
         <ClipEditor
           key={`${editing}-${reloadKey}`}
           jobId={results.job_id}
@@ -106,9 +100,8 @@ export default function Review({ results, onBack, onRestyle }: Props) {
         <div className="review-title-block">
           <h1 className="review-title">{results.ingest?.title ?? results.job_id}</h1>
           <p className="review-sub mono">
-            {outputs.length} clips · scored by {results.score?.model ?? '—'} ·{' '}
-            {results.score?.llm_mode === 'ollama' ? 'LOCAL ESTIMATE' : 'standard confidence'} ·{' '}
-            {results.candidates?.heatmap_present ? 'replay heatmap in play' : 'no public heatmap'}
+            {outputs.length} clips · {results.score?.llm_mode === 'ollama' ? 'scored locally' : 'AI-assisted scoring'} ·{' '}
+            {results.candidates?.heatmap_present ? 'replay signals included' : 'audio and visual signals'}
           </p>
         </div>
       </header>
@@ -121,7 +114,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
             className={`opt ${restylePreset === preset ? 'opt-on' : ''}`}
             onClick={() => setRestylePreset(preset)}
           >
-            {preset}
+            {CAPTION_LABELS[preset] ?? preset}
           </button>
         ))}
         <span className="opt-label" style={{ marginLeft: 18 }}>
@@ -143,7 +136,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
           onClick={() => onRestyle(restylePreset, restyleCamera)}
           title="re-renders only the changed stages — scores and cuts stay"
         >
-          RESTYLE + RE-RENDER
+          Apply changes
         </button>
       </div>
 
@@ -183,17 +176,17 @@ export default function Review({ results, onBack, onRestyle }: Props) {
                 {mediaState === 'loading' && <p className="monitor-status mono">loading clip…</p>}
                 {mediaState === 'error' && (
                   <div className="monitor-error" role="alert" data-testid="video-error">
-                    <strong>CLIP COULD NOT BE LOADED</strong>
-                    <span>Check the render artifact or retry this job.</span>
-                    <button className="btn-secondary" onClick={() => setReloadKey((k) => k + 1)}>
-                      RETRY LOAD
+                    <strong>This clip could not be loaded<span className="sr-only">CLIP COULD NOT BE LOADED</span></strong>
+                    <span>Check the saved render or try loading it again.</span>
+                    <button className="btn-secondary" aria-label="RETRY LOAD" onClick={() => setReloadKey((k) => k + 1)}>
+                      Try again
                     </button>
                   </div>
                 )}
               </>
             ) : (
               <div className="monitor-error" role="alert" data-testid="artifact-error">
-                <strong>RENDER ARTIFACT UNAVAILABLE</strong>
+                <strong>The rendered clip is unavailable<span className="sr-only">RENDER ARTIFACT UNAVAILABLE</span></strong>
                 <span>
                   {pair.out?.artifact_status === 'outside_managed_root'
                     ? 'The clip is outside the managed application folder.'
@@ -208,10 +201,10 @@ export default function Review({ results, onBack, onRestyle }: Props) {
             )}
             <div className="monitor-actions">
               <button className="btn-secondary" onClick={() => setEditing(pair.out!.clip)}>
-                ✎ EDIT CLIP (bounds · cuts · visuals)
+                Edit clip
               </button>
-              <button className="btn-primary" onClick={() => doExport(pair.out!, pair.clip!)}>
-                {exported[pair.out.clip] ? 'EXPORTED ✓' : 'EXPORT MP4'}
+              <button className="btn-primary" aria-label="EXPORT MP4" onClick={() => doExport(pair.out!, pair.clip!)}>
+                {exported[pair.out.clip] ? 'Exported' : 'Export MP4'}
               </button>
               {exported[pair.out.clip] && (
                 <span className="mono export-path">{exported[pair.out.clip]}</span>
@@ -220,7 +213,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
           </div>
 
           <aside className="audit">
-            <p className="audit-kicker">THE AUDIT</p>
+            <p className="audit-kicker">WHY THIS CLIP</p>
             <div className="audit-score-row">
               <span className="audit-big mono">{Math.round(pair.clip.score)}</span>
               <div className="audit-platforms">
@@ -237,7 +230,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
             </div>
             <p className="audit-summary">{pair.clip.summary}</p>
 
-            <p className="audit-label">SUBSCORES</p>
+            <p className="audit-label">SIGNAL BREAKDOWN</p>
             <div className="subs">
               {Object.entries(pair.clip.subscores).map(([name, value]) => (
                 <div className="sub-row" key={name}>
@@ -252,7 +245,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
 
             {pair.clip.adjustments.length > 0 && (
               <>
-                <p className="audit-label">ADJUSTMENTS</p>
+                <p className="audit-label">WHAT CHANGED THE SCORE</p>
                 <div className="ledger">
                   {pair.clip.adjustments.map((adj, i) => (
                     <div className="ledger-row" key={i}>
@@ -271,19 +264,21 @@ export default function Review({ results, onBack, onRestyle }: Props) {
 
             {pair.clip.ledger && (
               <>
-                <p className="audit-label">WHY THIS CLIP</p>
+                <p className="audit-label">SCORING DETAILS</p>
                 <div className="ledger ledger-explain" data-testid="clip-ledger">
                   <div className="ledger-row">
                     <span className="ledger-factor mono">{Math.round(pair.clip.ledger.score)}</span>
                     <div>
-                      <span className="ledger-rule">COMPOSITE SCORE</span>
+                                              <span className="ledger-rule">Overall score</span>
+
                       <span className="ledger-reason">Highest platform composite: {pair.clip.best_platform}</span>
                     </div>
                   </div>
                   <div className="ledger-row">
                     <span className="ledger-factor mono">{Math.round(pair.clip.ledger.composition.curve_score)}</span>
                     <div>
-                      <span className="ledger-rule">SIGNAL COMPOSITION</span>
+                                              <span className="ledger-rule">Signal mix</span>
+
                       <span className="ledger-reason">
                         arousal {Math.round(pair.clip.ledger.composition.arousal_pct * 100)}% ·{' '}
                         {pair.clip.ledger.composition.heatmap_pct === null
@@ -296,7 +291,8 @@ export default function Review({ results, onBack, onRestyle }: Props) {
                   <div className="ledger-row">
                     <span className="ledger-factor mono">v{pair.clip.ledger.provenance.scoring_config_version}</span>
                     <div>
-                      <span className="ledger-rule">PROVENANCE</span>
+                                              <span className="ledger-rule">Scoring source</span>
+
                       <span className="ledger-reason">
                         {pair.clip.ledger.provenance.model} · {pair.clip.ledger.provenance.llm_mode} ·{' '}
                         {pair.clip.ledger.provenance.arousal_source}
@@ -307,7 +303,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
               </>
             )}
 
-            <p className="audit-label">SIGNALS</p>
+            <p className="audit-label">SIGNALS USED</p>
             <div className="signals">
               {pair.clip.signals_fired.map((signal) => (
                 <span className="sig sig-on" key={signal}>
@@ -325,10 +321,11 @@ export default function Review({ results, onBack, onRestyle }: Props) {
 
             {pair.clip.music && (
               <>
-                <p className="audit-label">MUSIC BRIEF</p>
+                <p className="audit-label">MUSIC DIRECTION</p>
                 <div className="music-card">
                   <p className="music-main">
-                    <span className="amber">{pair.clip.music.genre}</span> ·{' '}
+                                      <span className="signal-accent">{pair.clip.music.genre}</span>
+ ·{' '}
                     {pair.clip.music.mood} · <span className="mono">{pair.clip.music.bpm_range} bpm</span>
                   </p>
                   <p className="music-theme">{pair.clip.music.theme}</p>

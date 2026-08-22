@@ -1,76 +1,10 @@
-interface Props {
-  onBack: () => void
-}
+import { ArrowLeft, ExternalLink, FileText, Github, Scale, ShieldCheck } from 'lucide-react'
+import { useEffect, useState } from 'react'
 
-const CODE_NOTICES = [
-  ['WhisperX 3.8.6', 'BSD-2-Clause', 'Pinned transcription and diarization dependency'],
-  ['clip-forge, clippyme, laughter-detection, PANNs, autoclip', 'MIT', 'Adapted or vendored processing components'],
-  ['3D-Speaker CAM++', 'Apache-2.0', 'Vendored speaker-embedding model definition'],
-  ['supoclip and ViralMint-derived caption logic', 'AGPL-3.0', 'Adapted captioning approaches']
-]
+interface Props { onBack: () => void }
 
 export default function About({ onBack }: Props) {
-  const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent
-  const runtimePlatform = userAgent.includes('Windows') ? 'Windows' : userAgent.includes('Mac') ? 'macOS' : userAgent.includes('Linux') ? 'Linux' : 'Desktop platform'
-
-  return (
-    <div className="onboarding about-page">
-      <div className="grain" />
-      <main className="about-card" aria-labelledby="about-title">
-        <header className="modal-head">
-          <div>
-            <p className="ob-kicker">ClipGauge v0.4.1 / creator edition</p>
-            <h1 id="about-title" className="ob-h2">ABOUT / LICENSES</h1>
-          </div>
-          <button className="btn-ghost" onClick={onBack}>back</button>
-        </header>
-
-        <p className="ob-body">
-          ClipGauge is a local-first desktop AI video clipper. It is a modified derivative of
-          <a href="https://github.com/Blueturboguy07/publikclip" target="_blank" rel="noreferrer"> publikclip</a>,
-          based on upstream commit <span className="mono">a53a359b985b1d2d666266062936cc186f02340b</span>.
-        </p>
-
-        <section className="about-section" aria-labelledby="license-heading">
-          <p id="license-heading" className="audit-label">PRIMARY LICENSE</p>
-          <p className="ig-message">
-            ClipGauge is distributed under the <strong>GNU Affero General Public License, version 3 or later</strong>.
-            Read the complete license in the repository’s <span className="mono">LICENSE</span> file.
-          </p>
-        </section>
-
-        <section className="about-section" aria-labelledby="notice-heading">
-          <p id="notice-heading" className="audit-label">THIRD-PARTY NOTICE SUMMARY</p>
-          <div className="about-notices">
-            {CODE_NOTICES.map(([name, license, purpose]) => (
-              <div className="about-notice" key={name}>
-                <strong>{name}</strong>
-                <span className="chip chip-amber">{license}</span>
-                <span>{purpose}</span>
-              </div>
-            ))}
-          </div>
-          <p className="ig-message">
-            The complete inventory of adapted code, runtime-fetched model weights, bundled fonts,
-            optional binaries, and deliberate exclusions is in <span className="mono">THIRD_PARTY_NOTICES.md</span>.
-          </p>
-        </section>
-
-        <section className="about-section" aria-labelledby="privacy-heading">
-          <p id="privacy-heading" className="audit-label">LOCAL-FIRST DISCLOSURE</p>
-          <p className="ig-message">
-            There is no default telemetry and no mandatory subscription. Source media and managed
-            job state remain local unless you choose a URL download, runtime/model download, optional
-            provider integration, or another network feature shown by the privacy activity view.
-          </p>
-        </section>
-
-        <footer className="about-footer">
-          <span className="mono">Data root: ~/.clipgauge</span>
-          <span className="mono">Bundle: io.github.pavithranra.clipgauge</span>
-          <span className="mono">Platform: {runtimePlatform} · release metadata in Diagnostics</span>
-        </footer>
-      </main>
-    </div>
-  )
+  const [platform, setPlatform] = useState('Desktop')
+  useEffect(() => { setPlatform(navigator.platform || 'Desktop') }, [])
+  return <div className="page-frame about-page"><header className="page-header"><div><p className="section-eyebrow">About</p><h1>ClipGauge, made for making.</h1><p className="page-lede">A local-first desktop app for finding, framing, captioning, and reviewing short vertical clips.</p></div><button type="button" className="button button-quiet" onClick={onBack}><ArrowLeft size={16} aria-hidden="true" /> Back to Create</button></header><div className="about-grid"><section className="about-identity card-surface"><span className="about-mark" aria-hidden="true"><span /></span><h2>ClipGauge</h2><p>Turn long videos into vertical clips worth sharing.</p><div className="about-meta"><span>Version</span><strong>ClipGauge v0.5.0</strong><span>Platform</span><strong>{platform}</strong></div></section><section className="about-section card-surface"><div className="about-section-icon"><Scale size={19} aria-hidden="true" /></div><div><h2>License</h2><p>ClipGauge is distributed under the <strong>GNU Affero General Public License, version 3 or later</strong>.</p><a className="text-link" href="https://github.com/Pavithran-R-A/clipgauge/blob/main/LICENSE" target="_blank" rel="noreferrer">Read the license <ExternalLink size={14} aria-hidden="true" /></a></div></section><section className="about-section card-surface"><div className="about-section-icon"><Github size={19} aria-hidden="true" /></div><div><h2>Source and attribution</h2><p>ClipGauge is maintained as an independent open-source project and preserves attribution to its upstream project, <strong>Blueturboguy07/publikclip</strong>.</p><div className="about-links"><a className="text-link" href="https://github.com/Pavithran-R-A/clipgauge" target="_blank" rel="noreferrer">Source code <ExternalLink size={14} aria-hidden="true" /></a><a className="text-link" href="https://github.com/Blueturboguy07/publikclip" target="_blank" rel="noreferrer">Upstream project <ExternalLink size={14} aria-hidden="true" /></a></div></div></section><section className="about-section card-surface"><div className="about-section-icon"><FileText size={19} aria-hidden="true" /></div><div><h2>Third-party notices</h2><p>ClipGauge includes and downloads software and model assets under their own licenses. The complete notices include the runtime, fonts, model sources, and the GPL-3.0-only bgutil component.</p><a className="text-link" href="https://github.com/Pavithran-R-A/clipgauge/blob/main/THIRD_PARTY_NOTICES.md" target="_blank" rel="noreferrer">View notices <ExternalLink size={14} aria-hidden="true" /></a></div></section></div><div className="about-footer-note"><ShieldCheck size={16} aria-hidden="true" /><span>ClipGauge has no mandatory account and no default telemetry. See Privacy for the details of the provider you choose.</span></div></div>
 }

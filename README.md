@@ -1,125 +1,89 @@
 # ClipGauge
 
-**Long video in. Auditable vertical clips out. Everything runs locally by default.**
+ClipGauge helps creators find the moments worth sharing, turn them into vertical clips, and understand why each clip scored well.
 
-ClipGauge is an AGPL-3.0-or-later desktop application for turning a YouTube URL or local horizontal video into scored 9:16 clips. It combines transcription, speaker and laughter signals, active-speaker camera direction, captions, rendering, and an explainable clip ledger. The project is a modified derivative of [Blueturboguy07/publikclip](https://github.com/Blueturboguy07/publikclip); the exact baseline and changes are documented in [`ORIGIN.md`](ORIGIN.md).
+[Download the latest release](https://github.com/Pavithran-R-A/clipgauge/releases/latest) · [View the source](https://github.com/Pavithran-R-A/clipgauge) · [Report a problem](https://github.com/Pavithran-R-A/clipgauge/issues)
 
-| Capability | What ClipGauge does |
-|---|---|
-| Smart camera | Uses speaker and scene signals to select and smooth vertical crop paths, with cut and punch-in decisions recorded in the clip ledger. |
-| Word-level captions | Supports multiple caption presets, karaoke highlighting, prosodic emphasis, and detected laughter markers when the local pipeline provides those signals. |
-| Explainable scoring | Shows subscores, adjustments, detector signals, and provenance instead of presenting an unauditable number. |
-| Local-first processing | Keeps source media and managed job state local by default, with Ollama, LM Studio, and compatible local endpoints available for loopback inference. |
-| Universal providers | Uses one capability-aware scoring contract for Gemini, OpenRouter, Groq, Cloudflare Workers AI, Hugging Face, Cerebras, Ollama, LM Studio, and custom OpenAI-compatible endpoints. |
-| Privacy-aware inference | Shows provider, model, endpoint identity, local/cloud state, structured-output level, and vision degradation in provenance and Privacy Activity. |
+> **Current release: ClipGauge v0.5.0** — a creator-focused redesign with a calmer workflow, clearer provider choices, and stronger privacy explanations.
 
-## Current release
+## See the workflow
 
-ClipGauge v0.4.1 is the managed-runtime and creator-workflow release. It adds one consented Download Manager for every runtime and analysis asset; self-service FFmpeg; explicit faster-whisper/alignment setup; managed YouTube compatibility with portable Node.js and a loopback PO-token provider; optional authenticated-browser retrieval; streamed/cancellable Setup Center operations; and no hidden large downloads during compute. v0.1.0, v0.1.1, v0.2.0, v0.2.1, and v0.3.0 remain immutable historical releases.
+The v0.5.0 screenshots below are captured from the packaged application and show the real creator workflow. They are intentionally kept close to the actions you take: add a video, choose how it should be scored, review the suggested moments, and export the clips.
 
-The v0.4.1 release artifacts are unsigned unless the release notes explicitly prove otherwise. Windows SmartScreen warnings and non-notarized macOS Gatekeeper warnings are expected. The updater remains disabled because no real signing key is configured. ClipGauge Local remains optional until its pinned runtime and selected model are installed and verified.
+![ClipGauge Create screen](docs/screenshots/v0.5.0-packaged-create.png)
 
-## Download
+![ClipGauge Sessions screen](docs/screenshots/v0.5.0-packaged-sessions.png)
 
-- **Windows x64**: [ClipGauge_0.4.1_Windows_x64_NSIS.exe](https://github.com/Pavithran-R-A/clipgauge/releases/latest) — unsigned; Windows SmartScreen will warn on first run
-- **Linux amd64**: [ClipGauge_0.4.1_amd64.deb](https://github.com/Pavithran-R-A/clipgauge/releases/latest)
-- **macOS**: build from source (see [`INSTALL.md`](INSTALL.md))
+## What ClipGauge does
 
-## Provider options
+ClipGauge works from a video file or a supported link. It detects candidate moments, scores them against signals such as speech, laughter, pacing, and replay data when available, then renders vertical clips with captions and optional music direction. You can inspect the reasoning, edit a clip, and export an MP4 without leaving the app.
 
-Completely local options include Ollama, LM Studio, and compatible local endpoints. Curated cloud/BYO-key options include Gemini, OpenRouter, Groq, Cloudflare Workers AI, Hugging Face, and Cerebras. Free access, quotas, model support, retention, and payment requirements vary and can change; ClipGauge does not promise permanent free or unlimited usage. Any OpenAI-compatible endpoint can be configured manually with a model and validated authentication mode.
+The main flow is designed for creators rather than model configuration. Start on **Create**, pick a local or cloud scoring option, choose a caption style, and let the processing timeline show what is happening. **Sessions** keeps previous jobs close at hand, while **Why this clip** explains the recommendation instead of leaving you with a bare number.
 
-See [`docs/providers/README.md`](docs/providers/README.md) and [`docs/providers/PROVIDER_RESEARCH_2026.md`](docs/providers/PROVIDER_RESEARCH_2026.md) for setup, capability, privacy, and terms guidance.
+## Get started
 
-## Public artifacts
+1. Download the installer for your operating system from the [latest release](https://github.com/Pavithran-R-A/clipgauge/releases/latest).
+2. Open ClipGauge and approve the one-time local component setup. The app tells you what will be installed, what is already available, and when a size still needs to be calculated.
+3. Add a video from your computer or paste a supported link. Choose the scoring provider and caption style that fit this clip.
+4. Review the suggested clips, adjust a cut or caption style if needed, and export the MP4 you want to publish.
 
-The v0.4.1 release workflow is the source of truth for downloadable artifacts. It publishes platform artifacts only after native build, metadata, checksum, SBOM, provenance, attestation, and secret-scan gates pass. Review release notes and checksums before installing any unsigned artifact.
+If a setup step needs attention, open **Setup & Storage**. If a connection or render needs investigation, open **Help & Diagnostics** and create a support bundle. The bundle is designed for troubleshooting and does not include provider credentials.
 
-Every public binary is accompanied by `SHA256SUMS`. The release also includes a CycloneDX SBOM and a human-readable provenance record. A checksum is not a cryptographic attestation, and neither is a substitute for Windows code signing or Apple signing/notarization.
+## Choose how scoring runs
 
-## Requirements
+ClipGauge keeps all supported choices visible in **AI Providers**. You can use the built-in local route, a free-friendly cloud route, a curated cloud provider with your own key, or a local app already running on your computer.
 
-Building from source requires Git, Node.js 22 or newer, Rust via [rustup](https://rustup.rs/), Python 3.12, and [uv](https://docs.astral.sh/uv/). Linux packaging additionally requires the Tauri system libraries listed in [`INSTALL.md`](INSTALL.md). Runtime, analysis-model, speech, alignment, YouTube compatibility, and ClipGauge Local downloads require network access only during an explicit Setup Center action. Setup lists the exact asset group, byte estimate, license, provenance, and destination before download; verified assets are reused thereafter. Compute stages do not silently fetch large files. Once verified assets are installed, ClipGauge Local scoring runs against the loopback-owned runtime without a cloud credential.
+| Option | Best for | What to know |
+| --- | --- | --- |
+| ClipGauge Local | Keeping source media on this computer | No provider account; requires the local setup components. |
+| OpenRouter Free | Trying a cloud route with a free model path | Availability, limits, and the routed model can change. |
+| Gemini, Groq, Cloudflare, Hugging Face, Cerebras | Using a provider you already use | Add your own key; model capabilities and provider terms vary. |
+| Ollama or LM Studio | Using a local model you already run | Start the local server first, then test the connection. |
+| Custom OpenAI-compatible | Connecting an endpoint you control | Enter the endpoint, model, and credential in Advanced settings. |
 
-## Install from source
+**Pexels** is separate from AI providers. It lives in **Integrations** as an optional source for stock visuals. Instagram feedback is also optional and separate from scoring.
 
-Clone the ClipGauge repository and build the desktop application:
+## Privacy in plain language
 
-```sh
+Your video stays on this computer when you use a local provider. When you choose a cloud provider, ClipGauge explains what can be sent before you run the job; this can include transcript excerpts, prompts, and sampled frames when the selected model supports vision. Provider keys are stored in the operating-system vault rather than project files.
+
+ClipGauge does not read browser cookies by default. Any browser-cookie behavior must be explicitly enabled for a supported workflow. Read the in-app **Privacy** panel and [`docs/providers/README.md`](docs/providers/README.md) before sending source-derived material to a third party.
+
+## Build from source
+
+ClipGauge is a Tauri desktop app with a React and TypeScript interface and a Python processing pipeline. You will need Node.js, Rust, Python, `uv`, and the platform dependencies described in [`INSTALL.md`](INSTALL.md).
+
+```bash
 git clone https://github.com/Pavithran-R-A/clipgauge.git
-cd clipgauge/app
+cd clipgauge
+
+cd app
 npm ci
-npm run tauri build -- --bundles deb
+npm run dev
 ```
 
-The unsigned Debian artifact is written beneath `app/src-tauri/target/release/bundle/deb/`. Install it only if you understand that it is unsigned and review the package metadata before use. A source-development run is available with:
+Run the checks before opening a pull request:
 
-```sh
-npm run tauri dev
+```bash
+cd app && npm test -- --run && npm run build
+cd ../pipeline && uv run pytest -q
+cd ../app/src-tauri && cargo fmt -- --check && cargo test
 ```
 
-On first run, ClipGauge performs local preflight checks and guides you through the selected scoring mode. Setup Center groups managed assets into Video engine, Speech recognition, Clip analysis, YouTube compatibility, ClipGauge Local, and optional provider components. Each group requires explicit user approval; downloads are resumable, cancellable, SHA-256 verified, and stored below `~/.clipgauge`. Older `~/.publikclip` and library cache data may be reused only after hash verification and are never deleted automatically.
+The release files are built by the repository workflows. Do not commit generated installers, local credentials, job outputs, or model downloads.
 
-## Python pipeline and CLI
+## Contributing
 
-The pipeline is a separately testable Python package named `clipgauge-pipeline`. Its executable is `clipgauge` and its import package is `clipgauge_pipeline`:
+Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/product-principles.md`](docs/product-principles.md). Changes to provider behavior, privacy disclosures, browser-cookie handling, setup downloads, or licensing need extra care; explain the user-visible effect and include tests where the behavior can be checked locally.
 
-```sh
-cd pipeline
-uv sync
-uv run pytest -q
-uv run clipgauge --help
-uv run clipgauge preflight --provider ollama
-uv run clipgauge provider-test --provider openrouter --model openrouter/free
-uv run clipgauge run "https://www.youtube.com/watch?v=..." --provider ollama
-uv run clipgauge setup install-group --group core:youtube
-uv run clipgauge run "https://www.youtube.com/watch?v=..." --provider ollama --cookies-from-browser chrome  # explicit opt-in only
-```
+## License and attribution
 
-The desktop shell invokes the same CLI through `uv` in development and through the packaged resource environment in a bundle. The Rust bridge owns job lifecycle, cancellation, diagnostics, and filesystem boundaries; the Python sidecar emits structured JSONL events.
+ClipGauge is distributed under the **GNU Affero General Public License v3.0 or later**. It began as a fork of [`Blueturboguy07/publikclip`](https://github.com/Blueturboguy07/publikclip); the upstream relationship and retained notices are documented in [`ORIGIN.md`](ORIGIN.md). Third-party licenses and notices remain in [`NOTICE.md`](NOTICE.md), [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), and [`VENDORED-LICENSES.md`](VENDORED-LICENSES.md). The `bgutil` component is documented as **GPL-3.0-only** in the third-party notices.
 
-## Privacy and credentials
+For security-sensitive reports, use [`SECURITY.md`](SECURITY.md) rather than a public issue.
 
-ClipGauge has no default telemetry and no mandatory subscription. Local processing includes source media, transcripts, model inference, scoring inputs, and rendered output. Network activity can occur when you provide a source URL, approve a managed asset group, use a selected cloud provider, use Pexels, or opt into Instagram. Browser-session cookies are never read by default; `--cookies-from-browser` is an explicit opt-in and is recorded in the job settings snapshot. The in-app **Privacy Activity** view describes the selected provider, model, endpoint, and whether frames may leave the device.
+## References
 
-Credentials are stored through the operating system credential store when available and are injected into child processes only for the operation that needs them. Do not place API keys in source files, issue reports, support bundles, or shell history. The support bundle is redacted and excludes raw source media, raw transcripts, and known credential material, but review it before sharing.
-
-## Project layout
-
-```text
-pipeline/   Python package, CLI, model/runtime registry, and tests
-app/        Tauri 2 desktop shell, React frontend, Rust bridge, and tests
-docs/       Completion, release, and provenance planning material
-scripts/    Deterministic version and release-metadata validators
-```
-
-## Development checks
-
-Run the same checks used by continuous integration:
-
-```sh
-python3 scripts/check-version-consistency.py
-
-cd app/src-tauri
-cargo fmt -- --check
-cargo test
-cargo clippy --all-targets --all-features -- -D warnings
-
-cd ../../pipeline
-uv run pytest -q
-
-cd ../app
-npm ci
-npm run build
-npm run test
-```
-
-The test suite includes Rust security and lifecycle tests, Python pipeline tests, and frontend tests. Hardware-dependent model execution, optional Instagram setup, platform signing, and notarization are not assumed by the deterministic source checks.
-
-## Documentation and support
-
-Read [`INSTALL.md`](INSTALL.md) for platform prerequisites, [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for preflight and runtime failures, [`docs/providers/README.md`](docs/providers/README.md) for provider setup, [`docs/v0.4/V0_4_USER_WORKFLOW.md`](docs/v0.4/V0_4_USER_WORKFLOW.md) for managed assets and migration, and [`CHANGELOG.md`](CHANGELOG.md) for the v0.4.1 release record. License and provenance information is available in [`NOTICE.md`](NOTICE.md), [`ORIGIN.md`](ORIGIN.md), and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Use the in-app support-bundle action when reporting a failure, and redact any remaining personal or source-specific information before sharing.
-
-## License
-
-ClipGauge is distributed under the [GNU Affero General Public License, version 3 or later](https://www.gnu.org/licenses/agpl-3.0.html). See [`LICENSE`](LICENSE) for the complete text and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for adapted and vendored components.
+[1]: https://github.com/Pavithran-R-A/clipgauge/releases/latest "ClipGauge latest releases"
+[2]: https://github.com/Pavithran-R-A/clipgauge/blob/main/LICENSE "ClipGauge license"
+[3]: https://github.com/Blueturboguy07/publikclip "publikclip upstream repository"
