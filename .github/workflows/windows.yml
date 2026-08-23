@@ -84,9 +84,15 @@ jobs:
           $pipeline = Join-Path $resources "pipeline"
           if (-not (Test-Path $uv)) { throw "bundled uv missing: $uv" }
           if (-not (Test-Path $pipeline)) { throw "bundled pipeline missing: $pipeline" }
+          New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE\\windows-screenshots" | Out-Null
           $env:CLIPGAUGE_HOME = $nativeHome
           & $uv --directory $pipeline sync --locked
           if ($LASTEXITCODE -ne 0) { throw "bundled pipeline bootstrap failed with exit code $LASTEXITCODE" }
+          $inventory = (& $uv --directory $pipeline run clipgauge setup inventory --model "clipgauge-local/qwen3-4b-q4_k_m" | Out-String | ConvertFrom-Json)
+          if (-not $inventory.video_tools.ready) { throw "packaged Setup inventory did not report FFmpeg ready" }
+          if ($inventory.video_tools.source -ne "system") { throw "packaged Setup inventory did not reuse system FFmpeg" }
+          if ($inventory.video_tools.managed_download_needed) { throw "packaged Setup inventory incorrectly requires managed FFmpeg download" }
+          $inventory | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 (Join-Path "$env:GITHUB_WORKSPACE\\windows-screenshots" "setup-inventory.json")
           $exe = Get-ChildItem $dir -Filter *.exe |
             Where-Object { $_.Name -notmatch "uninstall" } |
             Select-Object -First 1
