@@ -6,6 +6,7 @@
 mod artifact;
 mod diagnostics;
 mod edit_schema;
+mod media_server;
 mod path_security;
 mod process_manager;
 mod secrets;
@@ -23,12 +24,14 @@ use tauri::{AppHandle, Emitter, Manager, State};
 #[derive(Clone)]
 struct AppState {
     processes: Arc<Mutex<process_manager::ProcessManager>>,
+    media: Arc<media_server::MediaServer>,
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(media: Arc<media_server::MediaServer>) -> Self {
         Self {
             processes: Arc::new(Mutex::new(process_manager::ProcessManager::new())),
+            media,
         }
     }
 }
@@ -168,12 +171,48 @@ fn quiet_command(program: &str) -> Command {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
+    if !cfg!(debug_assertions) {
+        // Packaged resources are read-only. Keep uv's project environment in
+        // the user-owned runtime area so edit, run, and setup commands work
+        // after installation on every desktop platform.
+        cmd.env(
+            "UV_PROJECT_ENVIRONMENT",
+            home_dir().join("runtimes").join("pipeline"),
+        );
+    }
     cmd
 }
 
 /// Where the Python pipeline lives and how to invoke it.
 /// Dev builds call `uv run` against the repo's pipeline/ directory. Packaged
 /// builds invoke the bundled python env (M6); resolution stays in one place.
+fn packaged_resource_dir(exe_path: &std::path::Path, platform: &str, uv_name: &str) -> PathBuf {
+    let exe_dir = exe_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let candidates = if platform == "macos" {
+        vec![exe_dir.join("../Resources/resources")]
+    } else if platform == "linux" {
+        // AppImage and portable bundles keep resources beside the executable;
+        // Debian installs the launcher in /usr/bin and resources in
+        // /usr/lib/ClipGauge/resources.
+        vec![
+            exe_dir.join("resources"),
+            exe_dir.join("../lib/ClipGauge/resources"),
+        ]
+    } else {
+        vec![exe_dir.join("resources")]
+    };
+    candidates
+        .into_iter()
+        .find(|candidate| {
+            candidate.join("pipeline").is_dir() && candidate.join("bin").join(uv_name).is_file()
+        })
+        .map(|candidate| candidate.canonicalize().unwrap_or(candidate))
+        .unwrap_or_else(|| exe_dir.join("resources"))
+}
+
 fn pipeline_invocation() -> (String, Vec<String>) {
     if cfg!(debug_assertions) {
         let pipeline_dir: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -195,15 +234,13 @@ fn pipeline_invocation() -> (String, Vec<String>) {
         // Windows (NSIS) lands them in resources\ next to the exe. The venv
         // bootstraps into CLIPGAUGE_HOME on first run (uv handles Python
         // 3.12 download + deps; the onboarding screen owns expectations).
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-            .unwrap_or_else(|| PathBuf::from("."));
-        let resources = if cfg!(target_os = "macos") {
-            exe_dir.join("../Resources/resources")
+        let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
+        let uv_name = if cfg!(target_os = "windows") {
+            "uv.exe"
         } else {
-            exe_dir.join("resources")
+            "uv"
         };
+        let resources = packaged_resource_dir(&exe_path, std::env::consts::OS, uv_name);
         let uv = if cfg!(target_os = "windows") {
             "bin/uv.exe"
         } else {
@@ -801,6 +838,13 @@ fn selected_provider_env(provider: Option<&str>) -> Option<(&'static str, String
     Some((env_name, format!("preset-{kind}")))
 }
 
+fn is_completion_payload(value: &Value) -> bool {
+    matches!(
+        value.get("event").and_then(Value::as_str),
+        Some("terminal" | "result")
+    )
+}
+
 fn stream_pipeline(
     app: &AppHandle,
     program: &str,
@@ -864,12 +908,12 @@ fn stream_pipeline(
             tail
         })
     });
-    let mut terminal_payload: Option<Value> = None;
+    let mut completion_payload: Option<Value> = None;
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                if value.get("event").and_then(Value::as_str) == Some("terminal") {
-                    terminal_payload = Some(value);
+                if is_completion_payload(&value) {
+                    completion_payload = Some(value);
                     continue;
                 }
                 if let Some(job_id) = value.get("job_id").and_then(Value::as_str) {
@@ -914,7 +958,7 @@ fn stream_pipeline(
                 "retryable": true,
             }),
         );
-    } else if let Some(payload) = terminal_payload {
+    } else if let Some(payload) = completion_payload {
         let success = payload.get("ok").and_then(Value::as_bool).unwrap_or(false);
         if let Ok(mut state) = processes.lock() {
             let _ = state.finish(&key, success);
@@ -1481,6 +1525,68 @@ async fn ig_tool(args: Vec<String>) -> Result<Value, String> {
 }
 
 #[tauri::command]
+fn record_media_event(input: Value) -> Result<(), String> {
+    if std::env::var("CLIPGAUGE_QA_MEDIA_TRACE").ok().as_deref() != Some("1") {
+        return Ok(());
+    }
+    let object = input
+        .as_object()
+        .ok_or_else(|| "media trace payload is malformed".to_string())?;
+    let allowed = [
+        "label",
+        "event",
+        "error_code",
+        "error_message",
+        "network_state",
+        "ready_state",
+        "duration",
+        "video_width",
+        "video_height",
+        "current_src",
+    ];
+    let safe = object
+        .iter()
+        .filter(|(key, _)| allowed.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    let mut line = serde_json::to_string(&safe).map_err(|error| error.to_string())?;
+    line.push('\n');
+    let path = home_dir().join("qa-media-events.jsonl");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    if fs::metadata(&path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+        >= 64 * 1024
+    {
+        return Ok(());
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    file.write_all(line.as_bytes())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn request_playback_url(
+    state: State<'_, AppState>,
+    job_id: String,
+    artifact_type: String,
+    clip: Option<u32>,
+) -> Result<String, String> {
+    let path = match artifact_type.as_str() {
+        "render" => artifact::render_artifact(&home_dir(), &job_id, clip.unwrap_or(0))?,
+        "source" => artifact::source_media_artifact(&home_dir(), &job_id)?,
+        _ => return Err("unsupported playback artifact".into()),
+    };
+    state.media.authorize(path)
+}
+
+#[tauri::command]
 fn export_clip(job_id: String, clip: u32, title: Option<String>) -> Result<String, String> {
     artifact::export_clip(
         &home_dir(),
@@ -1492,8 +1598,10 @@ fn export_clip(job_id: String, clip: u32, title: Option<String>) -> Result<Strin
 }
 
 fn main() {
+    let media =
+        Arc::new(media_server::MediaServer::start().expect("failed to start local media server"));
     tauri::Builder::default()
-        .manage(AppState::new())
+        .manage(AppState::new(media))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -1521,6 +1629,8 @@ fn main() {
             edit_tool,
             run_edit_render,
             save_clip_edits,
+            record_media_event,
+            request_playback_url,
             save_pexels_key,
             export_clip
         ])
@@ -1543,11 +1653,43 @@ mod tests {
     use std::fs;
     use std::io::Read;
 
+    #[cfg(target_os = "linux")]
+    use super::packaged_resource_dir;
     use super::{
-        generate_support_bundle_at, ig_connect_args, ig_failure_message, migrate_legacy_data_from,
-        ResumeJobRequest, RunJobRequest,
+        generate_support_bundle_at, ig_connect_args, ig_failure_message, is_completion_payload,
+        migrate_legacy_data_from, ResumeJobRequest, RunJobRequest,
     };
     use serde_json::json;
+
+    #[test]
+    fn edit_result_payload_is_a_valid_stream_completion() {
+        assert!(is_completion_payload(
+            &json!({"event": "terminal", "ok": true})
+        ));
+        assert!(is_completion_payload(
+            &json!({"event": "result", "ok": true})
+        ));
+        assert!(!is_completion_payload(
+            &json!({"event": "progress", "ok": true})
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn debian_resource_layout_is_discovered_from_usr_bin_launcher() {
+        let root = std::env::temp_dir().join(format!(
+            "clipgauge-resource-{}",
+            super::diagnostics::diagnostic_id()
+        ));
+        let exe = root.join("usr/bin/clipgauge-app");
+        let resources = root.join("usr/lib/ClipGauge/resources");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::create_dir_all(resources.join("pipeline")).unwrap();
+        fs::create_dir_all(resources.join("bin")).unwrap();
+        fs::write(resources.join("bin/uv"), b"uv").unwrap();
+        assert_eq!(packaged_resource_dir(&exe, "linux", "uv"), resources);
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn meta_secret_is_not_part_of_child_arguments() {

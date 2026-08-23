@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ClipGauge",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "identifier": "io.github.pavithranra.clipgauge",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -20,15 +20,15 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' asset: http://asset.localhost blob:; font-src 'self' asset: http://asset.localhost data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
-      "devCsp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:1430 ws://localhost:1430; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' asset: http://asset.localhost blob:; font-src 'self' asset: http://asset.localhost data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' asset: http://asset.localhost http://127.0.0.1:* blob:; font-src 'self' asset: http://asset.localhost data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      "devCsp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:1430 ws://localhost:1430; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' asset: http://asset.localhost http://127.0.0.1:* blob:; font-src 'self' asset: http://asset.localhost data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$HOME/.clipgauge/jobs/*/clips/**",
+          "$HOME/.clipgauge/jobs/*/clips/**/*",
           "$HOME/.clipgauge/jobs/*/media*.mp4",
-          "$HOME/.clipgauge/jobs/*/overlays/**",
-          "$HOME/.clipgauge/ig_thumbs/**"
+          "$HOME/.clipgauge/jobs/*/overlays/**/*",
+          "$HOME/.clipgauge/ig_thumbs/**/*"
         ]
       }
     }

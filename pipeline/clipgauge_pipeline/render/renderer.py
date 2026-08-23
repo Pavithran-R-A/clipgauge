@@ -75,26 +75,62 @@ def crop_boxes(frames: list[list[float]], src_w: int, src_h: int) -> list[tuple[
     return boxes
 
 
-def sendcmd_lines(boxes: list[tuple[int, int, int, int]], fps: float, target: str = "crop@c") -> list[str]:
-    """Per-frame w/h/x/y commands, deduped to change-points (openshorts)."""
+def sendcmd_lines(
+    boxes: list[tuple[int, int, int, int]],
+    fps: float,
+    target: str = "crop@c",
+    fields: tuple[str, ...] = ("w", "h", "x", "y"),
+) -> list[str]:
+    """Per-frame command updates, deduped to change-points.
+
+    ``crop`` accepts coordinate-only updates reliably on WebKit/ffmpeg. The
+    renderer uses this helper with dynamic scale dimensions and a fixed-size
+    output crop so the encoder never sees a changing frame shape.
+    """
     lines: list[str] = []
     prev: tuple[int, int, int, int] | None = None
+    names = ("w", "h", "x", "y")
     for i, box in enumerate(boxes):
         if box == prev:
             continue
         t = i / fps
-        w, h, x, y = box
-        pw, ph, px, py = prev if prev else (None, None, None, None)
-        if w != pw:
-            lines.append(f"{t:.4f} {target} w {w};")
-        if h != ph:
-            lines.append(f"{t:.4f} {target} h {h};")
-        if x != px:
-            lines.append(f"{t:.4f} {target} x {x};")
-        if y != py:
-            lines.append(f"{t:.4f} {target} y {y};")
+        values = dict(zip(names, box))
+        previous = dict(zip(names, prev)) if prev else {}
+        for field in fields:
+            if values[field] != previous.get(field):
+                lines.append(f"{t:.4f} {target} {field} {values[field]};")
         prev = box
     return lines
+
+
+def _even(value: float) -> int:
+    return max(2, int(round(value)) // 2 * 2)
+
+
+def render_command_lines(
+    boxes: list[tuple[int, int, int, int]],
+    fps: float,
+    src_w: int,
+    src_h: int,
+    out_w: int,
+    out_h: int,
+) -> list[str]:
+    """Build stable-shape commands for a trajectory's crop boxes.
+
+    Each crop box is represented by a uniform source scale followed by a
+    fixed-size output crop. Only the scale dimensions and output x/y change;
+    the final encoder frame remains ``out_w`` × ``out_h`` throughout.
+    """
+    zoom_boxes: list[tuple[int, int, int, int]] = []
+    viewport_boxes: list[tuple[int, int, int, int]] = []
+    for width, height, x, y in boxes:
+        sx = out_w / width
+        sy = out_h / height
+        zoom_boxes.append((_even(src_w * sx), _even(src_h * sy), 0, 0))
+        viewport_boxes.append((out_w, out_h, _even(x * sx), _even(y * sy)))
+    lines = sendcmd_lines(zoom_boxes, fps, "scale@z", ("w", "h"))
+    lines.extend(sendcmd_lines(viewport_boxes, fps, "crop@o", ("x", "y")))
+    return sorted(lines, key=lambda line: (float(line.split()[0]), 0 if "scale@z" in line else 1))
 
 
 def _q(path: str) -> str:
@@ -132,15 +168,21 @@ def render_clip(
         boxes = [(src_h * 9 // 16 // 2 * 2, src_h - src_h % 2, 0, 0)]
     fps = float(trajectory.get("fps", 25))
 
+    out_w, out_h = output_dimensions()
     cmd_path = out_path.with_suffix(".cmd")
-    cmd_path.write_text("\n".join(sendcmd_lines(boxes, fps)) + "\n")
+    cmd_path.write_text(
+        "\n".join(render_command_lines(boxes, fps, src_w, src_h, out_w, out_h)) + "\n"
+    )
 
     w0, h0, x0, y0 = boxes[0]
-    out_w, out_h = output_dimensions()
+    sx0 = out_w / w0
+    sy0 = out_h / h0
+    zoom_w0, zoom_h0 = _even(src_w * sx0), _even(src_h * sy0)
+    view_x0, view_y0 = _even(x0 * sx0), _even(y0 * sy0)
     vf_parts = [
         f"sendcmd=f={_q(cmd_path)}",
-        f"crop@c=w={w0}:h={h0}:x={x0}:y={y0}",
-        f"scale={out_w}:{out_h}:flags=lanczos",
+        f"scale@z=w={zoom_w0}:h={zoom_h0}:flags=lanczos",
+        f"crop@o=w={out_w}:h={out_h}:x={view_x0}:y={view_y0}",
         "setsar=1",
     ]
     if ass_path is not None:
@@ -155,7 +197,7 @@ def render_clip(
         vcodec = ["-c:v", "libx264", "-preset", x264_preset(), "-crf", str(X264_CRF)]
 
     args = [
-        ffmpeg_bin.ffmpeg(), "-y", "-v", "error",
+        ffmpeg_bin.ffmpeg(), "-nostdin", "-y", "-v", "error",
         "-ss", f"{clip_start:.3f}", "-t", f"{duration:.3f}",
         "-i", media_path,
         "-vf", ",".join(vf_parts),
@@ -167,7 +209,13 @@ def render_clip(
         "-map_metadata", "-1",  # metadata scrub (openshorts ffmpeg_utils)
         str(out_path),
     ]
-    proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    proc = subprocess.run(
+        args,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
     cmd_path.unlink(missing_ok=True)
     if proc.returncode != 0:
         raise RuntimeError(f"Render failed: {(proc.stderr or '')[-800:]}")

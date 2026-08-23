@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from ..memory import release_cpu_memory
+
 SER_REPO = "speechbrain/emotion-recognition-wav2vec2-IEMOCAP"
 WINDOW_SEC = 5.0
 HOP_SEC = 2.5
@@ -88,10 +90,15 @@ def arousal_curve_ser(
     curve = np.divide(acc, weight, out=np.full(n_bins, np.nan), where=weight > 0)
     # Fill non-speech bins by interpolation so consumers get a dense curve.
     if np.all(np.isnan(curve)):
+        del classifier
+        release_cpu_memory()
         return None
     idx = np.arange(n_bins)
     good = ~np.isnan(curve)
-    return np.interp(idx, idx[good], curve[good])
+    result = np.interp(idx, idx[good], curve[good])
+    del classifier
+    release_cpu_memory()
+    return result
 
 
 def arousal_curve_dsp(dynamics: list[float], dynamics_grid_sec: float) -> np.ndarray:

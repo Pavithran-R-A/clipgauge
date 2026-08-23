@@ -2,6 +2,28 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.1] — 2026-08-22
+
+ClipGauge v0.5.1 is a small polish release that closes the remaining visual and public-project misses found after the creator-focused redesign.
+
+### Fixed
+
+- Replaced the remaining first-party yellow and purple app marks with the deep-ocean, teal, blue, and green ClipGauge identity across Tauri platform icons.
+- Removed an unused duplicate mark asset that still carried retired visual-identity language.
+- Reworded the retained clip editor so rendering, dead-space cleanup, and visual suggestions read like creator actions rather than developer commands.
+- Removed the last legacy grain and amber styling from retained result and feedback surfaces.
+
+### Changed
+
+- Added a case-insensitive first-party visual-asset gate that checks SVG color text and raster icon pixels, including a regression self-test for uppercase hex values.
+- Added the permanent branding, privacy, disclosure, evidence, and public-repository rules to the product principles and pull-request checklist.
+- Kept the packaged visual QA evidence and release checks aligned with the current v0.5.1 build.
+
+### Known limitations
+
+- Platform installers remain unsigned unless a release explicitly says otherwise.
+- Provider quotas, model availability, and local hardware requirements continue to depend on the selected setup.
+
 ## [0.5.0] — 2026-08-22
 
 ClipGauge v0.5.0 brings the app back to the creator's workflow: add a video, choose how scoring runs, review the reason for each suggestion, and export the clip you want.

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 from .. import config
@@ -23,6 +24,11 @@ from .timeline import ClipEdit, TimeRemap, detect_dead_space, keep_ranges
 
 def _load_stage(job_dir: Path, stage: str) -> dict:
     return json.loads((job_dir / f"{stage}.json").read_text())["data"]
+
+
+def _job_path(job_dir: Path, raw_path: str | Path) -> Path:
+    path = Path(raw_path)
+    return path if path.is_absolute() else job_dir / path
 
 
 def context_for_clip(job_dir: Path, clip_idx: int, pad: float = 45.0) -> dict:
@@ -44,7 +50,8 @@ def context_for_clip(job_dir: Path, clip_idx: int, pad: float = 45.0) -> dict:
         for w in seg.get("words", [])
         if win_a <= w["start"] <= win_b
     ]
-    curves = json.loads(Path(events["curves_path"]).read_text())
+    curves_path = _job_path(job_dir, events["curves_path"])
+    curves = json.loads(curves_path.read_text())
     grid = float(curves["grid_sec"])
     rms = curves["rms"][int(win_a / grid) : int(win_b / grid)]
     clip_events = [
@@ -61,8 +68,9 @@ def context_for_clip(job_dir: Path, clip_idx: int, pad: float = 45.0) -> dict:
     if camera_path.exists():
         cam = json.loads(camera_path.read_text())["data"]
         traj_file = cam.get("trajectories", {}).get(str(clip_idx))
-        if traj_file and Path(traj_file).exists():
-            t = json.loads(Path(traj_file).read_text())
+        trajectory_path = _job_path(job_dir, traj_file) if traj_file else None
+        if trajectory_path and trajectory_path.exists():
+            t = json.loads(trajectory_path.read_text())
             trajectory = {"fps": t.get("fps", 25), "frames": t.get("frames", [])}
 
     return {
@@ -97,7 +105,7 @@ def _camera_needs_redirect(job_dir: Path, clip_idx: int, edit: ClipEdit, score_c
 def _trajectory_for(job_dir: Path, clip_idx: int, edit: ClipEdit, score_clip: dict, settings: config.Settings, emit) -> dict:
     if not _camera_needs_redirect(job_dir, clip_idx, edit, score_clip):
         traj_path = _load_stage(job_dir, "camera")["trajectories"][str(clip_idx)]
-        return json.loads(Path(traj_path).read_text())
+        return json.loads(_job_path(job_dir, traj_path).read_text())
 
     emit(-1, "Re-directing camera for new bounds…")
     import numpy as np
@@ -110,7 +118,7 @@ def _trajectory_for(job_dir: Path, clip_idx: int, edit: ClipEdit, score_clip: di
     ingest = _load_stage(job_dir, "ingest")
     diarize = _load_stage(job_dir, "diarize")
     events = _load_stage(job_dir, "events")
-    curves = json.loads(Path(events["curves_path"]).read_text())
+    curves = json.loads(_job_path(job_dir, events["curves_path"]).read_text())
 
     detector = FaceDetector(str(registry.ensure(specs.ULTRAFACE, lambda f, m: None)))
     model = asd_mod.AsdModel(
@@ -123,7 +131,7 @@ def _trajectory_for(job_dir: Path, clip_idx: int, edit: ClipEdit, score_clip: di
 
     src_w, src_h = int(ingest["probe"]["width"]), int(ingest["probe"]["height"])
     analysis = asd_mod.analyze_clip(
-        ingest["media_path"], edit.start, edit.end, detector, model, src_w, src_h
+        str(_job_path(job_dir, ingest["media_path"])), edit.start, edit.end, detector, model, src_w, src_h
     )
     clip_turns = [t for t in diarize["turns"] if t["end"] > edit.start and t["start"] < edit.end]
     traj = director.build_trajectory(
@@ -169,6 +177,35 @@ def _overlay_filters(overlays, input_offset: int, out_w: int, out_h: int) -> tup
     return inputs, chains, label
 
 
+def _camera_filter_chain(
+    boxes: list[tuple[int, int, int, int]],
+    fps: float,
+    src_w: int,
+    src_h: int,
+) -> tuple[str, str]:
+    """Build the editor camera command file and stable-shape video chain.
+
+    The encoder-facing crop remains fixed at the output dimensions. Dynamic
+    trajectory dimensions are represented by scale changes, while only the
+    output crop coordinates change at runtime.
+    """
+    out_w, out_h = renderer.output_dimensions()
+    command_text = "\n".join(renderer.render_command_lines(boxes, fps, src_w, src_h, out_w, out_h))
+    w0, h0, x0, y0 = boxes[0]
+    sx0 = out_w / w0
+    sy0 = out_h / h0
+    zoom_w0 = renderer._even(src_w * sx0)  # noqa: SLF001
+    zoom_h0 = renderer._even(src_h * sy0)  # noqa: SLF001
+    view_x0 = renderer._even(x0 * sx0)  # noqa: SLF001
+    view_y0 = renderer._even(y0 * sy0)  # noqa: SLF001
+    chain = (
+        f"[vc]sendcmd=f={{cmd_path}},"
+        f"scale@z=w={zoom_w0}:h={zoom_h0}:flags=lanczos,"
+        f"crop@o=w={out_w}:h={out_h}:x={view_x0}:y={view_y0},setsar=1[vb]"
+    )
+    return command_text, chain
+
+
 def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
     """The per-clip render path. Returns the updated output entry."""
     ingest = _load_stage(job_dir, "ingest")
@@ -208,7 +245,7 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
         if edit.start <= w["start"] < edit.end
     ]
     words_out = remap.remap_words(words_src)
-    curves = json.loads(Path(events["curves_path"]).read_text())
+    curves = json.loads(_job_path(job_dir, events["curves_path"]).read_text())
     cap_words = [ass_mod.Word(text=w["word"], start=w["start"], end=w["end"]) for w in words_out]
     # Emphasis is a SOURCE-time property (per-word RMS in the original
     # audio): mark it on source-timed copies, then carry each surviving
@@ -265,15 +302,17 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
     graph = trims + [f"{concat_in}concat=n={n}:v=1:a=1[vc][ac]"]
 
     cmd_path = out_dir / f"clip_{clip_idx:02d}.cmd"
-    queue._atomic_write_text(cmd_path, "\n".join(renderer.sendcmd_lines(boxes, fps)) + "\n")
-    vchain = (
-        f"[vc]sendcmd=f={renderer._q(cmd_path)},"  # noqa: SLF001
-        f"crop@c=w={boxes[0][0]}:h={boxes[0][1]}:x={boxes[0][2]}:y={boxes[0][3]},"
-        f"scale={renderer.OUT_W}:{renderer.OUT_H}:flags=lanczos,setsar=1[vb]"
-    )
-    graph.append(vchain)
+    command_text, vchain_template = _camera_filter_chain(boxes, fps, src_w, src_h)
+    queue._atomic_write_text(cmd_path, command_text + "\n")
+    graph.append(vchain_template.format(cmd_path=renderer._q(cmd_path)))  # noqa: SLF001
 
-    ov_inputs, ov_chains, vlabel = _overlay_filters(edit.overlays, 1, renderer.OUT_W, renderer.OUT_H)
+    resolved_overlays = [
+        replace(overlay, image_path=str(_job_path(job_dir, overlay.image_path)))
+        if overlay.image_path
+        else overlay
+        for overlay in edit.overlays
+    ]
+    ov_inputs, ov_chains, vlabel = _overlay_filters(resolved_overlays, 1, renderer.OUT_W, renderer.OUT_H)
     graph.extend(ov_chains)
     if captions_ok:
         graph.append(
@@ -290,7 +329,7 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
     out_path = out_dir / f"clip_{clip_idx:02d}.mp4"
     args = [
         ffmpeg_bin.ffmpeg(), "-y", "-v", "error",
-        "-ss", f"{span_a:.3f}", "-t", f"{span_b - span_a:.3f}", "-i", ingest["media_path"],
+        "-ss", f"{span_a:.3f}", "-t", f"{span_b - span_a:.3f}", "-i", str(_job_path(job_dir, ingest["media_path"])),
         *ov_inputs,
         "-filter_complex", ";".join(graph),
         "-map", f"[{vlabel}]", "-map", "[af]",

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
+import { traceMedia } from '../mediaDiagnostics'
 import type { Clip, JobResults, RenderOutput } from '../types'
 import ClipEditor from './ClipEditor'
 
@@ -50,6 +51,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
   const [editing, setEditing] = useState<number | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
   const [mediaState, setMediaState] = useState<'loading' | 'ready' | 'error'>('loading')
+  const [mediaUrl, setMediaUrl] = useState<string | null>(null)
   const styleChanged = restylePreset !== currentPreset || restyleCamera !== 'cut'
 
   const pair = useMemo(() => {
@@ -65,6 +67,20 @@ export default function Review({ results, onBack, onRestyle }: Props) {
   useEffect(() => {
     setMediaState(artifactAvailable ? 'loading' : 'error')
   }, [artifactAvailable, pair.out?.path, pair.out?.artifact_status, reloadKey])
+
+  useEffect(() => {
+    let active = true
+    setMediaUrl(null)
+    if (!artifactAvailable || !pair.out) return () => { active = false }
+    api.requestPlaybackUrl(results.job_id, 'render', pair.out.clip)
+      .then((url) => {
+        if (active) setMediaUrl(url)
+      })
+      .catch(() => {
+        if (active) setMediaState('error')
+      })
+    return () => { active = false }
+  }, [artifactAvailable, pair.out?.clip, pair.out?.path, reloadKey, results.job_id])
 
   async function doExport(out: RenderOutput, clip: Clip) {
     if (!out.path || !artifactAvailable) return
@@ -92,7 +108,6 @@ export default function Review({ results, onBack, onRestyle }: Props) {
 
   return (
     <div className="review">
-      <div className="grain" />
       <header className="review-head">
         <button className="btn-ghost" onClick={onBack}>
           ← studio
@@ -163,16 +178,32 @@ export default function Review({ results, onBack, onRestyle }: Props) {
           <div className="monitor-wrap">
             {artifactAvailable && pair.out.path ? (
               <>
-                <video
-                  key={`${pair.out.path}-${reloadKey}`}
-                  className="monitor"
-                  src={api.fileUrl(pair.out.path)}
-                  controls
-                  playsInline
-                  onLoadedMetadata={() => setMediaState('ready')}
-                  onError={() => setMediaState('error')}
-                  data-testid="review-video"
-                />
+                {mediaUrl && (
+                  <video
+                    key={`${mediaUrl}-${reloadKey}`}
+                    className="monitor"
+                    src={mediaUrl}
+                    controls
+                    playsInline
+                    onLoadStart={(event) => traceMedia('review', 'loadstart', event.currentTarget)}
+                    onLoadedMetadata={(event) => {
+                      traceMedia('review', 'loadedmetadata', event.currentTarget)
+                      setMediaState('ready')
+                    }}
+                    onLoadedData={(event) => traceMedia('review', 'loadeddata', event.currentTarget)}
+                    onCanPlay={(event) => traceMedia('review', 'canplay', event.currentTarget)}
+                    onCanPlayThrough={(event) => traceMedia('review', 'canplaythrough', event.currentTarget)}
+                    onProgress={(event) => traceMedia('review', 'progress', event.currentTarget)}
+                    onStalled={(event) => traceMedia('review', 'stalled', event.currentTarget)}
+                    onSuspend={(event) => traceMedia('review', 'suspend', event.currentTarget)}
+                    onWaiting={(event) => traceMedia('review', 'waiting', event.currentTarget)}
+                    onError={(event) => {
+                      traceMedia('review', 'error', event.currentTarget)
+                      setMediaState('error')
+                    }}
+                    data-testid="review-video"
+                  />
+                )}
                 {mediaState === 'loading' && <p className="monitor-status mono">loading clip…</p>}
                 {mediaState === 'error' && (
                   <div className="monitor-error" role="alert" data-testid="video-error">

@@ -24,6 +24,7 @@ from pathlib import Path
 
 from .. import config
 from ..jobs.queue import Stage, StageContext, StageError, _atomic_write_json
+from ..memory import release_cpu_memory
 from ..models import registry, specs
 from ..render import ffmpeg_bin
 
@@ -168,6 +169,8 @@ class EventsStage(Stage):
         for event in timeline:
             by_type[event["type"]] = by_type.get(event["type"], 0) + 1
 
+        del y16k, y32k, curves, probs_by_type, events
+        release_cpu_memory()
         return {
             "timeline": timeline,
             "counts": by_type,

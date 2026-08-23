@@ -1,5 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { waitFor } from '@testing-library/react'
 import Review from './Review'
 import { api } from '../api'
 import type { JobResults, RenderOutput } from '../types'
@@ -7,6 +8,8 @@ import type { JobResults, RenderOutput } from '../types'
 vi.mock('../api', () => ({
   api: {
     fileUrl: vi.fn((path: string) => `asset://${path}`),
+    requestPlaybackUrl: vi.fn().mockResolvedValue('http://127.0.0.1:49152/media/test-token'),
+    recordMediaEvent: vi.fn().mockRejectedValue(new Error('diagnostics unavailable')),
     exportClip: vi.fn().mockResolvedValue('/Downloads/clip.mp4')
   }
 }))
@@ -57,7 +60,7 @@ describe('Review media trust states', () => {
     expect(screen.queryByTestId('review-video')).not.toBeInTheDocument()
   })
 
-  it('shows ready media controls after successful metadata load', () => {
+  it('shows ready media controls after successful metadata load', async () => {
     render(
       <Review
         results={results({ path: '/managed/jobs/20260818-155237-c6b118/clips/clip_00.mp4', artifact_status: 'available' })}
@@ -65,13 +68,13 @@ describe('Review media trust states', () => {
         onRestyle={vi.fn()}
       />
     )
-    const video = screen.getByTestId('review-video')
+    const video = await waitFor(() => screen.getByTestId('review-video'))
     fireEvent.loadedMetadata(video)
     expect(screen.queryByText('loading clip…')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'EXPORT MP4' })).toBeEnabled()
   })
 
-  it('shows decode failure diagnostics and supports retry', () => {
+  it('shows decode failure diagnostics and supports retry', async () => {
     render(
       <Review
         results={results({ path: '/managed/jobs/20260818-155237-c6b118/clips/clip_00.mp4', artifact_status: 'available' })}
@@ -79,11 +82,11 @@ describe('Review media trust states', () => {
         onRestyle={vi.fn()}
       />
     )
-    const video = screen.getByTestId('review-video')
+    const video = await waitFor(() => screen.getByTestId('review-video'))
     fireEvent.error(video)
     expect(screen.getByTestId('video-error')).toHaveTextContent('CLIP COULD NOT BE LOADED')
     fireEvent.click(screen.getByRole('button', { name: 'RETRY LOAD' }))
-    expect(screen.getByTestId('review-video')).toBeInTheDocument()
+    expect(await waitFor(() => screen.getByTestId('review-video'))).toBeInTheDocument()
   })
 
   it('exports by job and clip identity, never a source pathname', async () => {

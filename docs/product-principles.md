@@ -58,6 +58,10 @@ ClipGauge remains an AGPL project derived from [`Blueturboguy07/publikclip`](htt
 
 Release notes, screenshots, benchmarks, accessibility statements, and platform support claims must describe what was actually checked. A limitation is more trustworthy than an unsupported promise.
 
+## Permanent project rules
+
+ClipGauge first-party branding does not use purple, violet, indigo, magenta, yellow, gold, or amber. Legal upstream attribution stays accurate without preserving upstream visual identity. Public UI and documentation use human, concise wording. The public repository root stays clean and does not accumulate internal agent, phase, or closure files. Large downloads are disclosed before they begin and require consent. Technical details belong behind Advanced or Technical details disclosures. Local use remains possible without a mandatory cloud account. Mocked tests are never described as live or model-backed tests. A known project-owned blocker or high-severity defect prevents release.
+
 ## How to use these principles
 
 When a proposal conflicts with a principle, document the tradeoff in the issue or pull request. A new screen is not complete until it has an empty state, an error state, a clear escape route, and a test or verification note appropriate to its risk.

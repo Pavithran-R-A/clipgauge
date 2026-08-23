@@ -17,10 +17,11 @@ describe('desktop security configuration', () => {
     expect(csp).toContain('http://asset.localhost')
     expect(csp).toMatch(/img-src[^;]*asset:[^;]*http:\/\/asset\.localhost/)
     expect(csp).toMatch(/media-src[^;]*asset:[^;]*http:\/\/asset\.localhost/)
+    expect(csp).toContain('http://127.0.0.1:*')
     expect(csp).not.toContain('localhost:1430')
     expect(csp).not.toContain('ws://localhost:1430')
     expect(csp).not.toContain("'unsafe-eval'")
-    expect(csp).not.toContain('*')
+    expect(csp).not.toMatch(/(?:^|[\s;])\*(?:[\s;]|$)/)
   })
 
   it('keeps Vite and HMR origins in development CSP only', () => {
@@ -30,15 +31,15 @@ describe('desktop security configuration', () => {
     expect(devCsp).toContain('http://ipc.localhost')
     expect(devCsp).toContain('http://asset.localhost')
     expect(devCsp).not.toContain("'unsafe-eval'")
-    expect(devCsp).not.toContain('*')
+    expect(devCsp).not.toMatch(/(?:^|[\s;])\*(?:[\s;]|$)/)
   })
 
   it('scopes assets to media directories rather than whole application state', () => {
     const scope = config.app.security.assetProtocol.scope
-    expect(scope).toContain('$HOME/.clipgauge/jobs/*/clips/**')
+    expect(scope).toContain('$HOME/.clipgauge/jobs/*/clips/**/*')
     expect(scope).toContain('$HOME/.clipgauge/jobs/*/media*.mp4')
-    expect(scope).toContain('$HOME/.clipgauge/jobs/*/overlays/**')
-    expect(scope).toContain('$HOME/.clipgauge/ig_thumbs/**')
+    expect(scope).toContain('$HOME/.clipgauge/jobs/*/overlays/**/*')
+    expect(scope).toContain('$HOME/.clipgauge/ig_thumbs/**/*')
     expect(scope).not.toContain('$HOME/.clipgauge/**')
     expect(scope.join('\n')).not.toMatch(/secrets|instagram\.json|diagnostics|models|bin/)
   })

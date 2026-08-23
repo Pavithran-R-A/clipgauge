@@ -4,15 +4,15 @@ ClipGauge helps creators find the moments worth sharing, turn them into vertical
 
 [Download the latest release](https://github.com/Pavithran-R-A/clipgauge/releases/latest) · [View the source](https://github.com/Pavithran-R-A/clipgauge) · [Report a problem](https://github.com/Pavithran-R-A/clipgauge/issues)
 
-> **Current release: ClipGauge v0.5.0** — a creator-focused redesign with a calmer workflow, clearer provider choices, and stronger privacy explanations.
+> **Current release: ClipGauge v0.5.1** — a creator-focused redesign with a calmer workflow, clearer provider choices, and stronger privacy explanations.
 
 ## See the workflow
 
-The v0.5.0 screenshots below are captured from the packaged application and show the real creator workflow. They are intentionally kept close to the actions you take: add a video, choose how it should be scored, review the suggested moments, and export the clips.
+The v0.5.1 screenshots below are captured from the packaged application and show the verified creator workflow: choose a workspace, keep previous sessions close at hand, and understand the setup and scoring choices before you run a video.
 
-![ClipGauge Create screen](docs/screenshots/v0.5.0-packaged-create.png)
+![ClipGauge Create screen](docs/screenshots/v0.5.1-packaged-create.png)
 
-![ClipGauge Sessions screen](docs/screenshots/v0.5.0-packaged-sessions.png)
+![ClipGauge Sessions screen](docs/screenshots/v0.5.1-packaged-sessions.png)
 
 ## What ClipGauge does
 
