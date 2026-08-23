@@ -312,7 +312,7 @@ fn token_from_target(target: &str) -> Option<&str> {
         .map(|(path, _)| path)
         .unwrap_or(target);
     let mut parts = path.split('/');
-    if parts.next()? != "" || parts.next()? != "media" {
+    if !parts.next()?.is_empty() || parts.next()? != "media" {
         return None;
     }
     let token = parts.next()?;
