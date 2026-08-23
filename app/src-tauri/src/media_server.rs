@@ -4,7 +4,7 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,7 @@ struct Inner {
     listener_addr: std::net::SocketAddr,
     capabilities: Mutex<HashMap<String, Capability>>,
     stopping: AtomicBool,
+    stopped: AtomicBool,
     external_handles: AtomicUsize,
 }
 
@@ -38,12 +39,20 @@ impl MediaServer {
             listener_addr,
             capabilities: Mutex::new(HashMap::new()),
             stopping: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
             external_handles: AtomicUsize::new(1),
         });
         let worker_inner = Arc::clone(&inner);
+        let (ready_tx, ready_rx) = mpsc::channel();
         thread::Builder::new()
             .name("clipgauge-media-server".to_string())
-            .spawn(move || serve(listener, worker_inner))?;
+            .spawn(move || serve(listener, worker_inner, ready_tx))?;
+        ready_rx.recv_timeout(Duration::from_secs(1)).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "media server worker did not become ready",
+            )
+        })?;
         Ok(Self { inner })
     }
 
@@ -124,7 +133,8 @@ fn wake_listener(addr: std::net::SocketAddr) {
     let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(100));
 }
 
-fn serve(listener: TcpListener, inner: Arc<Inner>) {
+fn serve(listener: TcpListener, inner: Arc<Inner>, ready: mpsc::Sender<()>) {
+    let _ = ready.send(());
     while !inner.stopping.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -137,6 +147,7 @@ fn serve(listener: TcpListener, inner: Arc<Inner>) {
             Err(_) => break,
         }
     }
+    inner.stopped.store(true, Ordering::Release);
 }
 
 fn handle_connection(mut stream: TcpStream, inner: Arc<Inner>) {
@@ -637,11 +648,22 @@ mod tests {
         let server = MediaServer::start().unwrap();
         let port = server.port();
         let clone = server.clone();
+        let worker_inner = Arc::clone(&server.inner);
         drop(server);
         assert!(TcpStream::connect(("127.0.0.1", port)).is_ok());
         drop(clone);
-        thread::sleep(Duration::from_millis(60));
+        for _ in 0..100 {
+            if server_stopped(&worker_inner) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(server_stopped(&worker_inner));
         assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+    }
+
+    fn server_stopped(inner: &Inner) -> bool {
+        inner.stopped.load(Ordering::Acquire)
     }
 
     #[test]

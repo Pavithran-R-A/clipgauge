@@ -1655,8 +1655,10 @@ mod tests {
 
     use super::{
         generate_support_bundle_at, ig_connect_args, ig_failure_message, is_completion_payload,
-        migrate_legacy_data_from, packaged_resource_dir, ResumeJobRequest, RunJobRequest,
+        migrate_legacy_data_from, ResumeJobRequest, RunJobRequest,
     };
+    #[cfg(target_os = "linux")]
+    use super::packaged_resource_dir;
     use serde_json::json;
 
     #[test]
