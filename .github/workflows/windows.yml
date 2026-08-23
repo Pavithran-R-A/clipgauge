@@ -128,8 +128,9 @@ jobs:
             [ClipGaugeWindowCapture]::MoveWindow($hwnd, 0, 0, $size.width, $size.height, $true) | Out-Null
             [ClipGaugeWindowCapture]::SetForegroundWindow($hwnd) | Out-Null
             Start-Sleep -Seconds 2
+            [ClipGaugeWindowCapture]::SetForegroundWindow($hwnd) | Out-Null
             [ClipGaugeWindowCapture]::Click(100, 309)
-            Start-Sleep -Seconds 20
+            Start-Sleep -Seconds 60
             $bitmap = New-Object System.Drawing.Bitmap -ArgumentList $size.width, $size.height
             $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
             $hdc = $graphics.GetHdc()
@@ -154,8 +155,9 @@ jobs:
             }
             $localBitmap.Save((Join-Path "$env:GITHUB_WORKSPACE\\windows-screenshots" "local-ai-$($size.name).png"), [System.Drawing.Imaging.ImageFormat]::Png)
             $localBitmap.Dispose()
+            [ClipGaugeWindowCapture]::SetForegroundWindow($hwnd) | Out-Null
             [ClipGaugeWindowCapture]::Click(100, 356)
-            Start-Sleep -Seconds 10
+            Start-Sleep -Seconds 15
             $providerBitmap = New-Object System.Drawing.Bitmap -ArgumentList $size.width, $size.height
             $providerGraphics = [System.Drawing.Graphics]::FromImage($providerBitmap)
             $providerHdc = $providerGraphics.GetHdc()
@@ -176,4 +178,5 @@ jobs:
           path: |
             app/src-tauri/target/release/bundle/nsis/*.exe
             windows-screenshots/*.png
+            windows-screenshots/*.json
           if-no-files-found: error
