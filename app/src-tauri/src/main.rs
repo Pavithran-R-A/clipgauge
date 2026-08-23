@@ -1672,6 +1672,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn debian_resource_layout_is_discovered_from_usr_bin_launcher() {
         let root = std::env::temp_dir().join(format!(
