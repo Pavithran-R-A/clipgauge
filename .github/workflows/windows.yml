@@ -1,7 +1,8 @@
 # The Windows smoke test: everything a Windows user's machine would do, on a
-# clean windows-latest runner — resolve the Python env, fetch a
-# caption-capable ffmpeg, pass the full pipeline test suite, build the NSIS
-# installer, install it silently, and launch the real installed app.
+# clean windows-latest runner — resolve the Python env, use a compatible
+# system-PATH ffmpeg without copying it into ClipGauge data, pass the full
+# pipeline test suite, build the NSIS installer, install it silently, and
+# launch the real installed app.
 # The Windows install guide stays honest only while this stays green.
 name: windows
 
@@ -40,14 +41,16 @@ jobs:
         working-directory: pipeline
         run: uv sync
 
-      - name: Fetch caption-capable ffmpeg (Windows static build)
-        working-directory: pipeline
+      - name: Provide compatible system FFmpeg on PATH
+        shell: pwsh
         run: |
-          uv run python -c "from clipgauge_pipeline.render import ffmpeg_bin; ok = ffmpeg_bin.ensure_capable(); print('resolved:', ffmpeg_bin.resolve()); assert ok, 'no subtitles-capable ffmpeg on Windows'"
-          # The test suite isolates CLIPGAUGE_HOME per-test, which hides the
-          # fetch above — CLIPGAUGE_FFMPEG is the resolution order's first
-          # stop, so the render smoke test runs against the real fetched exe.
-          Add-Content $env:GITHUB_ENV "CLIPGAUGE_FFMPEG=$env:CLIPGAUGE_HOME\bin\ffmpeg.exe"
+          $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
+          if (-not $ffmpeg) {
+            choco install ffmpeg -y --no-progress
+            $ffmpeg = Get-Command ffmpeg -ErrorAction Stop
+          }
+          Write-Host "system FFmpeg: $($ffmpeg.Source)"
+          uv run python -c "from clipgauge_pipeline.render import ffmpeg_bin; d = ffmpeg_bin.readiness(); print(d.to_dict()); assert d.ready and d.source == 'system' and not d.managed_download_needed, 'system FFmpeg was not reused'"
 
       - name: Pipeline test suite on Windows
         working-directory: pipeline

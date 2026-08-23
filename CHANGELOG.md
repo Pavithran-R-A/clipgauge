@@ -2,6 +2,28 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.2] — 2026-08-23
+
+ClipGauge v0.5.2 is a focused setup and provider-readiness correction. It keeps the v0.5.1 creator workflow intact while making component ownership, local-AI readiness, setup outcomes, and credential states truthful and recoverable.
+
+### Fixed
+
+- Reused a capable system FFmpeg installation when it starts successfully and exposes the subtitles filter, without presenting a managed download or charging its bytes to Setup & Storage.
+- Added one selected-model-aware ClipGauge Local action that installs the verified runtime and downloads only the chosen model when needed.
+- Aggregated setup operations across every queued component so an earlier or middle failure cannot be replaced by a later success; terminal progress clears on completion and failure remains retryable without a running timer.
+- Standardized provider credential IDs at the native bridge boundary and added safe OS-vault removal for provider and Gemini credentials.
+- Distinguished **Not configured**, **Credential saved**, **Connected**, and **Connection failed** in AI Providers; a saved key is never presented as a verified connection.
+
+### Tests and qualification
+
+- Added deterministic readiness and setup-queue regressions for system-FFmpeg reuse, managed fallback, first/middle queue failure, cancellation, canonical provider IDs, and credential removal.
+- Preserved the v0.5.1 media/editor, path-security, privacy, and release-gate behavior without redesigning the creator pipeline.
+
+### Known limitations
+
+- Platform installers remain subject to the platform signing and notarization state documented on each release.
+- Provider quotas, model availability, and local hardware requirements continue to depend on the selected setup.
+
 ## [0.5.1] — 2026-08-22
 
 ClipGauge v0.5.1 is a small polish release that closes the remaining visual and public-project misses found after the creator-focused redesign.

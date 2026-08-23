@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import time
 import zipfile
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,28 @@ _LEGACY_KEG_CANDIDATES = [
     "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
 ]
 _EXE = ".exe" if platform.system() == "Windows" else ""
+
+
+@dataclass(frozen=True)
+class FFmpegReadiness:
+    ready: bool
+    source: str
+    executable: str | None
+    version: str | None
+    capabilities: dict[str, bool]
+    managed_download_needed: bool
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ready": self.ready,
+            "source": self.source,
+            "executable": self.executable,
+            "version": self.version,
+            "capabilities": dict(self.capabilities),
+            "managed_download_needed": self.managed_download_needed,
+            "reason": self.reason,
+        }
 
 
 def _manifest() -> dict[str, Any]:
@@ -47,49 +70,112 @@ def _managed_dir() -> Path | None:
     return config.runtimes_dir() / "ffmpeg" / str(asset["version"]) / str(asset.get("key", "platform"))
 
 
-def _has_subtitles_filter(binary: str) -> bool:
+def _probe(binary: str) -> tuple[str | None, dict[str, bool], str]:
+    capabilities = {"starts": False, "subtitles": False}
     try:
-        proc = subprocess.run(
+        version = subprocess.run(
+            [binary, "-hide_banner", "-version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        capabilities["starts"] = version.returncode == 0
+        version_text = (version.stdout or version.stderr).splitlines()
+        version_line = version_text[0].strip() if version_text else None
+        filters = subprocess.run(
             [binary, "-hide_banner", "-filters"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=10,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return " subtitles " in proc.stdout
+        filter_text = f"{filters.stdout}\n{filters.stderr}"
+        capabilities["subtitles"] = filters.returncode == 0 and any(
+            "subtitles" in line.strip().split() for line in filter_text.splitlines()
+        )
+        if capabilities["starts"] and capabilities["subtitles"]:
+            return version_line, capabilities, "Compatible caption-capable FFmpeg."
+        if not capabilities["starts"]:
+            return version_line, capabilities, "FFmpeg did not start successfully."
+        return version_line, capabilities, "FFmpeg is missing the subtitles filter required for caption rendering."
+    except subprocess.TimeoutExpired:
+        return None, capabilities, "FFmpeg capability probe timed out."
+    except OSError as exc:
+        return None, capabilities, f"FFmpeg could not be executed: {exc}"
+
+
+def _has_subtitles_filter(binary: str) -> bool:
+    return _probe(binary)[1]["subtitles"]
+
+
+def _candidates() -> list[tuple[str, str]]:
+    candidates: list[tuple[str, str]] = []
+    env = os.environ.get("CLIPGAUGE_FFMPEG")
+    if env:
+        candidates.append(("configured", env))
+    managed = _managed_dir()
+    if managed:
+        candidates.append(("managed", str(managed / f"ffmpeg{_EXE}")))
+    candidates.append(("legacy-managed", str(config.bin_dir() / f"ffmpeg{_EXE}")))
+    bundled = os.environ.get("CLIPGAUGE_BUNDLED_FFMPEG")
+    if bundled:
+        candidates.append(("bundled", bundled))
+    if platform.system() == "Darwin":
+        candidates.extend(("bundled", path) for path in _LEGACY_KEG_CANDIDATES)
+    path_ffmpeg = shutil.which("ffmpeg")
+    if path_ffmpeg:
+        candidates.append(("system", path_ffmpeg))
+    return candidates
+
+
+@lru_cache(maxsize=1)
+def readiness() -> FFmpegReadiness:
+    """Return the single capability decision consumed by setup and preflight."""
+    managed_available = _platform_asset() is not None
+    first_failure: FFmpegReadiness | None = None
+    for source, candidate in _candidates():
+        if not Path(candidate).is_file():
+            continue
+        version, capabilities, reason = _probe(candidate)
+        if capabilities["starts"] and capabilities["subtitles"]:
+            return FFmpegReadiness(
+                ready=True,
+                source=source,
+                executable=candidate,
+                version=version,
+                capabilities=capabilities,
+                managed_download_needed=False,
+                reason=reason,
+            )
+        if first_failure is None:
+            first_failure = FFmpegReadiness(
+                ready=False,
+                source=source,
+                executable=candidate,
+                version=version,
+                capabilities=capabilities,
+                managed_download_needed=managed_available,
+                reason=reason,
+            )
+    if first_failure is not None:
+        return first_failure
+    return FFmpegReadiness(
+        ready=False,
+        source="missing",
+        executable=None,
+        version=None,
+        capabilities={"starts": False, "subtitles": False},
+        managed_download_needed=managed_available,
+        reason="No FFmpeg executable was found in the configured, managed, bundled, or system locations.",
+    )
 
 
 @lru_cache(maxsize=1)
 def resolve() -> tuple[str, bool]:
     """Return `(ffmpeg_path, has_subtitles)` without downloading anything."""
-    candidates: list[str] = []
-    env = os.environ.get("CLIPGAUGE_FFMPEG")
-    if env:
-        candidates.append(env)
-    managed = _managed_dir()
-    if managed:
-        candidates.append(str(managed / f"ffmpeg{_EXE}"))
-    legacy = config.bin_dir() / f"ffmpeg{_EXE}"
-    candidates.append(str(legacy))
-    bundled = os.environ.get("CLIPGAUGE_BUNDLED_FFMPEG")
-    if bundled:
-        candidates.append(bundled)
-    if platform.system() == "Darwin":
-        candidates.extend(_LEGACY_KEG_CANDIDATES)
-    path_ffmpeg = shutil.which("ffmpeg")
-    if path_ffmpeg:
-        candidates.append(path_ffmpeg)
-
-    fallback: str | None = None
-    for candidate in candidates:
-        if not os.path.exists(candidate):
-            continue
-        fallback = fallback or candidate
-        if _has_subtitles_filter(candidate):
-            return candidate, True
-    return (fallback or "ffmpeg"), False
+    decision = readiness()
+    return decision.executable or "ffmpeg", decision.ready
 
 
 def ffmpeg() -> str:
@@ -104,7 +190,7 @@ def ffprobe() -> str:
 
 
 def supports_captions() -> bool:
-    return resolve()[1]
+    return readiness().ready
 
 
 def managed_asset() -> downloads.ManagedAsset | None:
@@ -177,6 +263,7 @@ def install_managed(*, event=None, cancel=None, require_consent: bool = True) ->
         if not ok:
             manager.mark_needs_repair(asset.asset_id, "Managed FFmpeg failed archive or capability validation")
             return False
+        readiness.cache_clear()
         resolve.cache_clear()
         return supports_captions()
     finally:

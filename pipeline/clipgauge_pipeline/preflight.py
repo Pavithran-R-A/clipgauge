@@ -80,13 +80,33 @@ def _models(checks: list[dict], manifest: dict) -> None:
 
 
 def _ffmpeg(checks: list[dict]) -> None:
-    binary, captions = ffmpeg_bin.resolve()
-    if binary == "ffmpeg" and not shutil.which("ffmpeg"):
-        _check(checks, "ffmpeg", "blocked", "FFmpeg is not available.", "Install FFmpeg or configure a verified bundled binary.")
-    elif captions:
-        _check(checks, "ffmpeg", "ready", "FFmpeg is available with the subtitles filter.", path=binary)
+    decision = ffmpeg_bin.readiness()
+    details = decision.to_dict()
+    if decision.ready:
+        _check(checks, "ffmpeg", "ready", f"FFmpeg is ready ({decision.source}).", path=decision.executable, **details)
+    elif decision.executable:
+        managed = ffmpeg_bin.managed_asset()
+        _check(
+            checks,
+            "ffmpeg",
+            "warning",
+            "FFmpeg was found but cannot render ClipGauge captions.",
+            "Install the compatible managed FFmpeg copy without changing the existing installation.",
+            path=decision.executable,
+            expected_size=managed.size_bytes if managed and decision.managed_download_needed else None,
+            **details,
+        )
     else:
-        _check(checks, "ffmpeg", "warning", "FFmpeg is available but caption burning is unavailable.", "Install a build with libass/subtitles support; renders can continue without burned captions.", path=binary)
+        managed = ffmpeg_bin.managed_asset()
+        _check(
+            checks,
+            "ffmpeg",
+            "blocked",
+            "FFmpeg is not available.",
+            "Install FFmpeg or configure a verified bundled binary.",
+            expected_size=managed.size_bytes if managed and decision.managed_download_needed else None,
+            **details,
+        )
 
 
 def _ollama(checks: list[dict], selected: str) -> None:

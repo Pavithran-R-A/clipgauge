@@ -824,8 +824,21 @@ fn write_bridge_diagnostic(tail: &str) -> String {
     diagnostics::diagnostic_id()
 }
 
+fn canonical_provider_id(value: &str) -> Result<String, String> {
+    let kind = value.trim().to_ascii_lowercase();
+    let kind = kind.strip_prefix("preset-").unwrap_or(&kind);
+    if kind.is_empty()
+        || !kind
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':' | '.'))
+    {
+        return Err("provider profile id is invalid".to_string());
+    }
+    Ok(format!("preset-{kind}"))
+}
+
 fn selected_provider_env(provider: Option<&str>) -> Option<(&'static str, String)> {
-    let kind = provider?;
+    let kind = provider?.strip_prefix("preset-").unwrap_or(provider?);
     let env_name = match kind {
         "gemini" => "CLIPGAUGE_GEMINI_API_KEY",
         "openrouter" => "CLIPGAUGE_OPENROUTER_API_KEY",
@@ -835,7 +848,7 @@ fn selected_provider_env(provider: Option<&str>) -> Option<(&'static str, String
         "cerebras" => "CLIPGAUGE_CEREBRAS_API_KEY",
         _ => "CLIPGAUGE_PROVIDER_SECRET",
     };
-    Some((env_name, format!("preset-{kind}")))
+    canonical_provider_id(kind).ok().map(|id| (env_name, id))
 }
 
 fn is_completion_payload(value: &Value) -> bool {
@@ -1060,15 +1073,21 @@ fn save_gemini_key(key: String) -> Result<bool, String> {
 
 #[tauri::command]
 fn save_provider_key(profile_id: String, key: String) -> Result<bool, String> {
-    if profile_id.is_empty()
-        || profile_id.len() > 120
-        || !profile_id
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':' | '.'))
-    {
-        return Err("provider profile id is invalid".to_string());
-    }
-    secrets::set_provider_auth(&profile_id, key.trim())?;
+    let canonical = canonical_provider_id(&profile_id)?;
+    secrets::set_provider_auth(&canonical, key.trim())?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn remove_provider_key(profile_id: String) -> Result<bool, String> {
+    let canonical = canonical_provider_id(&profile_id)?;
+    secrets::delete_provider_auth(&canonical)?;
+    Ok(true)
+}
+
+#[tauri::command]
+fn remove_gemini_key() -> Result<bool, String> {
+    secrets::delete(secrets::SecretName::GeminiApiKey)?;
     Ok(true)
 }
 
@@ -1084,7 +1103,7 @@ fn get_setup_state() -> Result<Value, String> {
         "cerebras",
         "custom",
     ] {
-        let id = format!("preset-{kind}");
+        let id = canonical_provider_id(kind)?;
         let has = secrets::get_provider_auth(&id)?.is_some();
         provider_keys.insert(kind.to_string(), Value::Bool(has));
     }
@@ -1273,6 +1292,7 @@ fn cancel_setup(state: State<'_, AppState>, operation_id: String) -> Result<(), 
 #[tauri::command]
 fn setup_tool(args: Vec<String>) -> Result<Value, String> {
     let valid = matches!(args.as_slice(), [command] if command == "inventory" || command == "install-runtime" || command == "install-ffmpeg")
+        || matches!(args.as_slice(), [command, flag, model] if command == "inventory" && flag == "--model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
         || matches!(args.as_slice(), [command, group, value] if command == "install-group" && group == "--group" && matches!(value.as_str(), "core:asr" | "core:analysis" | "core:youtube"))
         || matches!(args.as_slice(), [command, asset] if command == "install-asset" && asset.len() <= 180 && asset.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '_' | '/' | '.')))
         || matches!(args.as_slice(), [command, model] if command == "download-model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')));
@@ -1617,6 +1637,8 @@ fn main() {
             list_job_dirs,
             save_gemini_key,
             save_provider_key,
+            remove_provider_key,
+            remove_gemini_key,
             get_setup_state,
             mark_onboarded,
             check_ollama,
@@ -1656,10 +1678,39 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::packaged_resource_dir;
     use super::{
-        generate_support_bundle_at, ig_connect_args, ig_failure_message, is_completion_payload,
-        migrate_legacy_data_from, ResumeJobRequest, RunJobRequest,
+        canonical_provider_id, generate_support_bundle_at, ig_connect_args, ig_failure_message,
+        is_completion_payload, migrate_legacy_data_from, selected_provider_env, ResumeJobRequest,
+        RunJobRequest,
     };
     use serde_json::json;
+
+    #[test]
+    fn canonical_provider_ids_are_stable_for_bare_and_preset_forms() {
+        assert_eq!(
+            canonical_provider_id("openrouter").unwrap(),
+            "preset-openrouter"
+        );
+        assert_eq!(
+            canonical_provider_id("preset-openrouter").unwrap(),
+            "preset-openrouter"
+        );
+        assert!(canonical_provider_id("../openrouter").is_err());
+    }
+
+    #[test]
+    fn selected_provider_env_uses_canonical_profile_id() {
+        assert_eq!(
+            selected_provider_env(Some("openrouter")),
+            Some((
+                "CLIPGAUGE_OPENROUTER_API_KEY",
+                "preset-openrouter".to_string()
+            ))
+        );
+        assert_eq!(
+            selected_provider_env(Some("preset-groq")),
+            Some(("CLIPGAUGE_GROQ_API_KEY", "preset-groq".to_string()))
+        );
+    }
 
     #[test]
     fn edit_result_payload_is_a_valid_stream_completion() {

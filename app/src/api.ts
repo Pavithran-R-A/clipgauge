@@ -29,6 +29,8 @@ export const api = {
   testConnection: (provider: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
     invoke<ProviderTestResult>('test_connection', { llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader }),
   saveProviderKey: (profileId: string, key: string) => invoke<boolean>('save_provider_key', { profileId, key }),
+  removeProviderKey: (profileId: string) => invoke<boolean>('remove_provider_key', { profileId }),
+  removeGeminiKey: () => invoke<boolean>('remove_gemini_key'),
   cancelJob: (jobId: string) => invoke<void>('cancel_job', { jobId }),
   jobResults: (jobId: string) => invoke<JobResults>('job_results', { jobId }),
   listJobs: () => invoke<JobSummary[]>('list_job_dirs'),
@@ -37,7 +39,7 @@ export const api = {
   setupState: () => invoke<SetupState>('get_setup_state'),
   markOnboarded: () => invoke<void>('mark_onboarded'),
   checkOllama: () => invoke<{ state: 'service-stopped' | 'model-missing' | 'service-healthy'; running: boolean; models: string[]; message?: string }>('check_ollama'),
-  setupInventory: () => invoke<Record<string, unknown>>('setup_tool', { args: ['inventory'] }),
+  setupInventory: (modelId?: string) => invoke<Record<string, unknown>>('setup_tool', { args: ['inventory', ...(modelId ? ['--model', modelId] : []) ] }),
   installLocalRuntime: () => invoke<Record<string, unknown>>('setup_tool', { args: ['install-runtime'] }),
   downloadLocalModel: (modelId: string) => invoke<Record<string, unknown>>('setup_tool', { args: ['download-model', modelId] }),
   startSetup: (args: string[]) => invoke<string>('start_setup', { args }),

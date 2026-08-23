@@ -4,11 +4,11 @@ ClipGauge helps creators find the moments worth sharing, turn them into vertical
 
 [Download the latest release](https://github.com/Pavithran-R-A/clipgauge/releases/latest) · [View the source](https://github.com/Pavithran-R-A/clipgauge) · [Report a problem](https://github.com/Pavithran-R-A/clipgauge/issues)
 
-> **Current release: ClipGauge v0.5.1** — a creator-focused redesign with a calmer workflow, clearer provider choices, and stronger privacy explanations.
+> **Current release: ClipGauge v0.5.2** — a focused setup and provider-readiness correction with truthful component totals, reliable local-AI actions, and clear saved-versus-connected states.
 
 ## See the workflow
 
-The v0.5.1 screenshots below are captured from the packaged application and show the verified creator workflow: choose a workspace, keep previous sessions close at hand, and understand the setup and scoring choices before you run a video.
+The packaged screenshots below show the verified creator workflow. Setup & Storage now distinguishes reusable system video tools from managed downloads, while AI Providers distinguishes a saved credential from a verified connection.
 
 ![ClipGauge Create screen](docs/screenshots/v0.5.1-packaged-create.png)
 
