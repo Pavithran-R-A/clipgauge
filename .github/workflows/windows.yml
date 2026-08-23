@@ -42,6 +42,7 @@ jobs:
         run: uv sync
 
       - name: Provide compatible system FFmpeg on PATH
+        working-directory: pipeline
         shell: pwsh
         run: |
           $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue

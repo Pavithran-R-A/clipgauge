@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 
@@ -36,6 +37,22 @@ vi.mock('./components/Studio', () => ({
     </>
   )
 }))
+vi.mock('./components/SetupCenter', () => ({
+  default: ({ onUseLocal, onBack }: { onUseLocal?: () => void; onBack: () => void }) => (
+    <div data-testid="setup-center">
+      <button onClick={onUseLocal}>Use ClipGauge Local</button>
+      <button onClick={onBack}>Back to Create</button>
+    </div>
+  )
+}))
+vi.mock('./components/ProviderCenter', () => ({
+  default: ({ onOpenSetup, onBack }: { onOpenSetup?: () => void; onBack: () => void }) => (
+    <div data-testid="provider-center">
+      <button onClick={onOpenSetup}>Set up local AI</button>
+      <button onClick={onBack}>Back to Create</button>
+    </div>
+  )
+}))
 
 beforeEach(() => {
   mocks.pipelineHandler = undefined
@@ -46,6 +63,24 @@ beforeEach(() => {
   mocks.api.jobResults.mockResolvedValue({ job_id: '20260818-155237-c6b118' })
   mocks.api.cancelJob.mockResolvedValue(undefined)
   vi.clearAllMocks()
+})
+
+describe('application navigation handoffs', () => {
+  it('routes Setup to Create and selects ClipGauge Local', async () => {
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Setup & Storage' }))
+    expect(await screen.findByTestId('setup-center')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Use ClipGauge Local' }))
+    expect(await screen.findByTestId('cancel-job')).toBeInTheDocument()
+  })
+
+  it('routes Provider Center to Setup for local installation', async () => {
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'AI Providers' }))
+    expect(await screen.findByTestId('provider-center')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Set up local AI' }))
+    expect(await screen.findByTestId('setup-center')).toBeInTheDocument()
+  })
 })
 
 describe('structured pipeline terminal events', () => {

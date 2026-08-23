@@ -94,7 +94,7 @@ export default function ProviderCenter({ selectedProvider, onSelectProvider, onB
 
   async function removeCredential() {
     if (!active.credential || !hasSavedCredential) return
-    if (!window.confirm(`Remove the saved ${active.name} credential from the OS vault?`)) return
+    if (!window.confirm(`Remove the saved ${active.name} credential from this computer? This removes only ClipGauge’s saved credential and does not revoke the provider key.`)) return
     try {
       if (active.id === 'gemini') await api.removeGeminiKey()
       else await api.removeProviderKey(`preset-${active.id}`)
