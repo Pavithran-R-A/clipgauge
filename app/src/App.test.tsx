@@ -142,7 +142,7 @@ describe('structured pipeline terminal events', () => {
         diagnostic_id: 'diag-synthesized'
       }
     })
-    expect(await screen.findByTestId('studio-error')).toHaveTextContent('stopped before reporting')
+    await waitFor(() => expect(screen.getByTestId('studio-error')).toHaveTextContent('stopped before reporting'))
     expect(screen.getByTestId('studio-error')).not.toHaveTextContent('/home/ubuntu')
   })
 })
