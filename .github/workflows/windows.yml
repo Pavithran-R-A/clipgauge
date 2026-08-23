@@ -155,6 +155,8 @@ jobs:
             }
             $localBitmap.Save((Join-Path "$env:GITHUB_WORKSPACE\\windows-screenshots" "local-ai-$($size.name).png"), [System.Drawing.Imaging.ImageFormat]::Png)
             $localBitmap.Dispose()
+            [System.Windows.Forms.SendKeys]::SendWait("{HOME}")
+            Start-Sleep -Seconds 2
             [ClipGaugeWindowCapture]::SetForegroundWindow($hwnd) | Out-Null
             [ClipGaugeWindowCapture]::Click(100, 356)
             Start-Sleep -Seconds 15
