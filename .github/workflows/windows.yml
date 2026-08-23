@@ -79,6 +79,14 @@ jobs:
           New-Item -ItemType File -Force (Join-Path $nativeHome "onboarded") | Out-Null
           $dir = Join-Path $env:LOCALAPPDATA "ClipGauge"
           if (-not (Test-Path $dir)) { throw "install dir missing: $dir" }
+          $resources = Join-Path $dir "resources"
+          $uv = Join-Path $resources "bin\\uv.exe"
+          $pipeline = Join-Path $resources "pipeline"
+          if (-not (Test-Path $uv)) { throw "bundled uv missing: $uv" }
+          if (-not (Test-Path $pipeline)) { throw "bundled pipeline missing: $pipeline" }
+          $env:CLIPGAUGE_HOME = $nativeHome
+          & $uv --directory $pipeline sync --locked
+          if ($LASTEXITCODE -ne 0) { throw "bundled pipeline bootstrap failed with exit code $LASTEXITCODE" }
           $exe = Get-ChildItem $dir -Filter *.exe |
             Where-Object { $_.Name -notmatch "uninstall" } |
             Select-Object -First 1
