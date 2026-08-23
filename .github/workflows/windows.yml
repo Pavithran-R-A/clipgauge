@@ -73,9 +73,10 @@ jobs:
           if (-not $setup) { throw "no NSIS installer produced" }
           Write-Host "installer: $($setup.Name)"
           Start-Process -FilePath $setup.FullName -ArgumentList "/S" -Wait
-          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $env:CLIPGAUGE_HOME
-          New-Item -ItemType Directory -Force $env:CLIPGAUGE_HOME | Out-Null
-          New-Item -ItemType File -Force (Join-Path $env:CLIPGAUGE_HOME "onboarded") | Out-Null
+          $nativeHome = Join-Path $env:USERPROFILE ".clipgauge"
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $nativeHome
+          New-Item -ItemType Directory -Force $nativeHome | Out-Null
+          New-Item -ItemType File -Force (Join-Path $nativeHome "onboarded") | Out-Null
           $dir = Join-Path $env:LOCALAPPDATA "ClipGauge"
           if (-not (Test-Path $dir)) { throw "install dir missing: $dir" }
           $exe = Get-ChildItem $dir -Filter *.exe |
