@@ -115,7 +115,7 @@ jobs:
             [ClipGaugeWindowCapture]::SetForegroundWindow($hwnd) | Out-Null
             Start-Sleep -Seconds 2
             [ClipGaugeWindowCapture]::Click(100, 309)
-            Start-Sleep -Seconds 3
+            Start-Sleep -Seconds 20
             $bitmap = New-Object System.Drawing.Bitmap -ArgumentList $size.width, $size.height
             $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
             $hdc = $graphics.GetHdc()
@@ -141,7 +141,7 @@ jobs:
             $localBitmap.Save((Join-Path "$env:GITHUB_WORKSPACE\\windows-screenshots" "local-ai-$($size.name).png"), [System.Drawing.Imaging.ImageFormat]::Png)
             $localBitmap.Dispose()
             [ClipGaugeWindowCapture]::Click(100, 356)
-            Start-Sleep -Seconds 3
+            Start-Sleep -Seconds 10
             $providerBitmap = New-Object System.Drawing.Bitmap -ArgumentList $size.width, $size.height
             $providerGraphics = [System.Drawing.Graphics]::FromImage($providerBitmap)
             $providerHdc = $providerGraphics.GetHdc()
