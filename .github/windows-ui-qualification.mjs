@@ -190,11 +190,25 @@ function nativeWindowHandles() {
 }
 
 async function removalConfirmation(page) {
-  const confirmRuntime = await page.evaluate(() => ({
-    type: typeof window.confirm,
-    own: Object.prototype.hasOwnProperty.call(window, 'confirm'),
-    source: String(window.confirm).replace(/\s+/g, ' ').slice(0, 240),
-  }))
+  const confirmRuntime = await page.evaluate(() => {
+    const internals = window.__TAURI_INTERNALS__
+    if (typeof internals?.invoke !== 'function') return { type: typeof window.confirm, own: Object.prototype.hasOwnProperty.call(window, 'confirm'), source: String(window.confirm).replace(/\s+/g, ' ').slice(0, 240), invoke: 'unavailable' }
+    const originalInvoke = internals.invoke
+    window.__clipGaugeQaConfirmState = { state: 'not-called' }
+    internals.invoke = async function (...args) {
+      if (args[0] !== 'plugin:dialog|confirm') return originalInvoke.apply(this, args)
+      window.__clipGaugeQaConfirmState = { state: 'pending' }
+      try {
+        const result = await originalInvoke.apply(this, args)
+        window.__clipGaugeQaConfirmState = { state: 'resolved', result: Boolean(result) }
+        return result
+      } catch (error) {
+        window.__clipGaugeQaConfirmState = { state: 'rejected', error: String(error).slice(0, 240) }
+        throw error
+      }
+    }
+    return { type: typeof window.confirm, own: Object.prototype.hasOwnProperty.call(window, 'confirm'), source: String(window.confirm).replace(/\s+/g, ' ').slice(0, 240), invoke: 'wrapped' }
+  })
   console.log(`CONFIRM_RUNTIME ${JSON.stringify(confirmRuntime)}`)
   const deadline = Date.now() + 30_000
   let dialogHandle = ''
@@ -216,6 +230,8 @@ async function removalConfirmation(page) {
     await page.waitForTimeout(500)
   }
   if (!dialogHandle) {
+    const confirmState = await page.evaluate(() => window.__clipGaugeQaConfirmState ?? { state: 'unavailable' })
+    console.log(`TAURI_CONFIRM_STATE ${JSON.stringify(confirmState).replaceAll(sentinel, '[REDACTED]')}`)
     console.log(`NATIVE_CONFIRMATION_UIA_SAMPLE ${dialogText.replaceAll(sentinel, '[REDACTED]').slice(0, 1200)}`)
     throw new Error('credential-removal confirmation was not observed through native UIA')
   }
