@@ -228,12 +228,12 @@ async function removalConfirmation(page) {
     for (const handle of nativeWindowHandles()) {
       try {
         const inspected = execFileSync('winapp', ['ui', 'inspect', '-w', handle], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-        if (inspected.includes('does not revoke the provider key')) {
+        if (inspected.toLowerCase().includes('does not revoke the provider key')) {
           dialogHandle = handle
           dialogText = inspected
+          console.log(`NATIVE_CONFIRMATION_UIA ${inspected.replaceAll(sentinel, '[REDACTED]').slice(0, 4000)}`)
           break
         }
-        dialogText = inspected
       } catch {}
     }
     if (dialogHandle) break
@@ -251,7 +251,11 @@ async function removalConfirmation(page) {
   }
   console.log(`NATIVE_CONFIRMATION_WINDOW_PASS ${dialogHandle}`)
   await capture(`credential-removal-confirmation-${suffix}`)
-  execFileSync('powershell.exe', ['-NoProfile', '-Command', 'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")'], { stdio: 'inherit' })
+  try {
+    execFileSync('winapp', ['ui', 'invoke', 'OK', '-w', dialogHandle], { stdio: 'inherit' })
+  } catch {
+    execFileSync('winapp', ['ui', 'invoke', 'Ok', '-w', dialogHandle], { stdio: 'inherit' })
+  }
   await text(page, 'Not configured', 'post-removal state')
 }
 
