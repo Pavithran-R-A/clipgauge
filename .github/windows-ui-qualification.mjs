@@ -175,22 +175,20 @@ async function geminiSaved(page) {
 }
 
 async function removalConfirmation(page) {
-  const cdp = await page.context().newCDPSession(page)
-  await cdp.send('Page.enable')
   let timeoutId
   const dialogDeadline = new Promise((_, reject) => {
     timeoutId = setTimeout(() => reject(new Error('credential-removal confirmation was not observed within 30 seconds')), 30_000)
   })
   const dialogObserved = new Promise((resolve, reject) => {
-    cdp.on('Page.javascriptDialogOpening', async (event) => {
+    page.once('dialog', async (dialog) => {
       try {
-        if (event.type !== 'confirm' || !event.message.includes('does not revoke the provider key')) throw new Error('unexpected credential-removal dialog')
+        if (dialog.type() !== 'confirm' || !dialog.message().includes('does not revoke the provider key')) throw new Error('unexpected credential-removal dialog')
         await capture(`credential-removal-confirmation-${suffix}`)
-        await cdp.send('Page.handleJavaScriptDialog', { accept: true })
+        await dialog.accept()
         console.log('NATIVE_CONFIRMATION_DIALOG_PASS')
         resolve()
       } catch (error) {
-        try { await cdp.send('Page.handleJavaScriptDialog', { accept: false }) } catch {}
+        try { await dialog.dismiss() } catch {}
         reject(error)
       }
     })
@@ -200,7 +198,6 @@ async function removalConfirmation(page) {
     await Promise.race([dialogObserved, dialogDeadline])
   } finally {
     clearTimeout(timeoutId)
-    try { await cdp.detach() } catch {}
   }
   await text(page, 'Not configured', 'post-removal state')
 }
