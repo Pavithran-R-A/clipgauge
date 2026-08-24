@@ -87,7 +87,7 @@ function Validate-Image {
   Add-Type -AssemblyName System.Drawing
   $bmp = [System.Drawing.Bitmap]::new($Path)
   try {
-    if ($bmp.Width -ne $Width -or $bmp.Height -ne $Height) { throw "wrong screenshot dimensions for $Path: $($bmp.Width)x$($bmp.Height), expected ${Width}x${Height}" }
+    if ($bmp.Width -ne $Width -or $bmp.Height -ne $Height) { throw "wrong screenshot dimensions for ${Path}: $($bmp.Width)x$($bmp.Height), expected ${Width}x${Height}" }
     $counts = @{}
     $sampled = 0
     for ($y = 0; $y -lt $bmp.Height; $y += [Math]::Max(1, [int]($bmp.Height / 64))) {
