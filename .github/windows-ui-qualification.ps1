@@ -55,7 +55,8 @@ public static class ClipGaugeWindowSize {
 $cdp = Join-Path $OutputDir 'webview2-cdp'
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $cdp
 New-Item -ItemType Directory -Force $cdp | Out-Null
-$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222 --user-data-dir=$cdp"
+$env:WEBVIEW2_USER_DATA_FOLDER = $cdp
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
 $proc = Start-Process -FilePath $AppPath -PassThru
 $deadline = (Get-Date).AddSeconds(30)
 while ((Get-Date) -lt $deadline) {
@@ -108,4 +109,5 @@ try {
 } finally {
   if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
   Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
+  Remove-Item Env:WEBVIEW2_USER_DATA_FOLDER -ErrorAction SilentlyContinue
 }
