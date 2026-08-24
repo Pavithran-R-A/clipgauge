@@ -61,8 +61,14 @@ function capture(name) {
 async function setupState(page) {
   await clickNav(page, 'Setup & Storage')
   const heading = await visible(page.locator('.setup-page h1').first(), 'Setup heading')
-  const headingText = (await heading.innerText()).trim()
-  console.log(`SETUP_HEADING ${headingText}`)
+  let headingText = ''
+  const setupDeadline = Date.now() + 180_000
+  while (Date.now() < setupDeadline) {
+    headingText = (await heading.innerText()).trim()
+    console.log(`SETUP_HEADING ${headingText}`)
+    if (headingText === 'Ready to create clips') break
+    await page.waitForTimeout(500)
+  }
   if (headingText !== 'Ready to create clips') {
     const bodyText = (await page.locator('.setup-page').innerText()).replaceAll(sentinel, '[REDACTED]')
     throw new Error(`Setup is not ready: ${headingText}; page=${bodyText.slice(0, 2400)}`)
@@ -76,8 +82,14 @@ async function setupState(page) {
 async function localState(page) {
   await clickNav(page, 'Setup & Storage')
   const heading = await visible(page.locator('.setup-page h1').first(), 'Setup heading for Local AI')
-  const headingText = (await heading.innerText()).trim()
-  console.log(`LOCAL_SETUP_HEADING ${headingText}`)
+  let headingText = ''
+  const localSetupDeadline = Date.now() + 180_000
+  while (Date.now() < localSetupDeadline) {
+    headingText = (await heading.innerText()).trim()
+    console.log(`LOCAL_SETUP_HEADING ${headingText}`)
+    if (headingText === 'Ready to create clips') break
+    await page.waitForTimeout(500)
+  }
   if (headingText !== 'Ready to create clips') {
     const bodyText = (await page.locator('.setup-page').innerText()).replaceAll(sentinel, '[REDACTED]')
     throw new Error(`Local-AI setup is not ready: ${headingText}; page=${bodyText.slice(0, 2400)}`)
