@@ -1629,24 +1629,8 @@ fn export_clip(job_id: String, clip: u32, title: Option<String>) -> Result<Strin
 
 #[cfg(target_os = "windows")]
 fn apply_qa_ffmpeg_env(command: &mut Command) {
-    if std::env::var_os("CLIPGAUGE_QA_WEBVIEW2_CDP").is_none() {
-        return;
-    }
-    let configured = std::env::var_os("CLIPGAUGE_FFMPEG").or_else(|| {
-        Command::new("where.exe")
-            .arg("ffmpeg")
-            .output()
-            .ok()
-            .and_then(|output| {
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .map(str::trim)
-                    .find(|line| !line.is_empty())
-                    .map(std::ffi::OsString::from)
-            })
-    });
-    if let Some(path) = configured {
-        command.env("CLIPGAUGE_FFMPEG", path);
+    if std::env::var_os("CLIPGAUGE_QA_WEBVIEW2_CDP").is_some() {
+        command.env_remove("CLIPGAUGE_FFMPEG");
     }
 }
 
