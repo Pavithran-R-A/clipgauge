@@ -58,6 +58,8 @@ New-Item -ItemType Directory -Force $cdp | Out-Null
 $env:CLIPGAUGE_QA_WEBVIEW2_CDP = '1'
 $env:WEBVIEW2_USER_DATA_FOLDER = $cdp
 $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
+$env:CLIPGAUGE_FFMPEG = (Get-Command ffmpeg -ErrorAction Stop).Source
+Write-Host "qualification system FFmpeg: $env:CLIPGAUGE_FFMPEG"
 $proc = Start-Process -FilePath $AppPath -PassThru
 $deadline = (Get-Date).AddSeconds(30)
 while ((Get-Date) -lt $deadline) {
@@ -112,4 +114,5 @@ try {
   Remove-Item Env:CLIPGAUGE_QA_WEBVIEW2_CDP -ErrorAction SilentlyContinue
   Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
   Remove-Item Env:WEBVIEW2_USER_DATA_FOLDER -ErrorAction SilentlyContinue
+  Remove-Item Env:CLIPGAUGE_FFMPEG -ErrorAction SilentlyContinue
 }
