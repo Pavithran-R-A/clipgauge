@@ -174,15 +174,21 @@ async function geminiSaved(page) {
 }
 
 async function removalConfirmation(page) {
-  let captured = false
-  page.once('dialog', async (dialog) => {
-    if (dialog.type() !== 'confirm' || !dialog.message().includes('does not revoke the provider key')) throw new Error('unexpected credential-removal dialog')
-    await capture(`credential-removal-confirmation-${suffix}`)
-    captured = true
-    await dialog.accept()
-  })
   await page.getByRole('button', { name: 'Remove', exact: true }).click()
-  if (!captured) throw new Error('credential-removal confirmation was not observed')
+  const deadline = Date.now() + 30_000
+  let dialogText = ''
+  while (Date.now() < deadline) {
+    try {
+      dialogText = execFileSync('winapp', ['ui', 'inspect', '-w', hwnd], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch {
+      dialogText = ''
+    }
+    if (dialogText.includes('does not revoke the provider key')) break
+    await page.waitForTimeout(500)
+  }
+  if (!dialogText.includes('does not revoke the provider key')) throw new Error('credential-removal confirmation was not observed through native UIA')
+  await capture(`credential-removal-confirmation-${suffix}`)
+  execFileSync('powershell.exe', ['-NoProfile', '-Command', 'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")'], { stdio: 'inherit' })
   await text(page, 'Not configured', 'post-removal state')
 }
 
