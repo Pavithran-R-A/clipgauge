@@ -60,6 +60,20 @@ function capture(name) {
 
 async function setupState(page) {
   await clickNav(page, 'Setup & Storage')
+  const inventoryDiagnostic = await page.evaluate(async () => {
+    const invoke = window.__TAURI_INTERNALS__?.invoke
+    if (typeof invoke !== 'function') return { available: false }
+    const value = await invoke('setup_tool', { args: ['inventory'] })
+    const video = value?.video_tools ?? {}
+    return {
+      available: true,
+      ready: Boolean(video.ready),
+      source: String(video.source ?? ''),
+      managedDownloadNeeded: Boolean(video.managed_download_needed),
+      subtitles: Boolean(video.capabilities?.subtitles),
+    }
+  })
+  console.log(`SETUP_INVENTORY_DIAGNOSTIC ${JSON.stringify(inventoryDiagnostic)}`)
   const heading = await visible(page.locator('.setup-page h1').first(), 'Setup heading')
   let headingText = ''
   const setupDeadline = Date.now() + 180_000
