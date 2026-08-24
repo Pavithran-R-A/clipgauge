@@ -1617,7 +1617,20 @@ fn export_clip(job_id: String, clip: u32, title: Option<String>) -> Result<Strin
     )
 }
 
+#[cfg(target_os = "windows")]
+fn configure_windows_qa_webview() {
+    if std::env::var_os("CLIPGAUGE_QA_WEBVIEW2_CDP").is_some() {
+        std::env::set_var(
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            "--remote-debugging-port=9222",
+        );
+    }
+}
+
 fn main() {
+    #[cfg(target_os = "windows")]
+    configure_windows_qa_webview();
+
     let media =
         Arc::new(media_server::MediaServer::start().expect("failed to start local media server"));
     tauri::Builder::default()

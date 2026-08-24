@@ -55,12 +55,9 @@ public static class ClipGaugeWindowSize {
 $cdp = Join-Path $OutputDir 'webview2-cdp'
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $cdp
 New-Item -ItemType Directory -Force $cdp | Out-Null
+$env:CLIPGAUGE_QA_WEBVIEW2_CDP = '1'
 $env:WEBVIEW2_USER_DATA_FOLDER = $cdp
 $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
-$policyPath = 'HKCU:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
-New-Item -Path $policyPath -Force | Out-Null
-$policyName = [System.IO.Path]::GetFileName($AppPath)
-New-ItemProperty -Path $policyPath -Name $policyName -PropertyType String -Value '--remote-debugging-port=9222' -Force | Out-Null
 $proc = Start-Process -FilePath $AppPath -PassThru
 $deadline = (Get-Date).AddSeconds(30)
 while ((Get-Date) -lt $deadline) {
@@ -112,7 +109,7 @@ try {
   Write-Host 'WINDOWS_UI_QUALIFICATION=PASS'
 } finally {
   if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+  Remove-Item Env:CLIPGAUGE_QA_WEBVIEW2_CDP -ErrorAction SilentlyContinue
   Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
   Remove-Item Env:WEBVIEW2_USER_DATA_FOLDER -ErrorAction SilentlyContinue
-  Remove-ItemProperty -Path $policyPath -Name $policyName -ErrorAction SilentlyContinue
 }
