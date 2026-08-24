@@ -40,6 +40,10 @@ jobs:
 
       - uses: microsoft/setup-WinAppCli@v0.1
 
+      - name: Install deterministic WebView2 automation dependency
+        working-directory: .github
+        run: npm install --no-save --no-package-lock playwright-core@1.62.1
+
       - name: Resolve the pipeline env (uv sync on Windows)
         working-directory: pipeline
         run: uv sync
@@ -136,5 +140,6 @@ jobs:
             setup-asr.jsonl
             setup-analysis.jsonl
             .github/windows-ui-qualification.ps1
+            .github/windows-ui-qualification.mjs
             scripts/qa_provider_fixture.py
           if-no-files-found: error
