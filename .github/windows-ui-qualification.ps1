@@ -46,20 +46,32 @@ public static class ClipGaugeWindowSize {
   [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left; public int Top; public int Right; public int Bottom; }
   [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-  [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
-  [DllImport("user32.dll")] public static extern bool AdjustWindowRectEx(ref Rect rect, uint style, bool menu, uint exStyle);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out Rect rect);
 }
 "@
-  $client = [ClipGaugeWindowSize+Rect]::new()
-  $client.Right = $Width
-  $client.Bottom = $Height
-  $style = [uint32]([ClipGaugeWindowSize]::GetWindowLongPtr([IntPtr]$proc.MainWindowHandle, -16).ToInt64())
-  $exStyle = [uint32]([ClipGaugeWindowSize]::GetWindowLongPtr([IntPtr]$proc.MainWindowHandle, -20).ToInt64())
-  if (-not [ClipGaugeWindowSize]::AdjustWindowRectEx([ref]$client, $style, $false, $exStyle)) { throw "could not calculate native window frame" }
-  $outerWidth = $client.Right - $client.Left
-  $outerHeight = $client.Bottom - $client.Top
-  [ClipGaugeWindowSize]::MoveWindow([IntPtr]$proc.MainWindowHandle, 0, 0, $outerWidth, $outerHeight, $true) | Out-Null
-  [ClipGaugeWindowSize]::SetForegroundWindow([IntPtr]$proc.MainWindowHandle) | Out-Null
+  $handle = [IntPtr]$proc.MainWindowHandle
+  $probe = Join-Path $OutputDir '.window-size-probe.png'
+  $windowWidth = $Width
+  $windowHeight = $Height
+  for ($attempt = 1; $attempt -le 4; $attempt++) {
+    [ClipGaugeWindowSize]::MoveWindow($handle, 0, 0, $windowWidth, $windowHeight, $true) | Out-Null
+    [ClipGaugeWindowSize]::SetForegroundWindow($handle) | Out-Null
+    Start-Sleep -Milliseconds 700
+    Remove-Item -Force -ErrorAction SilentlyContinue $probe
+    & $winapp ui screenshot -w "$($handle.ToInt64())" --output $probe | Out-Null
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $probe)) { continue }
+    Add-Type -AssemblyName System.Drawing
+    $bmp = [System.Drawing.Bitmap]::new($probe)
+    try {
+      $actualWidth = $bmp.Width
+      $actualHeight = $bmp.Height
+    } finally { $bmp.Dispose() }
+    if ($actualWidth -eq $Width -and $actualHeight -eq $Height) { break }
+    $windowWidth += $Width - $actualWidth
+    $windowHeight += $Height - $actualHeight
+  }
+  Remove-Item -Force -ErrorAction SilentlyContinue $probe
+  [ClipGaugeWindowSize]::SetForegroundWindow($handle) | Out-Null
   Start-Sleep -Milliseconds 500
 }
 
