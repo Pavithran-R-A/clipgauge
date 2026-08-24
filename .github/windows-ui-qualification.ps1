@@ -43,11 +43,22 @@ function Size-Window([int] $Width, [int] $Height) {
 using System;
 using System.Runtime.InteropServices;
 public static class ClipGaugeWindowSize {
+  [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left; public int Top; public int Right; public int Bottom; }
   [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+  [DllImport("user32.dll")] public static extern bool AdjustWindowRectEx(ref Rect rect, uint style, bool menu, uint exStyle);
 }
 "@
-  [ClipGaugeWindowSize]::MoveWindow([IntPtr]$proc.MainWindowHandle, 0, 0, $Width, $Height, $true) | Out-Null
+  $client = [ClipGaugeWindowSize+Rect]::new()
+  $client.Right = $Width
+  $client.Bottom = $Height
+  $style = [uint32]([ClipGaugeWindowSize]::GetWindowLongPtr([IntPtr]$proc.MainWindowHandle, -16).ToInt64())
+  $exStyle = [uint32]([ClipGaugeWindowSize]::GetWindowLongPtr([IntPtr]$proc.MainWindowHandle, -20).ToInt64())
+  if (-not [ClipGaugeWindowSize]::AdjustWindowRectEx([ref]$client, $style, $false, $exStyle)) { throw "could not calculate native window frame" }
+  $outerWidth = $client.Right - $client.Left
+  $outerHeight = $client.Bottom - $client.Top
+  [ClipGaugeWindowSize]::MoveWindow([IntPtr]$proc.MainWindowHandle, 0, 0, $outerWidth, $outerHeight, $true) | Out-Null
   [ClipGaugeWindowSize]::SetForegroundWindow([IntPtr]$proc.MainWindowHandle) | Out-Null
   Start-Sleep -Milliseconds 500
 }
