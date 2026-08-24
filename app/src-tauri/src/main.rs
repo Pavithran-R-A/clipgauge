@@ -1311,6 +1311,9 @@ fn setup_tool(args: Vec<String>) -> Result<Value, String> {
     if let Some(ffmpeg) = std::env::var_os("CLIPGAUGE_FFMPEG") {
         command.env("CLIPGAUGE_FFMPEG", ffmpeg);
     }
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
     let out = command
         .env("CLIPGAUGE_HOME", home_dir())
         .args(&full)
