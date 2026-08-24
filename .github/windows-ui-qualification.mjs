@@ -60,7 +60,13 @@ function capture(name) {
 
 async function setupState(page) {
   await clickNav(page, 'Setup & Storage')
-  await visible(page.getByRole('heading', { name: 'Ready to create clips', exact: true }), 'Setup final heading')
+  const heading = await visible(page.locator('.setup-page h1').first(), 'Setup heading')
+  const headingText = (await heading.innerText()).trim()
+  console.log(`SETUP_HEADING ${headingText}`)
+  if (headingText !== 'Ready to create clips') {
+    const bodyText = (await page.locator('.setup-page').innerText()).replaceAll(sentinel, '[REDACTED]')
+    throw new Error(`Setup is not ready: ${headingText}; page=${bodyText.slice(0, 2400)}`)
+  }
   await text(page, 'Ready · System', 'system-ready marker')
   await text(page, 'System component reused', 'system reuse marker')
   await text(page, 'Everything needed is here.', 'setup completion marker')
@@ -69,7 +75,13 @@ async function setupState(page) {
 
 async function localState(page) {
   await clickNav(page, 'Setup & Storage')
-  await visible(page.getByRole('heading', { name: 'Ready to create clips', exact: true }), 'Setup heading for Local AI')
+  const heading = await visible(page.locator('.setup-page h1').first(), 'Setup heading for Local AI')
+  const headingText = (await heading.innerText()).trim()
+  console.log(`LOCAL_SETUP_HEADING ${headingText}`)
+  if (headingText !== 'Ready to create clips') {
+    const bodyText = (await page.locator('.setup-page').innerText()).replaceAll(sentinel, '[REDACTED]')
+    throw new Error(`Local-AI setup is not ready: ${headingText}; page=${bodyText.slice(0, 2400)}`)
+  }
   await visible(page.getByText('Optional local AI', { exact: true }).first(), 'optional Local AI section')
   await visible(page.getByText('Only the model you choose counts toward this estimate.', { exact: true }), 'selected-model estimate')
   const choices = page.locator('input[name="local-model"]:checked')
