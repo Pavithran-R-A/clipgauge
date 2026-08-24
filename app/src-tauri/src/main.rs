@@ -1314,6 +1314,8 @@ fn setup_tool(args: Vec<String>) -> Result<Value, String> {
     if let Some(path) = std::env::var_os("PATH") {
         command.env("PATH", path);
     }
+    #[cfg(target_os = "windows")]
+    apply_qa_ffmpeg_env(&mut command);
     let out = command
         .env("CLIPGAUGE_HOME", home_dir())
         .args(&full)
@@ -1623,6 +1625,29 @@ fn export_clip(job_id: String, clip: u32, title: Option<String>) -> Result<Strin
         clip,
         title,
     )
+}
+
+#[cfg(target_os = "windows")]
+fn apply_qa_ffmpeg_env(command: &mut Command) {
+    if std::env::var_os("CLIPGAUGE_QA_WEBVIEW2_CDP").is_none() {
+        return;
+    }
+    let configured = std::env::var_os("CLIPGAUGE_FFMPEG").or_else(|| {
+        Command::new("where.exe")
+            .arg("ffmpeg")
+            .output()
+            .ok()
+            .and_then(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(std::ffi::OsString::from)
+            })
+    });
+    if let Some(path) = configured {
+        command.env("CLIPGAUGE_FFMPEG", path);
+    }
 }
 
 fn main() {
