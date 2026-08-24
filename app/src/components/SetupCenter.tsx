@@ -28,8 +28,21 @@ function assetsFor(inventory: LocalSetupInventory | null, group: Group): Managed
   const rows = (inventory?.managed_assets ?? []).filter((asset) => group.prefixes.some((prefix) => asset.asset_id.startsWith(prefix)))
   const videoTools = inventory?.video_tools
   if (group.id !== 'video' || !videoTools?.ready || videoTools.managed_download_needed) return rows
-  return rows.map((asset) => ({
-    ...asset,
+  const base = rows[0] ?? {
+    asset_id: 'runtime:ffmpeg:capability',
+    display_name: 'Video tools',
+    purpose: 'Reads, processes, and renders video clips with captions.',
+    destination: '',
+    url: '',
+    size_bytes: 0,
+    required: true,
+    one_time: true,
+    license: 'See upstream',
+    source: videoTools.source,
+    consent_group: 'core',
+  }
+  return [{
+    ...base,
     installed: true,
     cached: true,
     size_bytes: 0,
@@ -40,7 +53,7 @@ function assetsFor(inventory: LocalSetupInventory | null, group: Group): Managed
     managed_download_needed: false,
     reason: videoTools.reason,
     capabilities: videoTools.capabilities,
-  }))
+  }]
 }
 
 function groupSize(rows: ManagedAssetRow[]): number | null {
