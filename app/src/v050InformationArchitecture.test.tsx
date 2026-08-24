@@ -98,6 +98,21 @@ describe('v0.5 information architecture', () => {
     vi.unstubAllGlobals()
   })
 
+  it('waits for asynchronous credential-removal confirmation before removing', async () => {
+    let resolveConfirm: (value: boolean) => void = () => undefined
+    const confirmation = new Promise<boolean>((resolve) => { resolveConfirm = resolve })
+    const confirm = vi.fn(() => confirmation)
+    vi.stubGlobal('confirm', confirm)
+    mocks.removeProviderKey.mockResolvedValue(true)
+    render(<ProviderCenter selectedProvider="openrouter" onSelectProvider={vi.fn()} onBack={vi.fn()} />)
+    expect((await screen.findAllByText('Credential saved')).length).toBeGreaterThan(0)
+    await userEvent.click(screen.getByRole('button', { name: 'Remove' }))
+    expect(mocks.removeProviderKey).not.toHaveBeenCalled()
+    resolveConfirm(true)
+    await waitFor(() => expect(mocks.removeProviderKey).toHaveBeenCalledWith('preset-openrouter'))
+    vi.unstubAllGlobals()
+  })
+
   it('shows a migrated Gemini credential as saved until a real connection test passes', async () => {
     mocks.setupState.mockResolvedValue({ has_gemini_key: true, onboarded: true, provider_keys: {} })
     render(<ProviderCenter selectedProvider="gemini" onSelectProvider={vi.fn()} onBack={vi.fn()} />)
