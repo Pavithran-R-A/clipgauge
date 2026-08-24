@@ -13,6 +13,7 @@ const sentinel = args.get('sentinel')
 const port = Number(args.get('port') || '9222')
 const windowProbe = fileURLToPath(new URL('./windows-window-probe.ps1', import.meta.url))
 if (!state || !suffix || !outputDir || !hwnd || !pid || !sentinel) throw new Error('state, suffix, output, hwnd, pid, and sentinel are required')
+let lastNativeWindowList = ''
 
 async function connect() {
   const deadline = Date.now() + 120_000
@@ -176,11 +177,15 @@ async function geminiSaved(page) {
 }
 
 function nativeWindowHandles() {
-  const raw = execFileSync('powershell.exe', ['-NoProfile', '-File', windowProbe, '-ProcessId', pid], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  const raw = execFileSync('powershell.exe', ['-NoProfile', '-File', windowProbe, '-ProcessId', pid, '-AllVisible'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
   if (!raw) return []
   const parsed = JSON.parse(raw)
   const records = (Array.isArray(parsed) ? parsed : [parsed]).map(String).filter(Boolean)
-  console.log(`NATIVE_WINDOW_LIST ${records.join(' || ')}`)
+  const listing = records.join(' || ')
+  if (listing !== lastNativeWindowList) {
+    lastNativeWindowList = listing
+    console.log(`NATIVE_WINDOW_LIST ${listing}`)
+  }
   return records.map((record) => record.split('|', 1)[0]).filter(Boolean)
 }
 

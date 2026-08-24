@@ -1,5 +1,6 @@
 param(
-  [Parameter(Mandatory = $true)] [int] $ProcessId
+  [Parameter(Mandatory = $true)] [int] $ProcessId,
+  [switch] $AllVisible
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,12 +23,12 @@ public static class ClipGaugeNativeWindowProbe {
     EnumWindows((hWnd, lParam) => {
       uint processId;
       GetWindowThreadProcessId(hWnd, out processId);
-      if (processId != targetProcessId || !IsWindowVisible(hWnd)) return true;
+      if ((targetProcessId != 0 && processId != targetProcessId) || !IsWindowVisible(hWnd)) return true;
       var title = new StringBuilder(512);
       var className = new StringBuilder(256);
       GetWindowText(hWnd, title, title.Capacity);
       GetClassName(hWnd, className, className.Capacity);
-      windows.Add(hWnd.ToInt64().ToString() + "|" + title.ToString() + "|" + className.ToString());
+      windows.Add(hWnd.ToInt64().ToString() + "|" + processId.ToString() + "|" + title.ToString() + "|" + className.ToString());
       return true;
     }, IntPtr.Zero);
     return windows.ToArray();
@@ -35,4 +36,5 @@ public static class ClipGaugeNativeWindowProbe {
 }
 "@
 
-[ClipGaugeNativeWindowProbe]::ForProcess([uint32]$ProcessId) | ConvertTo-Json -Compress
+$target = if ($AllVisible) { [uint32]0 } else { [uint32]$ProcessId }
+[ClipGaugeNativeWindowProbe]::ForProcess($target) | ConvertTo-Json -Compress
