@@ -119,7 +119,7 @@ async function localState(page) {
     throw new Error(`Local-AI setup is not ready: ${headingText}; page=${bodyText.slice(0, 2400)}`)
   }
   await visible(page.getByText('Optional local AI', { exact: true }).first(), 'optional Local AI section')
-  await visible(page.getByText('Only the model you choose counts toward this estimate.', { exact: true }), 'selected-model estimate')
+  await visible(page.getByRole('heading', { name: 'Choose one model', exact: true }), 'local model choices heading')
   const choices = page.locator('input[name="local-model"]:checked')
   if (await choices.count() !== 1) throw new Error(`expected exactly one selected local model, found ${await choices.count()}`)
   const action = page.getByRole('button', { name: 'Install ClipGauge Local', exact: true })
