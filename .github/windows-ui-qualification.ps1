@@ -102,7 +102,10 @@ function Invoke-State {
   $args = @('.github/windows-ui-qualification.mjs', '--state', $State, '--suffix', $Suffix, '--output', $OutputDir, '--hwnd', "$($proc.MainWindowHandle.ToInt64())", '--sentinel', $Sentinel, '--port', '9222')
   & node @args
   if ($LASTEXITCODE -ne 0) { throw "semantic state qualification failed: $State $Suffix" }
-  $capture = Invoke-WindowCapture "$State-$Suffix"
+  $capture = Join-Path $OutputDir "$State-$Suffix.png"
+  if ($State -ne 'credential-removal-confirmation') {
+    $capture = Invoke-WindowCapture "$State-$Suffix"
+  }
   Validate-Image $capture $Width $Height
 }
 

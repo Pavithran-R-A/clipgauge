@@ -10,6 +10,7 @@ const outputDir = args.get('output')
 const hwnd = args.get('hwnd')
 const sentinel = args.get('sentinel')
 const port = Number(args.get('port') || '9222')
+const appName = 'clipgauge-app'
 if (!state || !suffix || !outputDir || !hwnd || !sentinel) throw new Error('state, suffix, output, hwnd, and sentinel are required')
 
 async function connect() {
@@ -52,12 +53,12 @@ async function clickProvider(page, name) {
   await card.click()
 }
 
-async function capture(name) {
+async function capture(name, selector = ['-w', hwnd]) {
   const target = `${outputDir}/${name}.png`
   let lastError
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     try {
-      execFileSync('winapp', ['ui', 'screenshot', '-w', hwnd, '--output', target], { stdio: 'inherit' })
+      execFileSync('winapp', ['ui', 'screenshot', ...selector, '--output', target], { stdio: 'inherit' })
       console.log(`CAPTURED ${target}`)
       return
     } catch (error) {
@@ -179,7 +180,7 @@ async function removalConfirmation(page) {
   let dialogText = ''
   while (Date.now() < deadline) {
     try {
-      dialogText = execFileSync('winapp', ['ui', 'inspect', '-w', hwnd], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+      dialogText = execFileSync('winapp', ['ui', 'inspect', '-a', appName], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
     } catch {
       dialogText = ''
     }
@@ -187,7 +188,7 @@ async function removalConfirmation(page) {
     await page.waitForTimeout(500)
   }
   if (!dialogText.includes('does not revoke the provider key')) throw new Error('credential-removal confirmation was not observed through native UIA')
-  await capture(`credential-removal-confirmation-${suffix}`)
+  await capture(`credential-removal-confirmation-${suffix}`, ['-a', appName])
   execFileSync('powershell.exe', ['-NoProfile', '-Command', 'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")'], { stdio: 'inherit' })
   await text(page, 'Not configured', 'post-removal state')
 }
