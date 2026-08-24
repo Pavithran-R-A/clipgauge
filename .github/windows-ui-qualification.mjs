@@ -1,17 +1,18 @@
 import { execFileSync } from 'node:child_process'
 import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
-
 const args = new Map()
 for (let index = 2; index < process.argv.length; index += 2) args.set(process.argv[index].replace(/^--/, ''), process.argv[index + 1])
 const state = args.get('state')
 const suffix = args.get('suffix')
 const outputDir = args.get('output')
 const hwnd = args.get('hwnd')
+const pid = args.get('pid')
 const sentinel = args.get('sentinel')
 const port = Number(args.get('port') || '9222')
-const appName = 'clipgauge-app'
-if (!state || !suffix || !outputDir || !hwnd || !sentinel) throw new Error('state, suffix, output, hwnd, and sentinel are required')
+const windowProbe = fileURLToPath(new URL('./windows-window-probe.ps1', import.meta.url))
+if (!state || !suffix || !outputDir || !hwnd || !pid || !sentinel) throw new Error('state, suffix, output, hwnd, pid, and sentinel are required')
 
 async function connect() {
   const deadline = Date.now() + 120_000
@@ -174,6 +175,13 @@ async function geminiSaved(page) {
   await capture(`gemini-saved-unverified-${suffix}`)
 }
 
+function nativeWindowHandles() {
+  const raw = execFileSync('powershell.exe', ['-NoProfile', '-File', windowProbe, '-ProcessId', pid], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  if (!raw) return []
+  const parsed = JSON.parse(raw)
+  return (Array.isArray(parsed) ? parsed : [parsed]).map(String).map((record) => record.split('|', 1)[0]).filter(Boolean)
+}
+
 async function removalConfirmation(page) {
   const confirmRuntime = await page.evaluate(() => ({
     type: typeof window.confirm,
@@ -181,30 +189,32 @@ async function removalConfirmation(page) {
     source: String(window.confirm).replace(/\s+/g, ' ').slice(0, 240),
   }))
   console.log(`CONFIRM_RUNTIME ${JSON.stringify(confirmRuntime)}`)
-  let timeoutId
-  const dialogDeadline = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => reject(new Error('credential-removal confirmation was not observed within 30 seconds')), 30_000)
-  })
-  const dialogObserved = new Promise((resolve, reject) => {
-    page.once('dialog', async (dialog) => {
+  const deadline = Date.now() + 30_000
+  let dialogHandle = ''
+  let dialogText = ''
+  await page.getByRole('button', { name: 'Remove', exact: true }).click()
+  while (Date.now() < deadline) {
+    for (const handle of nativeWindowHandles()) {
       try {
-        if (dialog.type() !== 'confirm' || !dialog.message().includes('does not revoke the provider key')) throw new Error('unexpected credential-removal dialog')
-        await capture(`credential-removal-confirmation-${suffix}`)
-        await dialog.accept()
-        console.log('NATIVE_CONFIRMATION_DIALOG_PASS')
-        resolve()
-      } catch (error) {
-        try { await dialog.dismiss() } catch {}
-        reject(error)
-      }
-    })
-  })
-  try {
-    await page.getByRole('button', { name: 'Remove', exact: true }).click()
-    await Promise.race([dialogObserved, dialogDeadline])
-  } finally {
-    clearTimeout(timeoutId)
+        const inspected = execFileSync('winapp', ['ui', 'inspect', '-w', handle], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+        if (inspected.includes('does not revoke the provider key')) {
+          dialogHandle = handle
+          dialogText = inspected
+          break
+        }
+        dialogText = inspected
+      } catch {}
+    }
+    if (dialogHandle) break
+    await page.waitForTimeout(500)
   }
+  if (!dialogHandle) {
+    console.log(`NATIVE_CONFIRMATION_UIA_SAMPLE ${dialogText.replaceAll(sentinel, '[REDACTED]').slice(0, 1200)}`)
+    throw new Error('credential-removal confirmation was not observed through native UIA')
+  }
+  console.log(`NATIVE_CONFIRMATION_WINDOW_PASS ${dialogHandle}`)
+  await capture(`credential-removal-confirmation-${suffix}`)
+  execFileSync('powershell.exe', ['-NoProfile', '-Command', 'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")'], { stdio: 'inherit' })
   await text(page, 'Not configured', 'post-removal state')
 }
 

@@ -99,7 +99,7 @@ if ($proc.MainWindowHandle -eq [IntPtr]::Zero) { throw 'installed ClipGauge wind
 function Invoke-State {
   param([Parameter(Mandatory = $true)] [string] $State, [Parameter(Mandatory = $true)] [int] $Width, [Parameter(Mandatory = $true)] [int] $Height, [Parameter(Mandatory = $true)] [string] $Suffix)
   Size-Window $Width $Height
-  $args = @('.github/windows-ui-qualification.mjs', '--state', $State, '--suffix', $Suffix, '--output', $OutputDir, '--hwnd', "$($proc.MainWindowHandle.ToInt64())", '--sentinel', $Sentinel, '--port', '9222')
+  $args = @('.github/windows-ui-qualification.mjs', '--state', $State, '--suffix', $Suffix, '--output', $OutputDir, '--hwnd', "$($proc.MainWindowHandle.ToInt64())", '--pid', "$($proc.Id)", '--sentinel', $Sentinel, '--port', '9222')
   & node @args
   if ($LASTEXITCODE -ne 0) { throw "semantic state qualification failed: $State $Suffix" }
   $capture = Join-Path $OutputDir "$State-$Suffix.png"
