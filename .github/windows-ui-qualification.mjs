@@ -179,7 +179,9 @@ function nativeWindowHandles() {
   const raw = execFileSync('powershell.exe', ['-NoProfile', '-File', windowProbe, '-ProcessId', pid], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
   if (!raw) return []
   const parsed = JSON.parse(raw)
-  return (Array.isArray(parsed) ? parsed : [parsed]).map(String).map((record) => record.split('|', 1)[0]).filter(Boolean)
+  const records = (Array.isArray(parsed) ? parsed : [parsed]).map(String).filter(Boolean)
+  console.log(`NATIVE_WINDOW_LIST ${records.join(' || ')}`)
+  return records.map((record) => record.split('|', 1)[0]).filter(Boolean)
 }
 
 async function removalConfirmation(page) {
