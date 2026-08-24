@@ -83,7 +83,7 @@ describe('v0.5 information architecture', () => {
   })
 
   it('shows saved provider credentials as unverified and supports removal', async () => {
-    const confirm = vi.fn(() => true)
+    const confirm = vi.fn(async () => true)
     vi.stubGlobal('confirm', confirm)
     mocks.removeProviderKey.mockResolvedValue(true)
     render(<ProviderCenter selectedProvider="openrouter" onSelectProvider={vi.fn()} onBack={vi.fn()} />)
