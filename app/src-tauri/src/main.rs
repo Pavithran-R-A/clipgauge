@@ -1306,6 +1306,11 @@ fn setup_tool(args: Vec<String>) -> Result<Value, String> {
     full.extend(args);
     let mut command = quiet_command(&program);
     secrets::apply_operation_env(&mut command);
+    // Forward an explicitly configured system tool across the packaged
+    // native-to-sidecar boundary so Setup reflects the actual GUI runtime.
+    if let Some(ffmpeg) = std::env::var_os("CLIPGAUGE_FFMPEG") {
+        command.env("CLIPGAUGE_FFMPEG", ffmpeg);
+    }
     let out = command
         .env("CLIPGAUGE_HOME", home_dir())
         .args(&full)
