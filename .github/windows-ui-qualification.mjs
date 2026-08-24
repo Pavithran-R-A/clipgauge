@@ -52,10 +52,20 @@ async function clickProvider(page, name) {
   await card.click()
 }
 
-function capture(name) {
+async function capture(name) {
   const target = `${outputDir}/${name}.png`
-  execFileSync('winapp', ['ui', 'screenshot', '-w', hwnd, '--output', target], { stdio: 'inherit' })
-  console.log(`CAPTURED ${target}`)
+  let lastError
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try {
+      execFileSync('winapp', ['ui', 'screenshot', '-w', hwnd, '--output', target], { stdio: 'inherit' })
+      console.log(`CAPTURED ${target}`)
+      return
+    } catch (error) {
+      lastError = error
+      if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 1000))
+    }
+  }
+  throw lastError
 }
 
 async function setupState(page) {
@@ -90,7 +100,7 @@ async function setupState(page) {
   await text(page, 'Ready · System', 'system-ready marker')
   await text(page, 'System component reused', 'system reuse marker')
   await text(page, 'Everything needed is here.', 'setup completion marker')
-  capture(`setup-${suffix}`)
+  await capture(`setup-${suffix}`)
 }
 
 async function localState(page) {
@@ -116,7 +126,7 @@ async function localState(page) {
   await action.scrollIntoViewIfNeeded()
   await visible(action, 'Install ClipGauge Local action')
   await text(page, 'Run scoring locally', 'local scoring heading')
-  capture(`local-ai-${suffix}`)
+  await capture(`local-ai-${suffix}`)
 }
 
 async function providersBaseline(page) {
@@ -128,7 +138,7 @@ async function providersBaseline(page) {
   const body = await page.locator('body').innerText()
   if ((body.match(/Not configured/g) || []).length < 2) throw new Error('provider baseline did not show both providers as not configured')
   if (body.includes(sentinel)) throw new Error('sentinel appeared in provider baseline DOM')
-  capture(`providers-${suffix}`)
+  await capture(`providers-${suffix}`)
 }
 
 async function openRouterSaved(page) {
@@ -140,7 +150,7 @@ async function openRouterSaved(page) {
   await text(page, 'Credential saved', 'OpenRouter saved state')
   const body = await page.locator('body').innerText()
   if (body.includes(sentinel)) throw new Error('sentinel appeared in saved-credential DOM')
-  capture(`openrouter-saved-${suffix}`)
+  await capture(`openrouter-saved-${suffix}`)
 }
 
 async function openRouterConnected(page) {
@@ -148,7 +158,7 @@ async function openRouterConnected(page) {
   await text(page, 'Connected', 'OpenRouter connected state')
   const body = await page.locator('body').innerText()
   if (body.includes(sentinel)) throw new Error('sentinel appeared in connected DOM')
-  capture(`openrouter-connected-${suffix}`)
+  await capture(`openrouter-connected-${suffix}`)
 }
 
 async function geminiSaved(page) {
@@ -160,14 +170,14 @@ async function geminiSaved(page) {
   await text(page, 'Credential saved', 'Gemini saved-unverified state')
   const body = await page.locator('body').innerText()
   if (body.includes(sentinel)) throw new Error('sentinel appeared in Gemini saved DOM')
-  capture(`gemini-saved-unverified-${suffix}`)
+  await capture(`gemini-saved-unverified-${suffix}`)
 }
 
 async function removalConfirmation(page) {
   let captured = false
   page.once('dialog', async (dialog) => {
     if (dialog.type() !== 'confirm' || !dialog.message().includes('does not revoke the provider key')) throw new Error('unexpected credential-removal dialog')
-    capture(`credential-removal-confirmation-${suffix}`)
+    await capture(`credential-removal-confirmation-${suffix}`)
     captured = true
     await dialog.accept()
   })
