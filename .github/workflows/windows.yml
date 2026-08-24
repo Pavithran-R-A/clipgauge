@@ -76,6 +76,7 @@ jobs:
         working-directory: pipeline
         shell: pwsh
         run: |
+          $env:HOME = $env:USERPROFILE
           $nativeHome = Join-Path $env:USERPROFILE ".clipgauge"
           Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $nativeHome
           New-Item -ItemType Directory -Force $nativeHome | Out-Null
@@ -93,6 +94,7 @@ jobs:
           if (-not $setup) { throw "no NSIS installer produced" }
           Write-Host "installer: $($setup.Name)"
           Start-Process -FilePath $setup.FullName -ArgumentList "/S" -Wait
+          $env:HOME = $env:USERPROFILE
           $nativeHome = Join-Path $env:USERPROFILE ".clipgauge"
           New-Item -ItemType Directory -Force $nativeHome | Out-Null
           New-Item -ItemType File -Force (Join-Path $nativeHome "onboarded") | Out-Null
