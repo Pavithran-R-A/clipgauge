@@ -209,6 +209,13 @@ async function removalConfirmation(page) {
     }
     return { type: typeof window.confirm, own: Object.prototype.hasOwnProperty.call(window, 'confirm'), source: String(window.confirm).replace(/\s+/g, ' ').slice(0, 240), invoke: 'wrapped' }
   })
+  await page.evaluate(() => {
+    window.__clipGaugeQaRemoveClicks = 0
+    document.addEventListener('click', (event) => {
+      const button = event.target instanceof Element ? event.target.closest('button') : null
+      if (button?.textContent?.trim() === 'Remove') window.__clipGaugeQaRemoveClicks += 1
+    }, { capture: true })
+  })
   console.log(`CONFIRM_RUNTIME ${JSON.stringify(confirmRuntime)}`)
   const deadline = Date.now() + 30_000
   let dialogHandle = ''
@@ -230,7 +237,10 @@ async function removalConfirmation(page) {
     await page.waitForTimeout(500)
   }
   if (!dialogHandle) {
-    const confirmState = await page.evaluate(() => window.__clipGaugeQaConfirmState ?? { state: 'unavailable' })
+    const confirmState = await page.evaluate(() => ({
+      confirm: window.__clipGaugeQaConfirmState ?? { state: 'unavailable' },
+      removeClicks: window.__clipGaugeQaRemoveClicks ?? 0,
+    }))
     console.log(`TAURI_CONFIRM_STATE ${JSON.stringify(confirmState).replaceAll(sentinel, '[REDACTED]')}`)
     console.log(`NATIVE_CONFIRMATION_UIA_SAMPLE ${dialogText.replaceAll(sentinel, '[REDACTED]').slice(0, 1200)}`)
     throw new Error('credential-removal confirmation was not observed through native UIA')
