@@ -175,33 +175,23 @@ async function geminiSaved(page) {
 }
 
 async function removalConfirmation(page) {
-  await page.getByRole('button', { name: 'Remove', exact: true }).click()
-  const deadline = Date.now() + 30_000
-  let dialogText = ''
-  let dialogSelector = ['-w', hwnd]
-  while (Date.now() < deadline) {
-    for (const selector of [['-w', hwnd], ['-a', appName]]) {
+  const dialogDeadline = new Promise((_, reject) => setTimeout(() => reject(new Error('credential-removal confirmation was not observed within 30 seconds')), 30_000))
+  const dialogObserved = new Promise((resolve, reject) => {
+    page.once('dialog', async (dialog) => {
       try {
-        const inspected = execFileSync('winapp', ['ui', 'inspect', ...selector], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-        if (inspected.includes('does not revoke the provider key')) {
-          dialogText = inspected
-          dialogSelector = selector
-          break
-        }
-        dialogText = inspected
-      } catch {
-        dialogText = ''
+        if (dialog.type() !== 'confirm' || !dialog.message().includes('does not revoke the provider key')) throw new Error('unexpected credential-removal dialog')
+        await capture(`credential-removal-confirmation-${suffix}`)
+        await dialog.accept()
+        console.log('NATIVE_CONFIRMATION_DIALOG_PASS')
+        resolve()
+      } catch (error) {
+        try { await dialog.dismiss() } catch {}
+        reject(error)
       }
-    }
-    if (dialogText.includes('does not revoke the provider key')) break
-    await page.waitForTimeout(500)
-  }
-  if (!dialogText.includes('does not revoke the provider key')) {
-    console.log(`NATIVE_CONFIRMATION_UIA_SAMPLE ${dialogText.replaceAll(sentinel, '[REDACTED]').slice(0, 1200)}`)
-    throw new Error('credential-removal confirmation was not observed through native UIA')
-  }
-  await capture(`credential-removal-confirmation-${suffix}`, dialogSelector)
-  execFileSync('powershell.exe', ['-NoProfile', '-Command', 'Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")'], { stdio: 'inherit' })
+    })
+  })
+  await page.getByRole('button', { name: 'Remove', exact: true }).click()
+  await Promise.race([dialogObserved, dialogDeadline])
   await text(page, 'Not configured', 'post-removal state')
 }
 
