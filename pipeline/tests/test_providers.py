@@ -138,6 +138,17 @@ def test_clipgauge_local_preset_is_managed_and_structured():
     assert local.timeout_seconds == providers.LOCAL_PROVIDER_TIMEOUT_SECONDS == 300.0
 
 
+def test_openrouter_qa_endpoint_is_opt_in_and_explicit_endpoint_wins(monkeypatch):
+    monkeypatch.setenv("CLIPGAUGE_QA_OPENROUTER_ENDPOINT", "http://127.0.0.1:8765/v1")
+    qa_profile = providers.preset_profile("openrouter")
+    assert qa_profile.endpoint_identity == "http://127.0.0.1:8765/v1"
+    explicit_profile = providers.preset_profile("openrouter", endpoint="https://example.test/v1")
+    assert explicit_profile.endpoint_identity == "https://example.test/v1"
+    monkeypatch.delenv("CLIPGAUGE_QA_OPENROUTER_ENDPOINT")
+    default_profile = providers.preset_profile("openrouter")
+    assert default_profile.endpoint_identity == "https://openrouter.ai/api/v1"
+
+
 def test_clipgauge_local_adapter_uses_existing_loopback_server(monkeypatch):
     seen = {}
 
