@@ -124,7 +124,7 @@ describe('v0.5 information architecture', () => {
 
   it('keeps required readiness independent from optional local AI in cloud-only, local-only, and mixed states', async () => {
     const readyAssets = [
-      { asset_id: 'runtime:ffmpeg:test', display_name: 'FFmpeg', purpose: 'Video tools', size_bytes: 0, installed: true, source: 'system', status: 'reused-system', license: 'LGPL' },
+      { asset_id: 'runtime:ffmpeg:test', display_name: 'FFmpeg', purpose: 'Video tools', size_bytes: 163000000, installed: false, source: 'system', status: 'not-installed', license: 'LGPL' },
       { asset_id: 'model:asr:test', display_name: 'Speech', purpose: 'Speech recognition', size_bytes: 0, installed: true, license: 'MIT' },
       { asset_id: 'model:panns:test', display_name: 'Audio analysis', purpose: 'Audio analysis', size_bytes: 0, installed: true, license: 'MIT' }
     ]

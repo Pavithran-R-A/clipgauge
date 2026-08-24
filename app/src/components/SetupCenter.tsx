@@ -25,7 +25,22 @@ const GROUP_COMMANDS: Record<string, string[]> = {
 }
 
 function assetsFor(inventory: LocalSetupInventory | null, group: Group): ManagedAssetRow[] {
-  return (inventory?.managed_assets ?? []).filter((asset) => group.prefixes.some((prefix) => asset.asset_id.startsWith(prefix)))
+  const rows = (inventory?.managed_assets ?? []).filter((asset) => group.prefixes.some((prefix) => asset.asset_id.startsWith(prefix)))
+  const videoTools = inventory?.video_tools
+  if (group.id !== 'video' || !videoTools?.ready || videoTools.managed_download_needed) return rows
+  return rows.map((asset) => ({
+    ...asset,
+    installed: true,
+    cached: true,
+    size_bytes: 0,
+    installed_size_bytes: 0,
+    status: videoTools.source === 'system' ? 'reused-system' : 'ready',
+    state: 'READY',
+    source: videoTools.source,
+    managed_download_needed: false,
+    reason: videoTools.reason,
+    capabilities: videoTools.capabilities,
+  }))
 }
 
 function groupSize(rows: ManagedAssetRow[]): number | null {
