@@ -227,7 +227,7 @@ async function removalConfirmation(page) {
   while (Date.now() < deadline) {
     for (const handle of nativeWindowHandles()) {
       try {
-        const inspected = execFileSync('winapp', ['ui', 'inspect', '-w', handle], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+        const inspected = execFileSync('winapp', ['ui', 'inspect', '-w', handle, '--depth', '10'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
         if (inspected.toLowerCase().includes('does not revoke the provider key')) {
           dialogHandle = handle
           dialogText = inspected
