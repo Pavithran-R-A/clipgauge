@@ -232,11 +232,15 @@ async function removalConfirmation(page) {
       const handle = record.handle
       try {
         const inspected = execFileSync('winapp', ['ui', 'inspect', '-w', handle, '--depth', '10'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-        if (record.className === '#32770' || record.title === 'ClipGauge') console.log(`NATIVE_CONFIRMATION_CANDIDATE ${record.className} ${record.title} ${inspected.replaceAll(sentinel, '[REDACTED]').slice(0, 6000)}`)
-        if (inspected.toLowerCase().includes('does not revoke the provider key')) {
+        const expectedTaskDialog = record.ownerPid === pid && record.className === '#32770' && record.title === 'ClipGauge'
+        if (expectedTaskDialog) {
           dialogHandle = handle
           dialogText = inspected
-          console.log(`NATIVE_CONFIRMATION_UIA ${inspected.replaceAll(sentinel, '[REDACTED]').slice(0, 4000)}`)
+          console.log(`NATIVE_CONFIRMATION_UIA ${inspected.replaceAll(sentinel, '[REDACTED]').slice(0, 6000)}`)
+          try {
+            const controls = execFileSync('winapp', ['ui', 'search', 'Button', '-w', handle, '--max', '20'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+            console.log(`NATIVE_CONFIRMATION_CONTROLS ${controls.replaceAll(sentinel, '[REDACTED]').slice(0, 3000)}`)
+          } catch {}
           break
         }
       } catch {}
@@ -259,7 +263,11 @@ async function removalConfirmation(page) {
   try {
     execFileSync('winapp', ['ui', 'invoke', 'OK', '-w', dialogHandle], { stdio: 'inherit' })
   } catch {
-    execFileSync('winapp', ['ui', 'invoke', 'Ok', '-w', dialogHandle], { stdio: 'inherit' })
+    try {
+      execFileSync('winapp', ['ui', 'invoke', 'Ok', '-w', dialogHandle], { stdio: 'inherit' })
+    } catch {
+      execFileSync('winapp', ['ui', 'send-keys', 'Enter', '-w', dialogHandle], { stdio: 'inherit' })
+    }
   }
   await text(page, 'Not configured', 'post-removal state')
 }
