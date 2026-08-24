@@ -60,8 +60,9 @@ $env:WEBVIEW2_USER_DATA_FOLDER = $cdp
 $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
 $chocoRoot = if ($env:ChocolateyInstall) { $env:ChocolateyInstall } else { 'C:\ProgramData\chocolatey' }
 $realFfmpeg = Get-ChildItem -Path (Join-Path $chocoRoot 'lib\ffmpeg') -Filter 'ffmpeg.exe' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
-$env:CLIPGAUGE_FFMPEG = if ($realFfmpeg) { $realFfmpeg.FullName } else { (Get-Command ffmpeg -ErrorAction Stop).Source }
-Write-Host "qualification system FFmpeg: $env:CLIPGAUGE_FFMPEG"
+$realFfmpegPath = if ($realFfmpeg) { $realFfmpeg.FullName } else { (Get-Command ffmpeg -ErrorAction Stop).Source }
+$env:PATH = "$(Split-Path -Parent $realFfmpegPath);$env:PATH"
+Write-Host "qualification system FFmpeg: $realFfmpegPath"
 $proc = Start-Process -FilePath $AppPath -PassThru
 $deadline = (Get-Date).AddSeconds(30)
 while ((Get-Date) -lt $deadline) {
@@ -116,5 +117,4 @@ try {
   Remove-Item Env:CLIPGAUGE_QA_WEBVIEW2_CDP -ErrorAction SilentlyContinue
   Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
   Remove-Item Env:WEBVIEW2_USER_DATA_FOLDER -ErrorAction SilentlyContinue
-  Remove-Item Env:CLIPGAUGE_FFMPEG -ErrorAction SilentlyContinue
 }

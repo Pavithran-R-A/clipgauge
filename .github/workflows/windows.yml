@@ -118,7 +118,6 @@ jobs:
           if ($inventory.video_tools.managed_download_needed) { throw "packaged Setup inventory incorrectly requires managed FFmpeg download" }
           if (-not $inventory.video_tools.capabilities.subtitles) { throw "packaged Setup inventory did not report subtitles capability" }
           $inventory | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 (Join-Path "$env:GITHUB_WORKSPACE\windows-screenshots" "setup-inventory.json")
-          $env:CLIPGAUGE_FFMPEG = $systemFfmpeg
           $sentinel = "clipgauge-qa-sentinel-20260824"
           $env:CLIPGAUGE_QA_OPENROUTER_ENDPOINT = "http://127.0.0.1:8765/v1"
           $fixture = Start-Process -FilePath "python" -ArgumentList @("scripts/qa_provider_fixture.py", "--port", "8765") -PassThru -WindowStyle Hidden
@@ -133,7 +132,6 @@ jobs:
           } finally {
             if ($fixture -and -not $fixture.HasExited) { Stop-Process -Id $fixture.Id -Force }
             Remove-Item Env:CLIPGAUGE_QA_OPENROUTER_ENDPOINT -ErrorAction SilentlyContinue
-            Remove-Item Env:CLIPGAUGE_FFMPEG -ErrorAction SilentlyContinue
           }
 
       - uses: actions/upload-artifact@v4
