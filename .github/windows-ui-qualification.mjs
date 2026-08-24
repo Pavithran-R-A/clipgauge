@@ -176,7 +176,7 @@ async function geminiSaved(page) {
   await capture(`gemini-saved-unverified-${suffix}`)
 }
 
-function nativeWindowHandles() {
+function nativeWindowRecords() {
   const raw = execFileSync('powershell.exe', ['-NoProfile', '-File', windowProbe, '-ProcessId', pid, '-AllVisible'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
   if (!raw) return []
   const parsed = JSON.parse(raw)
@@ -186,7 +186,10 @@ function nativeWindowHandles() {
     lastNativeWindowList = listing
     console.log(`NATIVE_WINDOW_LIST ${listing}`)
   }
-  return records.map((record) => record.split('|', 1)[0]).filter(Boolean)
+  return records.map((record) => {
+    const [handle, ownerPid, title, className] = record.split('|')
+    return { handle, ownerPid, title, className }
+  }).filter((record) => record.handle)
 }
 
 async function removalConfirmation(page) {
@@ -225,9 +228,11 @@ async function removalConfirmation(page) {
   let dialogText = ''
   await page.getByRole('button', { name: 'Remove', exact: true }).click()
   while (Date.now() < deadline) {
-    for (const handle of nativeWindowHandles()) {
+    for (const record of nativeWindowRecords()) {
+      const handle = record.handle
       try {
         const inspected = execFileSync('winapp', ['ui', 'inspect', '-w', handle, '--depth', '10'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+        if (record.className === '#32770' || record.title === 'ClipGauge') console.log(`NATIVE_CONFIRMATION_CANDIDATE ${record.className} ${record.title} ${inspected.replaceAll(sentinel, '[REDACTED]').slice(0, 6000)}`)
         if (inspected.toLowerCase().includes('does not revoke the provider key')) {
           dialogHandle = handle
           dialogText = inspected
