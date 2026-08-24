@@ -211,6 +211,9 @@ async function removalConfirmation(page) {
   })
   await page.evaluate(() => {
     window.__clipGaugeQaRemoveClicks = 0
+    window.__clipGaugeQaUnhandled = ''
+    window.addEventListener('unhandledrejection', (event) => { window.__clipGaugeQaUnhandled = String(event.reason).slice(0, 240) })
+    window.addEventListener('error', (event) => { window.__clipGaugeQaUnhandled = String(event.error ?? event.message).slice(0, 240) })
     document.addEventListener('click', (event) => {
       const button = event.target instanceof Element ? event.target.closest('button') : null
       if (button?.textContent?.trim() === 'Remove') window.__clipGaugeQaRemoveClicks += 1
@@ -240,6 +243,7 @@ async function removalConfirmation(page) {
     const confirmState = await page.evaluate(() => ({
       confirm: window.__clipGaugeQaConfirmState ?? { state: 'unavailable' },
       removeClicks: window.__clipGaugeQaRemoveClicks ?? 0,
+      unhandled: window.__clipGaugeQaUnhandled ?? '',
     }))
     console.log(`TAURI_CONFIRM_STATE ${JSON.stringify(confirmState).replaceAll(sentinel, '[REDACTED]')}`)
     console.log(`NATIVE_CONFIRMATION_UIA_SAMPLE ${dialogText.replaceAll(sentinel, '[REDACTED]').slice(0, 1200)}`)
