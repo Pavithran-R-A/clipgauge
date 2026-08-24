@@ -8,7 +8,6 @@
     "shell:allow-open",
     "dialog:allow-open",
     "dialog:allow-message",
-    "dialog:allow-confirm",
     "opener:default"
   ]
 }

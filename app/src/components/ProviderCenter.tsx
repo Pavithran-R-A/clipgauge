@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { confirm } from '@tauri-apps/plugin-dialog'
 import { Check, ChevronRight, CircleAlert, Cloud, Cpu, ExternalLink, KeyRound, Network, RotateCcw, Save, ShieldCheck, WifiOff } from 'lucide-react'
 import { api } from '../api'
 import type { LocalSetupInventory, ProviderTestResult, SetupState } from '../types'
@@ -94,7 +95,7 @@ export default function ProviderCenter({ selectedProvider, onSelectProvider, onB
 
   async function removeCredential() {
     if (!active.credential || !hasSavedCredential) return
-    if (!(await window.confirm(`Remove the saved ${active.name} credential from this computer? This removes only ClipGauge’s saved credential and does not revoke the provider key.`))) return
+    if (!(await confirm(`Remove the saved ${active.name} credential from this computer? This removes only ClipGauge’s saved credential and does not revoke the provider key.`))) return
     try {
       if (active.id === 'gemini') await api.removeGeminiKey()
       else await api.removeProviderKey(`preset-${active.id}`)

@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('./api', () => ({ api: mocks }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: mocks.listen }))
+vi.mock('@tauri-apps/plugin-dialog', () => ({ confirm: (message: string) => window.confirm(message) }))
 
 beforeEach(() => {
   vi.clearAllMocks()
