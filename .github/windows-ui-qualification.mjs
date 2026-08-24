@@ -175,6 +175,12 @@ async function geminiSaved(page) {
 }
 
 async function removalConfirmation(page) {
+  const confirmRuntime = await page.evaluate(() => ({
+    type: typeof window.confirm,
+    own: Object.prototype.hasOwnProperty.call(window, 'confirm'),
+    source: String(window.confirm).replace(/\s+/g, ' ').slice(0, 240),
+  }))
+  console.log(`CONFIRM_RUNTIME ${JSON.stringify(confirmRuntime)}`)
   let timeoutId
   const dialogDeadline = new Promise((_, reject) => {
     timeoutId = setTimeout(() => reject(new Error('credential-removal confirmation was not observed within 30 seconds')), 30_000)
