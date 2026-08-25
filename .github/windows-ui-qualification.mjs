@@ -3,6 +3,7 @@ import { writeFileSync } from 'node:fs'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
+import { parseWinAppJsonText } from './windows-ui-json.mjs'
 const args = new Map()
 for (let index = 2; index < process.argv.length; index += 2) args.set(process.argv[index].replace(/^--/, ''), process.argv[index + 1])
 const state = args.get('state')
@@ -230,7 +231,15 @@ async function removalConfirmation(page) {
   let dialogHandle = ''
   let dialogText = ''
   let controlsText = ''
-  let messageSearchText = ''
+  let contentText = ''
+  await clickProvider(page, 'OpenRouter Free')
+  await text(page, 'OpenRouter Free', 'OpenRouter removal provider detail')
+  const providerDetail = page.locator('aside.provider-detail').first()
+  await visible(providerDetail, 'OpenRouter provider detail')
+  const detailText = await providerDetail.innerText()
+  if (detailText.includes(sentinel)) throw new Error('sentinel appeared in OpenRouter removal detail')
+  const removeButton = page.getByRole('button', { name: 'Remove', exact: true })
+  await visible(removeButton, 'OpenRouter removal action')
   await capture(`credential-removal-confirmation-${suffix}`)
   await page.getByRole('button', { name: 'Remove', exact: true }).click()
   while (Date.now() < deadline) {
@@ -248,9 +257,12 @@ async function removalConfirmation(page) {
             console.log(`NATIVE_CONFIRMATION_CONTROLS ${controlsText.replaceAll(sentinel, '[REDACTED]').slice(0, 3000)}`)
           } catch {}
           try {
-            messageSearchText = execFileSync('winapp', ['ui', 'search', 'does not revoke the provider key', '-w', handle], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-            console.log(`NATIVE_CONFIRMATION_TEXT ${messageSearchText.replaceAll(sentinel, '[REDACTED]').slice(0, 2000)}`)
-          } catch {}
+            const contentJson = execFileSync('winapp', ['ui', 'get-value', 'ContentText', '-w', handle, '--json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+            contentText = parseWinAppJsonText(contentJson, 'ContentText')
+            console.log(`NATIVE_CONFIRMATION_TEXT_JSON ${JSON.stringify({ method: 'winapp-ui-get-value-json', nonempty: true, length: contentText.length, provider_observed: contentText.includes('OpenRouter Free'), non_revocation_phrase_observed: contentText.toLowerCase().includes('does not revoke the provider key') })}`)
+          } catch (error) {
+            throw new Error(`machine-readable ContentText retrieval failed: ${String(error).replaceAll(sentinel, '[REDACTED]').slice(0, 320)}`)
+          }
           break
         }
       } catch {}
@@ -269,10 +281,15 @@ async function removalConfirmation(page) {
     throw new Error('credential-removal confirmation was not observed through native UIA')
   }
   const expectedText = 'does not revoke the provider key'
+  const expectedProvider = 'OpenRouter Free'
   const controlsHaveOk = /\bOK\b/i.test(controlsText)
-  const messageObserved = dialogText.toLowerCase().includes(expectedText) || messageSearchText.toLowerCase().includes(expectedText)
+  const controlsHaveCancel = /\bCancel\b/i.test(controlsText)
+  const messageObserved = contentText.toLowerCase().includes(expectedText)
+  const providerObserved = contentText.includes(expectedProvider)
   if (!controlsHaveOk) throw new Error('native confirmation did not expose an OK control through UIA')
-  if (!messageObserved) throw new Error('native confirmation did not expose the expected message through UIA')
+  if (!controlsHaveCancel) throw new Error('native confirmation did not expose a Cancel control through UIA')
+  if (!messageObserved) throw new Error('native confirmation ContentText missed the non-revocation phrase')
+  if (!providerObserved) throw new Error('native confirmation ContentText missed the expected provider name')
   console.log(`NATIVE_CONFIRMATION_WINDOW_PASS ${dialogHandle}`)
   await capture(`credential-removal-confirmation-dialog-${suffix}`, ['-w', dialogHandle])
   try {
@@ -296,22 +313,27 @@ async function removalConfirmation(page) {
   if (!dialogClosed) throw new Error('native confirmation dialog did not close after semantic acceptance')
   await text(page, 'Not configured', 'post-removal state')
   const metadata = {
+    provider: expectedProvider,
     target_viewport: { width: targetWidth, height: targetHeight },
     owner_screenshot: `credential-removal-confirmation-${suffix}.png`,
-    native_dialog: {
-      screenshot: `credential-removal-confirmation-dialog-${suffix}.png`,
-      hwnd: dialogHandle,
-      pid,
-      pid_matches_app: true,
-      class_name: '#32770',
-      title: 'ClipGauge',
-      ui_automation_inspected: true,
-      controls_observed: controlsHaveOk,
-      expected_text: expectedText,
-      message_text_observed: messageObserved,
-      ui_automation_excerpt: dialogText.replaceAll(sentinel, '[REDACTED]').slice(0, 6000),
-    },
-    semantic: { remove_clicked: true, confirmation_accepted: true, dialog_closed: dialogClosed, post_removal_not_configured: true },
+    owner_width: targetWidth,
+    owner_height: targetHeight,
+    native_dialog_screenshot: `credential-removal-confirmation-dialog-${suffix}.png`,
+    dialog_hwnd: dialogHandle,
+    dialog_pid: pid,
+    pid_matches_app: true,
+    class_name: '#32770',
+    title: 'ClipGauge',
+    ui_automation_inspected: true,
+    content_text_read_method: 'winapp-ui-get-value-json',
+    content_text_nonempty: contentText.trim().length > 0,
+    expected_provider_observed: providerObserved,
+    non_revocation_phrase_observed: messageObserved,
+    ok_control_observed: controlsHaveOk,
+    cancel_control_observed: controlsHaveCancel,
+    confirmation_accepted: true,
+    dialog_closed: dialogClosed,
+    post_removal_not_configured: true,
   }
   writeFileSync(`${outputDir}/credential-removal-confirmation-${suffix}.json`, `${JSON.stringify(metadata, null, 2)}\n`)
 }
