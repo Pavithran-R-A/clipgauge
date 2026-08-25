@@ -1,57 +1,53 @@
 # ClipGauge
 
-ClipGauge helps creators find the moments worth sharing, turn them into vertical clips, and understand why each clip scored well.
+ClipGauge is a desktop app for finding strong moments in longer videos and turning them into vertical clips. It combines transcript/audio signals with optional AI scoring, then keeps the recommendation understandable so a creator can see *why* a moment was selected before exporting it.
 
-[Download the latest release](https://github.com/Pavithran-R-A/clipgauge/releases/latest) · [View the source](https://github.com/Pavithran-R-A/clipgauge) · [Report a problem](https://github.com/Pavithran-R-A/clipgauge/issues)
+[Download the latest release](https://github.com/Pavithran-R-A/clipgauge/releases/latest) · [Report an issue](https://github.com/Pavithran-R-A/clipgauge/issues)
 
-> **Current release: ClipGauge v0.5.2** — a focused setup and provider-readiness correction with truthful component totals, reliable local-AI actions, and clear saved-versus-connected states.
+## What it does
 
-## See the workflow
+A typical ClipGauge workflow looks like this:
 
-The packaged screenshots below show the verified creator workflow. Setup & Storage now distinguishes reusable system video tools from managed downloads, while AI Providers distinguishes a saved credential from a verified connection.
+1. Add a local video or supported link.
+2. Choose a local or cloud scoring provider.
+3. Let the pipeline find and score candidate moments.
+4. Review the suggested clips and the signals behind each score.
+5. Adjust the cut/caption style if needed and export the result.
+
+The app is designed around the creator workflow rather than model configuration. Provider setup, diagnostics and storage live in their own screens so they do not get in the way of the main job.
 
 ![ClipGauge Create screen](docs/screenshots/v0.5.1-packaged-create.png)
 
 ![ClipGauge Sessions screen](docs/screenshots/v0.5.1-packaged-sessions.png)
 
-## What ClipGauge does
+## Main features
 
-ClipGauge works from a video file or a supported link. It detects candidate moments, scores them against signals such as speech, laughter, pacing, and replay data when available, then renders vertical clips with captions and optional music direction. You can inspect the reasoning, edit a clip, and export an MP4 without leaving the app.
+- candidate moment detection from video/audio/transcript signals
+- vertical clip rendering with captions
+- explanation of the signals that contributed to a recommendation
+- session history for previous jobs
+- local and cloud AI-provider options
+- provider connection checks and diagnostics
+- local component/setup management
+- support bundles that exclude provider credentials
 
-The main flow is designed for creators rather than model configuration. Start on **Create**, pick a local or cloud scoring option, choose a caption style, and let the processing timeline show what is happening. **Sessions** keeps previous jobs close at hand, while **Why this clip** explains the recommendation instead of leaving you with a bare number.
+## AI providers
 
-## Get started
+ClipGauge can run with its built-in local path, local model servers such as Ollama or LM Studio, OpenRouter's free route, or supported bring-your-own-key cloud providers. There is also a custom OpenAI-compatible option for endpoints you control.
 
-1. Download the installer for your operating system from the [latest release](https://github.com/Pavithran-R-A/clipgauge/releases/latest).
-2. Open ClipGauge and approve the one-time local component setup. The app tells you what will be installed, what is already available, and when a size still needs to be calculated.
-3. Add a video from your computer or paste a supported link. Choose the scoring provider and caption style that fit this clip.
-4. Review the suggested clips, adjust a cut or caption style if needed, and export the MP4 you want to publish.
+Provider availability and free-tier limits can change, so the UI treats saved credentials and a verified connection as separate states.
 
-If a setup step needs attention, open **Setup & Storage**. If a connection or render needs investigation, open **Help & Diagnostics** and create a support bundle. The bundle is designed for troubleshooting and does not include provider credentials.
+## Privacy
 
-## Choose how scoring runs
+When you use a local provider, source video stays on the machine. Cloud providers may receive source-derived data such as transcript excerpts, prompts or sampled frames depending on the selected model and feature.
 
-ClipGauge keeps all supported choices visible in **AI Providers**. You can use the built-in local route, a free-friendly cloud route, a curated cloud provider with your own key, or a local app already running on your computer.
-
-| Option | Best for | What to know |
-| --- | --- | --- |
-| ClipGauge Local | Keeping source media on this computer | No provider account; requires the local setup components. |
-| OpenRouter Free | Trying a cloud route with a free model path | Availability, limits, and the routed model can change. |
-| Gemini, Groq, Cloudflare, Hugging Face, Cerebras | Using a provider you already use | Add your own key; model capabilities and provider terms vary. |
-| Ollama or LM Studio | Using a local model you already run | Start the local server first, then test the connection. |
-| Custom OpenAI-compatible | Connecting an endpoint you control | Enter the endpoint, model, and credential in Advanced settings. |
-
-**Pexels** is separate from AI providers. It lives in **Integrations** as an optional source for stock visuals. Instagram feedback is also optional and separate from scoring.
-
-## Privacy in plain language
-
-Your video stays on this computer when you use a local provider. When you choose a cloud provider, ClipGauge explains what can be sent before you run the job; this can include transcript excerpts, prompts, and sampled frames when the selected model supports vision. Provider keys are stored in the operating-system vault rather than project files.
-
-ClipGauge does not read browser cookies by default. Any browser-cookie behavior must be explicitly enabled for a supported workflow. Read the in-app **Privacy** panel and [`docs/providers/README.md`](docs/providers/README.md) before sending source-derived material to a third party.
+Provider credentials are stored through the operating-system credential store rather than project files. Browser-cookie access is not enabled by default. See [`docs/providers/README.md`](docs/providers/README.md) and the in-app Privacy screen for the current provider-specific behaviour.
 
 ## Build from source
 
-ClipGauge is a Tauri desktop app with a React and TypeScript interface and a Python processing pipeline. You will need Node.js, Rust, Python, `uv`, and the platform dependencies described in [`INSTALL.md`](INSTALL.md).
+ClipGauge uses a React/TypeScript frontend, Tauri for the desktop shell, and a Python media-processing pipeline.
+
+Prerequisites and platform-specific setup are documented in [`INSTALL.md`](INSTALL.md). The short development path is:
 
 ```bash
 git clone https://github.com/Pavithran-R-A/clipgauge.git
@@ -62,7 +58,7 @@ npm ci
 npm run dev
 ```
 
-Run the checks before opening a pull request:
+Run the main checks with:
 
 ```bash
 cd app && npm test -- --run && npm run build
@@ -70,20 +66,21 @@ cd ../pipeline && uv run pytest -q
 cd ../app/src-tauri && cargo fmt -- --check && cargo test
 ```
 
-The release files are built by the repository workflows. Do not commit generated installers, local credentials, job outputs, or model downloads.
+The repository workflows build release artifacts. Generated installers, local credentials, job output and downloaded models should not be committed.
 
-## Contributing
+## Project layout
 
-Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/product-principles.md`](docs/product-principles.md). Changes to provider behavior, privacy disclosures, browser-cookie handling, setup downloads, or licensing need extra care; explain the user-visible effect and include tests where the behavior can be checked locally.
+```text
+app/            React/TypeScript UI and Tauri application
+pipeline/       Python media-processing pipeline
+docs/           architecture, providers, product notes and screenshots
+.github/        CI/release workflows
+```
 
-## License and attribution
+For contribution guidance, start with [`CONTRIBUTING.md`](CONTRIBUTING.md). Security-sensitive reports should follow [`SECURITY.md`](SECURITY.md).
 
-ClipGauge is distributed under the **GNU Affero General Public License v3.0 or later**. It began as a fork of [`Blueturboguy07/publikclip`](https://github.com/Blueturboguy07/publikclip); the upstream relationship and retained notices are documented in [`ORIGIN.md`](ORIGIN.md). Third-party licenses and notices remain in [`NOTICE.md`](NOTICE.md), [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), and [`VENDORED-LICENSES.md`](VENDORED-LICENSES.md). The `bgutil` component is documented as **GPL-3.0-only** in the third-party notices.
+## Origin and license
 
-For security-sensitive reports, use [`SECURITY.md`](SECURITY.md) rather than a public issue.
+ClipGauge is licensed under the **GNU Affero General Public License v3.0 or later**.
 
-## References
-
-[1]: https://github.com/Pavithran-R-A/clipgauge/releases/latest "ClipGauge latest releases"
-[2]: https://github.com/Pavithran-R-A/clipgauge/blob/main/LICENSE "ClipGauge license"
-[3]: https://github.com/Blueturboguy07/publikclip "publikclip upstream repository"
+The project began as a fork of [`Blueturboguy07/publikclip`](https://github.com/Blueturboguy07/publikclip). The upstream relationship and retained notices are documented in [`ORIGIN.md`](ORIGIN.md), [`NOTICE.md`](NOTICE.md), [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) and [`VENDORED-LICENSES.md`](VENDORED-LICENSES.md).
