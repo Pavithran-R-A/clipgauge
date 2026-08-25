@@ -2,6 +2,30 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.3] — 2026-08-25
+
+ClipGauge v0.5.3 is a real-device UX and readiness repair. It keeps the deep-ocean creator workflow while making responsive containment, optional local-AI state, YouTube support, provider copy, and terminal run status explicit and truthful.
+
+### Fixed
+
+- Contained long session titles and sidebar actions structurally so text cannot expand the sidebar into the Create region.
+- Split creator processing and clip-editor timeline styles into independent namespaces and preserved reduced-motion behavior.
+- Separated core setup readiness from optional ClipGauge Local and YouTube readiness, with scoped install, test, repair, and retry actions.
+- Added model lifecycle states for Installed/Verified, Reused, Download required, and Needs repair, including persisted selection and no-download reuse for valid files.
+- Made YouTube readiness authoritative at the backend/provider boundary and blocked public-link creation before session creation when support is not ready.
+- Replaced inferred success messaging with explicit Running, Succeeded, Failed, and Cancelled creator states.
+- Made Create helper text follow the selected provider and added safe local health and display diagnostics.
+
+### Validation
+
+- Added deterministic model lifecycle, YouTube readiness, creator-state, display-diagnostics, and rendered responsive containment regressions.
+- Preserved the v0.5.2 security, provider credential, support-bundle, and release-quality controls.
+
+### Known limitations
+
+- Native platform qualification, real public-YouTube creator E2E, and publication remain gated on the exact PR head.
+- Platform signing/notarization, provider quotas, model availability, and local hardware requirements continue to depend on the selected setup.
+
 ## [0.5.2] — 2026-08-23
 
 ClipGauge v0.5.2 is a focused setup and provider-readiness correction. It keeps the v0.5.1 creator workflow intact while making component ownership, local-AI readiness, setup outcomes, and credential states truthful and recoverable.
