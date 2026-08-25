@@ -21,6 +21,8 @@ import httpx
 
 from .. import config, downloads, runtime
 
+DownloadManager = downloads.DownloadManager
+
 PROVIDER_VERSION = "1.3.2"
 NODE_VERSION = "24.19.0"
 PROVIDER_GROUP = "core:youtube"
@@ -183,6 +185,69 @@ def _extract_assets(manager: downloads.DownloadManager, archives: list[Path]) ->
 
 def _server_ready() -> bool:
     return (server_home() / "build" / "main.js").is_file() and plugin_dir().is_dir() and node_path().is_file()
+
+
+def _yt_dlp_ready() -> bool:
+    try:
+        from . import ytdlp
+
+        _manifest, entry, _name = ytdlp._manifest_record()
+        path = ytdlp.binary_path()
+        return path.is_file() and runtime.sha256_file(path).lower() == str(entry["sha256"]).lower()
+    except (OSError, KeyError, TypeError, ValueError, runtime.RuntimeIntegrityError):
+        return False
+
+
+def readiness() -> dict[str, Any]:
+    """Return the single source of truth for whether a YouTube run can start."""
+    checks: list[dict[str, Any]] = []
+    ytdlp_ok = _yt_dlp_ready()
+    checks.append({"name": "yt-dlp", "ready": ytdlp_ok, "message": "Pinned yt-dlp is verified." if ytdlp_ok else "Pinned yt-dlp is not installed or failed verification."})
+    if not ytdlp_ok:
+        return {"state": "NOT_INSTALLED", "ready": False, "reason": "Install the verified YouTube runtime before testing public links.", "actions": ["Install"], "checks": checks}
+
+    rows = DownloadManager().inventory(assets())
+    installed = [bool(row.get("installed")) for row in rows]
+    checks.extend({"name": str(row.get("asset_id", "youtube-asset")), "ready": bool(row.get("installed")), "message": "Verified asset is installed." if row.get("installed") else "Verified asset is missing or needs repair."} for row in rows)
+    if not all(installed):
+        state = "NOT_INSTALLED" if not any(installed) else "INSTALL_INCOMPLETE"
+        return {"state": state, "ready": False, "reason": "Install the complete YouTube support bundle, then test it.", "actions": ["Install", "Retry"], "checks": checks}
+
+    if not _server_ready():
+        checks.append({"name": "provider-build", "ready": False, "message": "The PO-token provider build or plugin is incomplete."})
+        return {"state": "BUILD_REQUIRED", "ready": False, "reason": "Build the installed PO-token provider before using YouTube.", "actions": ["Repair", "Retry"], "checks": checks}
+
+    result = ProviderSupervisor().self_test()
+    plugin_ok = bool(result.get("plugin_discoverable"))
+    server_ok = bool(result.get("server_installed"))
+    health_ok = bool((result.get("health") or {}).get("healthy"))
+    checks.extend([
+        {"name": "plugin", "ready": plugin_ok, "message": "The YouTube plugin is discoverable." if plugin_ok else "The YouTube plugin is not discoverable."},
+        {"name": "loopback-health", "ready": health_ok, "message": "The local PO-token provider is healthy." if health_ok else "The local PO-token provider is not healthy."},
+    ])
+    if not server_ok or not plugin_ok:
+        return {"state": "REPAIR_REQUIRED", "ready": False, "reason": "Repair the installed YouTube support components, then test again.", "actions": ["Repair", "Retry"], "checks": checks}
+    if not health_ok:
+        return {"state": "UNHEALTHY", "ready": False, "reason": "The local YouTube support check failed. Start a test to retry safely.", "actions": ["Test", "Retry"], "checks": checks}
+    return {"state": "READY", "ready": True, "reason": "YouTube support passed its local provider health check.", "actions": ["Test"], "checks": checks}
+
+
+def test() -> dict[str, Any]:
+    """Start the loopback provider for one health check, then always stop it."""
+    status = readiness()
+    if status["state"] not in {"READY", "UNHEALTHY"}:
+        return status
+    supervisor = ProviderSupervisor()
+    try:
+        supervisor.start()
+        result = supervisor.self_test()
+        if result.get("ok"):
+            return {**status, "state": "READY", "ready": True, "reason": "YouTube support passed its local provider health check.", "actions": ["Test"]}
+        return {**status, "state": "UNHEALTHY", "ready": False, "reason": "The local YouTube support check failed. Repair the provider and test again.", "actions": ["Repair", "Test"]}
+    except (OSError, RuntimeError, runtime.RuntimeIntegrityError) as error:
+        return {**status, "state": "UNHEALTHY", "ready": False, "reason": "The local YouTube support provider could not start for its health check.", "actions": ["Repair", "Test"], "error": str(error)}
+    finally:
+        supervisor.stop()
 
 
 def install(*, event: downloads.EventFn | None = None, cancel: Callable[[], bool] | None = None, require_consent: bool = True) -> dict[str, Any]:

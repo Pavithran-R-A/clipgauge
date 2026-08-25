@@ -247,6 +247,16 @@ export interface PreflightStorage {
   assets: Array<Record<string, unknown>>
 }
 
+export type YouTubeReadinessState = 'NOT_INSTALLED' | 'INSTALL_INCOMPLETE' | 'BUILD_REQUIRED' | 'UNHEALTHY' | 'READY' | 'REPAIR_REQUIRED'
+
+export interface YouTubeReadiness {
+  state: YouTubeReadinessState
+  ready: boolean
+  reason: string
+  actions: string[]
+  checks: Array<{ name: string; ready: boolean; message: string }>
+}
+
 export interface PreflightResult {
   state: 'ready' | 'warning' | 'blocked'
   selected_llm: string
@@ -254,6 +264,7 @@ export interface PreflightResult {
   provider?: ProviderProfile
   hardware?: Record<string, unknown>
   storage?: PreflightStorage
+  youtube?: YouTubeReadiness
 }
 
 export interface ManagedAssetRow {
@@ -332,6 +343,8 @@ export interface VideoToolReadiness {
   reason: string
 }
 
+export type LocalModelState = 'INSTALLED' | 'VERIFIED' | 'DOWNLOAD_REQUIRED' | 'NEEDS_REPAIR'
+
 export interface LocalAiReadiness {
   state: 'ready' | 'runtime-install-required' | 'model-download-required' | string
   runtime_ready: boolean
@@ -340,6 +353,7 @@ export interface LocalAiReadiness {
   required_bytes: number
   action: string
 }
+
 
 
 /* ---------- the Instagram loop ---------- */

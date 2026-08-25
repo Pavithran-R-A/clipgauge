@@ -4,11 +4,11 @@ ClipGauge helps creators find the moments worth sharing, turn them into vertical
 
 [Download the latest release](https://github.com/Pavithran-R-A/clipgauge/releases/latest) · [View the source](https://github.com/Pavithran-R-A/clipgauge) · [Report a problem](https://github.com/Pavithran-R-A/clipgauge/issues)
 
-> **Current release: ClipGauge v0.5.2** — a focused setup and provider-readiness correction with truthful component totals, reliable local-AI actions, and clear saved-versus-connected states.
+> **Current release: ClipGauge v0.5.3** — a responsive setup and creator-flow refinement with truthful local-model reuse, source-aware YouTube readiness, and explicit terminal error states.
 
 ## See the workflow
 
-The packaged screenshots below show the verified creator workflow. Setup & Storage now distinguishes reusable system video tools from managed downloads, while AI Providers distinguishes a saved credential from a verified connection.
+The packaged screenshots below show the creator workflow. Setup & Storage separates core components from optional ClipGauge Local, reports whether model files are verified/reused or need repair, and exposes a real YouTube Test action. AI Providers distinguishes a saved credential from a verified connection.
 
 ![ClipGauge Create screen](docs/screenshots/v0.5.1-packaged-create.png)
 
@@ -23,11 +23,13 @@ The main flow is designed for creators rather than model configuration. Start on
 ## Get started
 
 1. Download the installer for your operating system from the [latest release](https://github.com/Pavithran-R-A/clipgauge/releases/latest).
-2. Open ClipGauge and approve the one-time local component setup. The app tells you what will be installed, what is already available, and when a size still needs to be calculated.
-3. Add a video from your computer or paste a supported link. Choose the scoring provider and caption style that fit this clip.
-4. Review the suggested clips, adjust a cut or caption style if needed, and export the MP4 you want to publish.
+2. Open ClipGauge and approve the one-time core component setup. Setup & Storage tells you what will be installed, what is already available, and when an existing verified file will be reused.
+3. If you want local scoring, choose a model in Optional local AI. A verified existing model shows as installed and contributes zero additional download bytes; a failed integrity check shows Needs repair instead of silently redownloading.
+4. For YouTube, open Setup & Storage and run Test YouTube support. The app checks the pinned runtime, provider build, plugin discovery, loopback startup, and health before Create allows a public-link job.
+5. Add a video from your computer or paste a supported link. Choose the scoring provider and caption style that fit this clip.
+6. Review the suggested clips, adjust a cut or caption style if needed, and export the MP4 you want to publish.
 
-If a setup step needs attention, open **Setup & Storage**. If a connection or render needs investigation, open **Help & Diagnostics** and create a support bundle. The bundle is designed for troubleshooting and does not include provider credentials.
+If a setup step needs attention, open **Setup & Storage**. Core readiness, optional local-AI readiness, and YouTube readiness are shown independently. Use Install, Test, Repair, or Retry as offered by the current state. If a connection or render needs investigation, open **Help & Diagnostics** for a local health summary and create a redacted support bundle. The bundle is designed for troubleshooting and does not include provider credentials.
 
 ## Choose how scoring runs
 

@@ -15,7 +15,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, config, downloads, local_runtime, protocol, runtime
+from . import __version__, config, downloads, local_runtime, protocol, runtime, setup_models
 from .jobs import queue
 from .render import ffmpeg_bin
 from .scoring import providers as providers_mod
@@ -175,11 +175,11 @@ def _setup_model_asset(model: local_runtime.LocalModel) -> downloads.ManagedAsse
 
 
 def _managed_asset_objects() -> list[downloads.ManagedAsset]:
-    from .ingest import ytdlp
+    from .ingest import youtube_compat, ytdlp
     from .models import managed, registry, specs  # noqa: F401 - register concrete analysis assets
     from .render import ffmpeg_bin
 
-    assets = [*managed.all_assets(), *(registry.managed_asset(spec) for spec in registry.REGISTRY.values()), ytdlp.managed_asset()]
+    assets = [*managed.all_assets(), *(registry.managed_asset(spec) for spec in registry.REGISTRY.values()), ytdlp.managed_asset(), *youtube_compat.assets()]
     ffmpeg_asset = ffmpeg_bin.managed_asset()
     if ffmpeg_asset:
         assets.append(ffmpeg_asset)
@@ -291,15 +291,25 @@ def cmd_setup(args: argparse.Namespace) -> int:
     try:
         runtime_asset = _setup_runtime_asset(manager)
         model_assets = [_setup_model_asset(model) for model in local_runtime.MODEL_CATALOG.values()]
+        if args.setup_cmd in {"youtube-status", "youtube-test"}:
+            from .ingest import youtube_compat
+            result = youtube_compat.test() if args.setup_cmd == "youtube-test" else youtube_compat.readiness()
+            print(json.dumps(result))
+            return 0
         if args.setup_cmd == "inventory":
             runtime_binary = manager.binary_path()
-            rows = downloads_manager.inventory(model_assets)
-            selected_id = args.selected_model_id or next((str(row["asset_id"]) for row in rows if "balanced" in str(row.get("display_name", "")).lower()), str(rows[0]["asset_id"]) if rows else None)
+            rows = [setup_models.enrich_model_row(row) for row in downloads_manager.inventory(model_assets)]
+            persisted_id = setup_models.load_selected_model(config.home_dir())
+            if args.selected_model_id:
+                selected_id = args.selected_model_id
+                setup_models.save_selected_model(config.home_dir(), selected_id)
+            else:
+                selected_id = setup_models.select_model_id(rows, persisted_id=persisted_id)
             selected_model = next((asset for asset in model_assets if asset.asset_id == selected_id), None)
             selected_row = next((row for row in rows if str(row.get("asset_id")) == selected_id), None)
             runtime_ready = runtime_binary.is_file()
             model_ready = bool(selected_row and selected_row.get("installed"))
-            local_state = "ready" if runtime_ready and model_ready else "model-download-required" if runtime_ready else "runtime-install-required"
+            local_state = "ready" if runtime_ready and model_ready else "repair-required" if runtime_ready and selected_row and selected_row.get("lifecycle_state") == "NEEDS_REPAIR" else "model-download-required" if runtime_ready else "runtime-install-required"
             ffmpeg_decision = ffmpeg_bin.readiness()
             managed_assets = _managed_asset_objects()
             if ffmpeg_decision.ready and ffmpeg_decision.source not in {"managed", "legacy-managed"}:
@@ -361,7 +371,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
                     "model_ready": model_ready,
                     "selected_model_id": selected_id,
                     "required_bytes": (0 if runtime_ready else runtime_asset.size_bytes) + (0 if model_ready or selected_model is None else selected_model.size_bytes),
-                    "action": "Ready" if runtime_ready and model_ready else "Download " + str(selected_model.display_name if selected_model else "selected model") if runtime_ready else "Install ClipGauge Local",
+                    "action": "Ready" if runtime_ready and model_ready else "Repair selected model" if local_state == "repair-required" else "Download " + str(selected_model.display_name if selected_model else "selected model") if runtime_ready else "Install ClipGauge Local",
                 },
                 "managed_assets": managed_rows,
                 "storage": downloads_manager.estimate(storage_assets),
@@ -459,7 +469,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
 
     try:
         profile = _profile_from_args(args)
-        payload = preflight.run(profile)
+        payload = preflight.run(profile, args.source)
     except Exception as err:  # noqa: BLE001 — preflight must return an actionable JSON result
         payload = {
             "state": "blocked",
@@ -801,12 +811,15 @@ def main(argv: list[str] | None = None) -> int:
     p_preflight.add_argument("--endpoint", default=None, help="custom provider base URL")
     p_preflight.add_argument("--auth", choices=["none", "bearer", "api_key_header", "custom_secret_header"], default=None)
     p_preflight.add_argument("--secret-header", default=None, help=argparse.SUPPRESS)
+    p_preflight.add_argument("--source", default=None, help=argparse.SUPPRESS)
     p_preflight.set_defaults(fn=cmd_preflight)
 
     p_setup = sub.add_parser("setup", help="inspect or install managed local-AI assets")
     setup_sub = p_setup.add_subparsers(dest="setup_cmd", required=True)
     p_inventory = setup_sub.add_parser("inventory", help="show verified runtime/model inventory")
     p_inventory.add_argument("--model", dest="selected_model_id", choices=sorted(local_runtime.MODEL_CATALOG), default=None)
+    setup_sub.add_parser("youtube-status", help="show authoritative YouTube support readiness")
+    setup_sub.add_parser("youtube-test", help="test the loopback YouTube provider safely")
     setup_sub.add_parser("install-runtime", help="download and install the verified llama.cpp runtime")
     setup_sub.add_parser("install-ffmpeg", help="download, install, and capability-test the managed FFmpeg engine")
     p_install_group = setup_sub.add_parser("install-group", help="download one consented managed asset group")

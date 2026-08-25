@@ -13,8 +13,8 @@ type ProviderOptions = {
 }
 
 export const api = {
-  preflight: (provider: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
-    invoke<PreflightResult>('preflight', { llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader }),
+  preflight: (provider: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, source?: string) =>
+    invoke<PreflightResult>('preflight', { llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader, source }),
   privacySummary: (provider: string, model?: string, endpoint?: string) =>
     invoke<PrivacySummary>('privacy_summary', { llm: legacyMode(provider), provider, model, endpoint }),
   generateSupportBundle: (jobId?: string, diagnosticId?: string) => invoke<string>('generate_support_bundle', { jobId, diagnosticId }),
@@ -40,6 +40,8 @@ export const api = {
   markOnboarded: () => invoke<void>('mark_onboarded'),
   checkOllama: () => invoke<{ state: 'service-stopped' | 'model-missing' | 'service-healthy'; running: boolean; models: string[]; message?: string }>('check_ollama'),
   setupInventory: (modelId?: string) => invoke<Record<string, unknown>>('setup_tool', { args: ['inventory', ...(modelId ? ['--model', modelId] : []) ] }),
+  youtubeReadiness: () => invoke<import('./types').YouTubeReadiness>('setup_tool', { args: ['youtube-status'] }),
+  setupToolYouTubeTest: () => invoke<import('./types').YouTubeReadiness>('setup_tool', { args: ['youtube-test'] }),
   installLocalRuntime: () => invoke<Record<string, unknown>>('setup_tool', { args: ['install-runtime'] }),
   downloadLocalModel: (modelId: string) => invoke<Record<string, unknown>>('setup_tool', { args: ['download-model', modelId] }),
   startSetup: (args: string[]) => invoke<string>('start_setup', { args }),

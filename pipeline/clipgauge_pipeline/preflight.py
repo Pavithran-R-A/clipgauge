@@ -22,6 +22,13 @@ SUPPORTED_SYSTEMS = {"Linux", "Darwin", "Windows"}
 SUPPORTED_MACHINES = {"x86_64", "amd64", "aarch64", "arm64", "AMD64"}
 
 
+def _is_youtube_source(source: str) -> bool:
+    from urllib.parse import urlsplit
+
+    host = (urlsplit(source.strip()).hostname or "").lower()
+    return host == "youtu.be" or host.endswith("youtube.com") or host.endswith("youtube-nocookie.com")
+
+
 def _check(checks: list[dict], name: str, state: str, message: str, remediation: str | None = None, **details) -> None:
     row = {"name": name, "state": state, "message": protocol.safe_message(message)}
     if remediation:
@@ -220,7 +227,7 @@ def _storage_estimate(checks: list[dict], free_bytes: int | None) -> dict:
     }
 
 
-def run(selected_llm: providers_mod.ProviderProfile | str = "gemini") -> dict:
+def run(selected_llm: providers_mod.ProviderProfile | str = "gemini", source: str | None = None) -> dict:
     checks: list[dict] = []
     system = platform.system()
     machine = platform.machine()
@@ -244,6 +251,19 @@ def run(selected_llm: providers_mod.ProviderProfile | str = "gemini") -> dict:
     except runtime.RuntimeIntegrityError as error:
         _check(checks, "runtime-manifest", "blocked", str(error), "Repair or reinstall the signed application bundle.")
     _ffmpeg(checks)
+    youtube_status = None
+    if source and _is_youtube_source(source):
+        from .ingest import youtube_compat
+
+        youtube_status = youtube_compat.readiness()
+        _check(
+            checks,
+            "youtube-support",
+            "ready" if youtube_status.get("ready") else "blocked",
+            str(youtube_status.get("reason") or "YouTube support needs attention."),
+            "Open Setup Center, run Test, and retry." if not youtube_status.get("ready") else None,
+            youtube_state=youtube_status.get("state"),
+        )
     profile = providers_mod.legacy_profile(selected_llm) if isinstance(selected_llm, str) else selected_llm
     _provider(checks, profile)
     states = {item["state"] for item in checks}
@@ -255,6 +275,7 @@ def run(selected_llm: providers_mod.ProviderProfile | str = "gemini") -> dict:
         "hardware": capabilities,
         "storage": _storage_estimate(checks, free_bytes),
         "selected_llm": profile.kind,
+        "youtube": youtube_status,
         "provider": {
             "id": profile.id,
             "kind": profile.kind,
