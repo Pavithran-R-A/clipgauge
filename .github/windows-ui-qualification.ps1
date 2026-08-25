@@ -62,41 +62,19 @@ function Validate-NativeDialogEvidence {
   $metadata = Get-Content -Raw -LiteralPath $metadataPath | ConvertFrom-Json
   if ($metadata.provider -ne 'OpenRouter Free') { throw "native dialog provider target mismatch: $metadataPath" }
   if ($metadata.target_viewport.width -ne $Width -or $metadata.target_viewport.height -ne $Height) { throw "native dialog metadata target viewport mismatch: $metadataPath" }
-  if ($metadata.owner_screenshot -ne [System.IO.Path]::GetFileName($OwnerPath) -or $metadata.owner_width -ne $ownerFacts.width -or $metadata.owner_height -ne $ownerFacts.height) { throw "owner screenshot metadata mismatch: $metadataPath" }
-  if ($metadata.native_dialog_screenshot -ne [System.IO.Path]::GetFileName($dialogPath) -or $metadata.native_dialog_width -ne $dialogFacts.width -or $metadata.native_dialog_height -ne $dialogFacts.height) { throw "native dialog image metadata mismatch: $metadataPath" }
+  if ($metadata.owner_screenshot -ne [System.IO.Path]::GetFileName($OwnerPath)) { throw "owner screenshot metadata mismatch: $metadataPath" }
+  if ($metadata.native_dialog_screenshot -ne [System.IO.Path]::GetFileName($dialogPath)) { throw "native dialog screenshot metadata mismatch: $metadataPath" }
   if ($metadata.dialog_pid -ne "$($proc.Id)" -or -not $metadata.pid_matches_app) { throw "native dialog PID ownership mismatch: $metadataPath" }
   if ([string]$metadata.dialog_hwnd -notmatch '^\d+$' -or $metadata.class_name -ne '#32770' -or $metadata.title -ne 'ClipGauge') { throw "native dialog identity mismatch: $metadataPath" }
   if ($metadata.content_text_read_method -ne 'winapp-ui-get-value-json' -or -not $metadata.content_text_nonempty -or -not $metadata.expected_provider_observed -or -not $metadata.non_revocation_phrase_observed -or -not $metadata.ok_control_observed -or -not $metadata.cancel_control_observed) { throw "native dialog machine-readable UIA evidence incomplete: $metadataPath" }
   if (-not $metadata.confirmation_accepted -or -not $metadata.dialog_closed -or -not $metadata.post_removal_not_configured) { throw "native dialog semantic evidence incomplete: $metadataPath" }
   if ($metadata.owner_sha256 -and $metadata.owner_sha256 -ne $ownerFacts.sha256) { throw "owner screenshot hash metadata mismatch: $metadataPath" }
   if ($metadata.native_dialog_sha256 -and $metadata.native_dialog_sha256 -ne $dialogFacts.sha256) { throw "native dialog hash metadata mismatch: $metadataPath" }
-  $evidence = [ordered]@{
-    provider = [string]$metadata.provider
-    target_viewport = [ordered]@{ width = $Width; height = $Height }
-    owner_screenshot = [System.IO.Path]::GetFileName($OwnerPath)
-    owner_width = $ownerFacts.width
-    owner_height = $ownerFacts.height
-    owner_sha256 = $ownerFacts.sha256
-    native_dialog_screenshot = [System.IO.Path]::GetFileName($dialogPath)
-    native_dialog_width = $dialogFacts.width
-    native_dialog_height = $dialogFacts.height
-    native_dialog_sha256 = $dialogFacts.sha256
-    dialog_hwnd = [string]$metadata.dialog_hwnd
-    dialog_pid = [string]$metadata.dialog_pid
-    pid_matches_app = [bool]$metadata.pid_matches_app
-    class_name = [string]$metadata.class_name
-    title = [string]$metadata.title
-    content_text_read_method = [string]$metadata.content_text_read_method
-    content_text_nonempty = [bool]$metadata.content_text_nonempty
-    expected_provider_observed = [bool]$metadata.expected_provider_observed
-    non_revocation_phrase_observed = [bool]$metadata.non_revocation_phrase_observed
-    ok_control_observed = [bool]$metadata.ok_control_observed
-    cancel_control_observed = [bool]$metadata.cancel_control_observed
-    confirmation_accepted = [bool]$metadata.confirmation_accepted
-    dialog_closed = [bool]$metadata.dialog_closed
-    post_removal_not_configured = [bool]$metadata.post_removal_not_configured
-  }
-  $evidence | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $metadataPath -Encoding utf8
+  $contractPath = Join-Path $PSScriptRoot 'windows-ui-evidence-contract.mjs'
+  $contractInput = [ordered]@{ provisional = $metadata; ownerFacts = $ownerFacts; dialogFacts = $dialogFacts } | ConvertTo-Json -Depth 20 -Compress
+  $evidenceJson = $contractInput | node $contractPath --finalize
+  if ($LASTEXITCODE -ne 0 -or -not $evidenceJson) { throw "native dialog evidence finalization failed: $metadataPath" }
+  $evidenceJson | Set-Content -LiteralPath $metadataPath -Encoding utf8
   Write-Host "NATIVE_DIALOG_EVIDENCE_PASS $metadataPath $($dialogFacts.width)x$($dialogFacts.height) $($dialogFacts.sha256)"
 }
 

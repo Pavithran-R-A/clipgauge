@@ -136,7 +136,7 @@ jobs:
           }
 
       - uses: actions/upload-artifact@v4
-
+        if: ${{ !cancelled() }}
         with:
           name: clipgauge-windows-setup
           path: |
@@ -147,5 +147,8 @@ jobs:
             setup-analysis.jsonl
             .github/windows-ui-qualification.ps1
             .github/windows-ui-qualification.mjs
+            .github/windows-ui-json.mjs
+            .github/windows-ui-evidence-contract.mjs
+            .github/windows-ui-evidence-contract.test.mjs
             scripts/qa_provider_fixture.py
           if-no-files-found: error

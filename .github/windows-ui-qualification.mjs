@@ -316,8 +316,6 @@ async function removalConfirmation(page) {
     provider: expectedProvider,
     target_viewport: { width: targetWidth, height: targetHeight },
     owner_screenshot: `credential-removal-confirmation-${suffix}.png`,
-    owner_width: targetWidth,
-    owner_height: targetHeight,
     native_dialog_screenshot: `credential-removal-confirmation-dialog-${suffix}.png`,
     dialog_hwnd: dialogHandle,
     dialog_pid: pid,
