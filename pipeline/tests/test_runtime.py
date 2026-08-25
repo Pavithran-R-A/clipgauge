@@ -127,6 +127,31 @@ def test_safe_tar_archive_installation(tmp_path):
     assert (output / "llama-b10545/llama-server").read_bytes() == b"server"
 
 
+def test_safe_archive_preserves_tar_executable_mode(tmp_path):
+    archive = tmp_path / "executable.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        payload = tarfile.TarInfo("node/bin/node")
+        payload.mode = 0o755
+        payload.size = len(b"node")
+        handle.addfile(payload, io.BytesIO(b"node"))
+    output = tmp_path / "installed"
+    runtime.extract_archive_verified(archive, output, archive_type="tar.gz")
+    if os.name != "nt":
+        assert (output / "node/bin/node").stat().st_mode & 0o111
+
+
+def test_safe_archive_preserves_zip_executable_mode(tmp_path):
+    archive = tmp_path / "executable.zip"
+    info = zipfile.ZipInfo("node/bin/npm")
+    info.external_attr = (0o100755 << 16)
+    with zipfile.ZipFile(archive, "w") as handle:
+        handle.writestr(info, b"npm")
+    output = tmp_path / "installed"
+    runtime.extract_archive_verified(archive, output, archive_type="zip")
+    if os.name != "nt":
+        assert (output / "node/bin/npm").stat().st_mode & 0o111
+
+
 def test_safe_archive_rejects_tar_traversal(tmp_path):
     archive = tmp_path / "bad.tar.gz"
     with tarfile.open(archive, "w:gz") as handle:
