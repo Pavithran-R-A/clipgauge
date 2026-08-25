@@ -308,8 +308,13 @@ def extract_archive_verified(
                     extracted.append(output)
                 for path in aliases:
                     output = staging / path
-                    write_from_member(path, output)
-                    restore_mode(output, regular[resolve_target(path)].mode)
+                    target = staging / resolve_target(path)
+                    if os.name != "nt":
+                        output.parent.mkdir(parents=True, exist_ok=True)
+                        output.symlink_to(os.path.relpath(target, output.parent))
+                    else:
+                        write_from_member(path, output)
+                        restore_mode(output, regular[resolve_target(path)].mode)
                     extracted.append(output)
         else:
             raise RuntimeIntegrityError(f"unsupported archive type: {archive_type}")

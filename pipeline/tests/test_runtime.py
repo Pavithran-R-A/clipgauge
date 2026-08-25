@@ -152,6 +152,26 @@ def test_safe_archive_preserves_zip_executable_mode(tmp_path):
         assert (output / "node/bin/npm").stat().st_mode & 0o111
 
 
+def test_safe_archive_preserves_internal_tar_aliases(tmp_path):
+    archive = tmp_path / "aliases.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        target = tarfile.TarInfo("node/lib/cli.js")
+        target.mode = 0o644
+        target.size = len(b"module.exports = true")
+        handle.addfile(target, io.BytesIO(b"module.exports = true"))
+        alias = tarfile.TarInfo("node/bin/npm")
+        alias.type = tarfile.SYMTYPE
+        alias.linkname = "../lib/cli.js"
+        handle.addfile(alias)
+    output = tmp_path / "installed"
+    runtime.extract_archive_verified(archive, output, archive_type="tar.gz")
+    npm = output / "node/bin/npm"
+    if os.name != "nt":
+        assert npm.is_symlink()
+        assert npm.resolve() == (output / "node/lib/cli.js").resolve()
+    assert npm.read_bytes() == b"module.exports = true"
+
+
 def test_safe_archive_rejects_tar_traversal(tmp_path):
     archive = tmp_path / "bad.tar.gz"
     with tarfile.open(archive, "w:gz") as handle:
