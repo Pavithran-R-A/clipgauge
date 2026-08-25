@@ -18,22 +18,61 @@ function Invoke-WindowCapture {
   return $path
 }
 
-function Validate-Image {
-  param([Parameter(Mandatory = $true)] [string] $Path, [Parameter(Mandatory = $true)] [int] $Width, [Parameter(Mandatory = $true)] [int] $Height)
+function Get-ImageFacts {
+  param([Parameter(Mandatory = $true)] [string] $Path)
+  if (-not (Test-Path -LiteralPath $Path)) { throw "screenshot missing: $Path" }
   Add-Type -AssemblyName System.Drawing
   $bmp = [System.Drawing.Bitmap]::new($Path)
   try {
-    if ($bmp.Width -ne $Width -or $bmp.Height -ne $Height) { throw "wrong screenshot dimensions for ${Path}: $($bmp.Width)x$($bmp.Height), expected ${Width}x${Height}" }
     $colors = New-Object 'System.Collections.Generic.HashSet[int]'
-    $sampled = 0
     for ($y = 0; $y -lt $bmp.Height; $y += [Math]::Max(1, [int]($bmp.Height / 64))) {
       for ($x = 0; $x -lt $bmp.Width; $x += [Math]::Max(1, [int]($bmp.Width / 64))) {
         [void]$colors.Add($bmp.GetPixel($x, $y).ToArgb())
-        $sampled++
       }
     }
-    if ($colors.Count -lt 8) { throw "screenshot is blank or near-uniform: $Path" }
+    return [ordered]@{
+      path = [System.IO.Path]::GetFileName($Path)
+      width = $bmp.Width
+      height = $bmp.Height
+      sha256 = Hash-File $Path
+      sampled_colors = $colors.Count
+      nonuniform = ($colors.Count -ge 8)
+    }
   } finally { $bmp.Dispose() }
+}
+
+function Validate-Image {
+  param([Parameter(Mandatory = $true)] [string] $Path, [Parameter(Mandatory = $true)] [int] $Width, [Parameter(Mandatory = $true)] [int] $Height)
+  $facts = Get-ImageFacts $Path
+  if ($facts.width -ne $Width -or $facts.height -ne $Height) { throw "wrong screenshot dimensions for ${Path}: $($facts.width)x$($facts.height), expected ${Width}x${Height}" }
+  if (-not $facts.nonuniform) { throw "screenshot is blank or near-uniform: $Path" }
+  return $facts
+}
+
+function Validate-NativeDialogEvidence {
+  param([Parameter(Mandatory = $true)] [string] $State, [Parameter(Mandatory = $true)] [string] $Suffix, [Parameter(Mandatory = $true)] [int] $Width, [Parameter(Mandatory = $true)] [int] $Height, [Parameter(Mandatory = $true)] [string] $OwnerPath)
+  $dialogPath = Join-Path $OutputDir "$State-dialog-$Suffix.png"
+  $metadataPath = Join-Path $OutputDir "$State-$Suffix.json"
+  $ownerFacts = Validate-Image $OwnerPath $Width $Height
+  $dialogFacts = Get-ImageFacts $dialogPath
+  if ($dialogFacts.width -le 0 -or $dialogFacts.height -le 0 -or $dialogFacts.width -gt 4096 -or $dialogFacts.height -gt 4096) { throw "native dialog screenshot dimensions are implausible: $($dialogFacts.width)x$($dialogFacts.height)" }
+  if (-not $dialogFacts.nonuniform) { throw "native dialog screenshot is blank or near-uniform: $dialogPath" }
+  if ($dialogFacts.sha256 -eq $ownerFacts.sha256) { throw "native dialog screenshot unexpectedly matches owner screenshot: $dialogPath" }
+  if (-not (Test-Path -LiteralPath $metadataPath)) { throw "native dialog metadata missing: $metadataPath" }
+  $metadata = Get-Content -Raw -LiteralPath $metadataPath | ConvertFrom-Json
+  if ($metadata.target_viewport.width -ne $Width -or $metadata.target_viewport.height -ne $Height) { throw "native dialog metadata target viewport mismatch: $metadataPath" }
+  if ($metadata.native_dialog.pid -ne "$($proc.Id)" -or -not $metadata.native_dialog.pid_matches_app) { throw "native dialog PID ownership mismatch: $metadataPath" }
+  if ($metadata.native_dialog.class_name -ne '#32770' -or $metadata.native_dialog.title -ne 'ClipGauge') { throw "native dialog class/title mismatch: $metadataPath" }
+  if (-not $metadata.native_dialog.ui_automation_inspected -or -not $metadata.native_dialog.controls_observed -or -not $metadata.native_dialog.message_text_observed) { throw "native dialog UIA evidence incomplete: $metadataPath" }
+  if (-not $metadata.semantic.remove_clicked -or -not $metadata.semantic.confirmation_accepted -or -not $metadata.semantic.dialog_closed -or -not $metadata.semantic.post_removal_not_configured) { throw "native dialog semantic evidence incomplete: $metadataPath" }
+  $evidence = [ordered]@{
+    target_viewport = [ordered]@{ width = $Width; height = $Height }
+    owner = $ownerFacts
+    native_dialog = [ordered]@{ image = $dialogFacts; hwnd = [string]$metadata.native_dialog.hwnd; pid = [string]$metadata.native_dialog.pid; pid_matches_app = [bool]$metadata.native_dialog.pid_matches_app; class_name = [string]$metadata.native_dialog.class_name; title = [string]$metadata.native_dialog.title; ui_automation_inspected = [bool]$metadata.native_dialog.ui_automation_inspected; controls_observed = [bool]$metadata.native_dialog.controls_observed; message_text_observed = [bool]$metadata.native_dialog.message_text_observed; ui_automation_excerpt = [string]$metadata.native_dialog.ui_automation_excerpt }
+    semantic = $metadata.semantic
+  }
+  $evidence | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $metadataPath -Encoding utf8
+  Write-Host "NATIVE_DIALOG_EVIDENCE_PASS $metadataPath $($dialogFacts.width)x$($dialogFacts.height) $($dialogFacts.sha256)"
 }
 
 function Hash-File([string] $Path) { return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant() }
@@ -99,7 +138,7 @@ if ($proc.MainWindowHandle -eq [IntPtr]::Zero) { throw 'installed ClipGauge wind
 function Invoke-State {
   param([Parameter(Mandatory = $true)] [string] $State, [Parameter(Mandatory = $true)] [int] $Width, [Parameter(Mandatory = $true)] [int] $Height, [Parameter(Mandatory = $true)] [string] $Suffix)
   Size-Window $Width $Height
-  $args = @('.github/windows-ui-qualification.mjs', '--state', $State, '--suffix', $Suffix, '--output', $OutputDir, '--hwnd', "$($proc.MainWindowHandle.ToInt64())", '--pid', "$($proc.Id)", '--sentinel', $Sentinel, '--port', '9222')
+  $args = @('.github/windows-ui-qualification.mjs', '--state', $State, '--suffix', $Suffix, '--output', $OutputDir, '--hwnd', "$($proc.MainWindowHandle.ToInt64())", '--pid', "$($proc.Id)", '--sentinel', $Sentinel, '--target-width', "$Width", '--target-height', "$Height", '--port', '9222')
   & node @args
   if ($LASTEXITCODE -ne 0) { throw "semantic state qualification failed: $State $Suffix" }
   $capture = Join-Path $OutputDir "$State-$Suffix.png"
@@ -107,6 +146,9 @@ function Invoke-State {
     $capture = Invoke-WindowCapture "$State-$Suffix"
   }
   Validate-Image $capture $Width $Height
+  if ($State -eq 'credential-removal-confirmation') {
+    Validate-NativeDialogEvidence $State $Suffix $Width $Height $capture
+  }
 }
 
 try {

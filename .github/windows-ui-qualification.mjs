@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
@@ -10,9 +11,11 @@ const outputDir = args.get('output')
 const hwnd = args.get('hwnd')
 const pid = args.get('pid')
 const sentinel = args.get('sentinel')
+const targetWidth = Number(args.get('target-width') || '0')
+const targetHeight = Number(args.get('target-height') || '0')
 const port = Number(args.get('port') || '9222')
 const windowProbe = fileURLToPath(new URL('./windows-window-probe.ps1', import.meta.url))
-if (!state || !suffix || !outputDir || !hwnd || !pid || !sentinel) throw new Error('state, suffix, output, hwnd, pid, and sentinel are required')
+if (!state || !suffix || !outputDir || !hwnd || !pid || !sentinel || !targetWidth || !targetHeight) throw new Error('state, suffix, output, hwnd, pid, sentinel, target-width, and target-height are required')
 let lastNativeWindowList = ''
 
 async function connect() {
@@ -226,6 +229,9 @@ async function removalConfirmation(page) {
   const deadline = Date.now() + 30_000
   let dialogHandle = ''
   let dialogText = ''
+  let controlsText = ''
+  let messageSearchText = ''
+  await capture(`credential-removal-confirmation-${suffix}`)
   await page.getByRole('button', { name: 'Remove', exact: true }).click()
   while (Date.now() < deadline) {
     for (const record of nativeWindowRecords()) {
@@ -238,8 +244,12 @@ async function removalConfirmation(page) {
           dialogText = inspected
           console.log(`NATIVE_CONFIRMATION_UIA ${inspected.replaceAll(sentinel, '[REDACTED]').slice(0, 6000)}`)
           try {
-            const controls = execFileSync('winapp', ['ui', 'search', 'Button', '-w', handle, '--max', '20'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-            console.log(`NATIVE_CONFIRMATION_CONTROLS ${controls.replaceAll(sentinel, '[REDACTED]').slice(0, 3000)}`)
+            controlsText = execFileSync('winapp', ['ui', 'search', 'Button', '-w', handle, '--max', '20'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+            console.log(`NATIVE_CONFIRMATION_CONTROLS ${controlsText.replaceAll(sentinel, '[REDACTED]').slice(0, 3000)}`)
+          } catch {}
+          try {
+            messageSearchText = execFileSync('winapp', ['ui', 'search', 'does not revoke the provider key', '-w', handle], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+            console.log(`NATIVE_CONFIRMATION_TEXT ${messageSearchText.replaceAll(sentinel, '[REDACTED]').slice(0, 2000)}`)
           } catch {}
           break
         }
@@ -258,8 +268,13 @@ async function removalConfirmation(page) {
     console.log(`NATIVE_CONFIRMATION_UIA_SAMPLE ${dialogText.replaceAll(sentinel, '[REDACTED]').slice(0, 1200)}`)
     throw new Error('credential-removal confirmation was not observed through native UIA')
   }
+  const expectedText = 'does not revoke the provider key'
+  const controlsHaveOk = /\bOK\b/i.test(controlsText)
+  const messageObserved = dialogText.toLowerCase().includes(expectedText) || messageSearchText.toLowerCase().includes(expectedText)
+  if (!controlsHaveOk) throw new Error('native confirmation did not expose an OK control through UIA')
+  if (!messageObserved) throw new Error('native confirmation did not expose the expected message through UIA')
   console.log(`NATIVE_CONFIRMATION_WINDOW_PASS ${dialogHandle}`)
-  await capture(`credential-removal-confirmation-${suffix}`, ['-w', hwnd, '--capture-screen'])
+  await capture(`credential-removal-confirmation-dialog-${suffix}`, ['-w', dialogHandle])
   try {
     execFileSync('winapp', ['ui', 'invoke', 'OK', '-w', dialogHandle], { stdio: 'inherit' })
   } catch {
@@ -269,7 +284,36 @@ async function removalConfirmation(page) {
       execFileSync('winapp', ['ui', 'send-keys', 'Enter', '-w', dialogHandle], { stdio: 'inherit' })
     }
   }
+  let dialogClosed = false
+  const closeDeadline = Date.now() + 30_000
+  while (Date.now() < closeDeadline) {
+    if (!nativeWindowRecords().some((record) => record.handle === dialogHandle)) {
+      dialogClosed = true
+      break
+    }
+    await page.waitForTimeout(250)
+  }
+  if (!dialogClosed) throw new Error('native confirmation dialog did not close after semantic acceptance')
   await text(page, 'Not configured', 'post-removal state')
+  const metadata = {
+    target_viewport: { width: targetWidth, height: targetHeight },
+    owner_screenshot: `credential-removal-confirmation-${suffix}.png`,
+    native_dialog: {
+      screenshot: `credential-removal-confirmation-dialog-${suffix}.png`,
+      hwnd: dialogHandle,
+      pid,
+      pid_matches_app: true,
+      class_name: '#32770',
+      title: 'ClipGauge',
+      ui_automation_inspected: true,
+      controls_observed: controlsHaveOk,
+      expected_text: expectedText,
+      message_text_observed: messageObserved,
+      ui_automation_excerpt: dialogText.replaceAll(sentinel, '[REDACTED]').slice(0, 6000),
+    },
+    semantic: { remove_clicked: true, confirmation_accepted: true, dialog_closed: dialogClosed, post_removal_not_configured: true },
+  }
+  writeFileSync(`${outputDir}/credential-removal-confirmation-${suffix}.json`, `${JSON.stringify(metadata, null, 2)}\n`)
 }
 
 async function removeOpenRouter(page) {
