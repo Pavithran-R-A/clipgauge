@@ -169,12 +169,21 @@ try {
   Invoke-State 'openrouter-connected' 1920 1080 '1920x1080'
   Invoke-State 'gemini-saved-unverified' 1920 1080 '1920x1080'
   Invoke-State 'credential-removal-confirmation' 1920 1080 '1920x1080'
+  Invoke-State 'setup' 1920 1200 '1920x1200'
+  Invoke-State 'local-ai' 1920 1200 '1920x1200'
+  Invoke-State 'providers' 1920 1200 '1920x1200'
+  Invoke-State 'openrouter-saved' 1920 1200 '1920x1200'
+  Invoke-State 'openrouter-connected' 1920 1200 '1920x1200'
+  Invoke-State 'gemini-saved-unverified' 1920 1200 '1920x1200'
+  Invoke-State 'credential-removal-confirmation' 1920 1200 '1920x1200'
 
   $pairs = @(
     @('providers-1366x768.png', 'local-ai-1366x768.png'),
     @('providers-1920x1080.png', 'local-ai-1920x1080.png'),
     @('openrouter-saved-1366x768.png', 'openrouter-connected-1366x768.png'),
-    @('openrouter-saved-1920x1080.png', 'openrouter-connected-1920x1080.png')
+    @('openrouter-saved-1920x1080.png', 'openrouter-connected-1920x1080.png'),
+    @('providers-1920x1200.png', 'local-ai-1920x1200.png'),
+    @('openrouter-saved-1920x1200.png', 'openrouter-connected-1920x1200.png')
   )
   foreach ($pair in $pairs) {
     if ((Hash-File (Join-Path $OutputDir $pair[0])) -eq (Hash-File (Join-Path $OutputDir $pair[1]))) { throw "screenshots unexpectedly identical: $($pair -join ' == ')" }
