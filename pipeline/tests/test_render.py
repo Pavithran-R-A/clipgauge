@@ -150,3 +150,88 @@ def test_render_smoke(tmp_path):
     check = renderer.verify_output(out, 20.0)
     assert check["ok"], check
     assert check["width"] == 1080 and check["height"] == 1920
+
+
+def test_windows_system_ffmpeg_with_spaces_is_capable_and_needs_no_managed_download(monkeypatch, tmp_path):
+    binary = tmp_path / "Windows User" / "ffmpeg.exe"
+    binary.parent.mkdir()
+    binary.write_text("placeholder")
+    monkeypatch.setattr(ffmpeg_bin, "_EXE", ".exe")
+    monkeypatch.setattr(ffmpeg_bin.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(ffmpeg_bin.platform, "machine", lambda: "AMD64")
+    monkeypatch.setenv("CLIPGAUGE_FFMPEG", str(binary))
+    monkeypatch.setattr(ffmpeg_bin, "_platform_asset", lambda: None)
+    monkeypatch.setattr(ffmpeg_bin, "_probe", lambda path: ("ffmpeg version test", {"starts": True, "subtitles": True}, "ok") if path == str(binary) else (None, {"starts": False, "subtitles": False}, "unused"))
+    ffmpeg_bin.readiness.cache_clear()
+    ffmpeg_bin.resolve.cache_clear()
+    try:
+        result = ffmpeg_bin.readiness()
+        assert result.ready is True
+        assert result.source == "configured"
+        assert result.executable == str(binary)
+        assert result.managed_download_needed is False
+    finally:
+        ffmpeg_bin.readiness.cache_clear()
+        ffmpeg_bin.resolve.cache_clear()
+
+
+def test_windows_managed_ffmpeg_is_used_when_it_is_the_first_capable_candidate(monkeypatch, tmp_path):
+    binary = tmp_path / "managed" / "ffmpeg.exe"
+    binary.parent.mkdir()
+    binary.write_text("placeholder")
+    monkeypatch.setattr(ffmpeg_bin, "_EXE", ".exe")
+    monkeypatch.setattr(ffmpeg_bin.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(ffmpeg_bin.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(ffmpeg_bin, "_managed_dir", lambda: binary.parent)
+    monkeypatch.delenv("CLIPGAUGE_FFMPEG", raising=False)
+    monkeypatch.setattr(ffmpeg_bin, "_platform_asset", lambda: {"key": "win64-gpl", "version": "test", "size": 163})
+    monkeypatch.setattr(ffmpeg_bin, "_probe", lambda _path: ("ffmpeg version managed", {"starts": True, "subtitles": True}, "ok"))
+    ffmpeg_bin.readiness.cache_clear()
+    try:
+        result = ffmpeg_bin.readiness()
+        assert result.ready is True
+        assert result.source == "managed"
+        assert result.managed_download_needed is False
+    finally:
+        ffmpeg_bin.readiness.cache_clear()
+        ffmpeg_bin.resolve.cache_clear()
+
+
+def test_windows_incompatible_system_ffmpeg_offers_managed_fallback(monkeypatch, tmp_path):
+    binary = tmp_path / "ffmpeg.exe"
+    binary.write_text("placeholder")
+    monkeypatch.setattr(ffmpeg_bin, "_EXE", ".exe")
+    monkeypatch.setattr(ffmpeg_bin.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(ffmpeg_bin.platform, "machine", lambda: "AMD64")
+    monkeypatch.setenv("CLIPGAUGE_FFMPEG", str(binary))
+    monkeypatch.setattr(ffmpeg_bin, "_platform_asset", lambda: {"key": "win64-gpl", "version": "test", "size": 163})
+    monkeypatch.setattr(ffmpeg_bin, "_probe", lambda _path: ("ffmpeg version old", {"starts": True, "subtitles": False}, "missing subtitles"))
+    ffmpeg_bin.readiness.cache_clear()
+    try:
+        result = ffmpeg_bin.readiness()
+        assert result.ready is False
+        assert result.source == "configured"
+        assert result.managed_download_needed is True
+        assert result.reason == "missing subtitles"
+    finally:
+        ffmpeg_bin.readiness.cache_clear()
+        ffmpeg_bin.resolve.cache_clear()
+
+
+def test_windows_ffmpeg_missing_offers_managed_fallback(monkeypatch):
+    monkeypatch.setattr(ffmpeg_bin, "_EXE", ".exe")
+    monkeypatch.setattr(ffmpeg_bin.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(ffmpeg_bin.platform, "machine", lambda: "AMD64")
+    monkeypatch.delenv("CLIPGAUGE_FFMPEG", raising=False)
+    monkeypatch.setattr(ffmpeg_bin, "_managed_dir", lambda: None)
+    monkeypatch.setattr(ffmpeg_bin, "_platform_asset", lambda: {"key": "win64-gpl", "version": "test", "size": 163})
+    monkeypatch.setattr(ffmpeg_bin, "_candidates", lambda: [])
+    ffmpeg_bin.readiness.cache_clear()
+    try:
+        result = ffmpeg_bin.readiness()
+        assert result.ready is False
+        assert result.source == "missing"
+        assert result.managed_download_needed is True
+    finally:
+        ffmpeg_bin.readiness.cache_clear()
+        ffmpeg_bin.resolve.cache_clear()

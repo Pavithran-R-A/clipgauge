@@ -33,6 +33,7 @@ impl SecretName {
 pub trait SecretBackend {
     fn get(&self, name: SecretName) -> Result<Option<String>, String>;
     fn set(&mut self, name: SecretName, value: &str) -> Result<(), String>;
+    fn delete(&mut self, name: SecretName) -> Result<(), String>;
 }
 
 pub struct OsSecretBackend;
@@ -59,6 +60,15 @@ impl SecretBackend for OsSecretBackend {
             .set_password(value)
             .map_err(|error| format!("credential store write failed: {error}"))
     }
+
+    fn delete(&mut self, name: SecretName) -> Result<(), String> {
+        let entry = keyring::Entry::new(SERVICE, &name.account())
+            .map_err(|error| format!("credential store unavailable: {error}"))?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(format!("credential store delete failed: {error}")),
+        }
+    }
 }
 
 pub fn set(name: SecretName, value: &str) -> Result<(), String> {
@@ -79,6 +89,14 @@ pub fn set_provider_auth(profile_id: &str, value: &str) -> Result<(), String> {
 
 pub fn get_provider_auth(profile_id: &str) -> Result<Option<String>, String> {
     get(provider_auth(profile_id))
+}
+
+pub fn delete(name: SecretName) -> Result<(), String> {
+    OsSecretBackend.delete(name)
+}
+
+pub fn delete_provider_auth(profile_id: &str) -> Result<(), String> {
+    delete(provider_auth(profile_id))
 }
 
 pub fn apply_operation_env(command: &mut std::process::Command) {
@@ -175,6 +193,11 @@ mod tests {
         }
         fn set(&mut self, name: SecretName, value: &str) -> Result<(), String> {
             self.0.insert(name.account(), value.to_string());
+            Ok(())
+        }
+
+        fn delete(&mut self, name: SecretName) -> Result<(), String> {
+            self.0.remove(&name.account());
             Ok(())
         }
     }

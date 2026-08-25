@@ -168,8 +168,8 @@ export default function App() {
   let content
   if (section === 'create') content = <Studio jobs={jobs} running={running} cancelling={cancelling} startedAt={runStartedAt} stages={stages} error={runError} notice={runNotice} onRun={startRun} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { setCancelling(false); setRunError(String(error)) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onOpenJob={openJob} onResume={(id) => { setRunning(true); setCancelling(false); setRunError(null); setRunNotice(null); setStages({}); setActiveJob(id); void api.resumeJob(id) }} />
   else if (section === 'sessions') content = <Sessions jobs={jobs} onBack={() => setSection('create')} onOpenJob={openJob} onResume={(id) => { setSection('create'); setRunning(true); setActiveJob(id); void api.resumeJob(id) }} />
-  else if (section === 'setup') content = <SetupCenter onBack={() => setSection('create')} />
-  else if (section === 'providers') content = <ProviderCenter selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onBack={() => setSection('create')} />
+  else if (section === 'setup') content = <SetupCenter onBack={() => setSection('create')} onUseLocal={() => { setSelectedProvider('clipgauge-local'); setSection('create') }} />
+  else if (section === 'providers') content = <ProviderCenter selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onBack={() => setSection('create')} onOpenSetup={() => setSection('setup')} />
   else if (section === 'integrations') content = <Integrations onBack={() => setSection('create')} onOpenLoop={() => setView('loop')} />
   else if (section === 'privacy') content = <PrivacyPanel provider={selectedProvider} onBack={() => setSection('create')} />
   else if (section === 'help') content = <SupportPage onBack={() => setSection('create')} />

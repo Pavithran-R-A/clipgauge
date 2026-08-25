@@ -962,7 +962,11 @@ def preset_profile(
     if kind not in defaults:
         raise ValueError(f"unknown provider kind: {kind}")
     display, default_endpoint, default_model = defaults[kind]
-    selected_endpoint = endpoint or default_endpoint
+    # Windows packaged UI qualification may provide a loopback OpenAI-compatible
+    # fixture. It is opt-in, never overrides an explicit endpoint, and does not
+    # change normal provider behavior or credential handling.
+    qa_endpoint = os.environ.get("CLIPGAUGE_QA_OPENROUTER_ENDPOINT") if kind == "openrouter" else None
+    selected_endpoint = endpoint or qa_endpoint or default_endpoint
     if not selected_endpoint:
         raise ValueError(f"provider {kind} requires an explicit endpoint")
     selected_model = model or default_model

@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
+import { confirm } from '@tauri-apps/plugin-dialog'
 import { Check, ChevronRight, CircleAlert, Cloud, Cpu, ExternalLink, KeyRound, Network, RotateCcw, Save, ShieldCheck, WifiOff } from 'lucide-react'
 import { api } from '../api'
-import type { ProviderTestResult, SetupState } from '../types'
+import type { LocalSetupInventory, ProviderTestResult, SetupState } from '../types'
 
 interface Props {
   selectedProvider: string
   onSelectProvider: (provider: string) => void
   onBack: () => void
+  onOpenSetup?: () => void
 }
 
 type ProviderDefinition = {
@@ -37,17 +39,18 @@ const PROVIDERS: ProviderDefinition[] = [
 
 const GROUPS: ProviderDefinition['group'][] = ['Built in', 'Free-friendly cloud', 'Cloud providers', 'Local apps', 'Advanced']
 
-function statusFor(provider: ProviderDefinition, setup: SetupState | null, test: ProviderTestResult | null): { label: string; tone: 'ready' | 'neutral' | 'warning' | 'error' } {
+function statusFor(provider: ProviderDefinition, setup: SetupState | null, test: ProviderTestResult | null, localReady: boolean): { label: string; tone: 'ready' | 'neutral' | 'warning' | 'error' } {
   if (test?.state === 'PASS') return { label: 'Connected', tone: 'ready' }
-  if (test?.state === 'FAIL') return { label: 'Unavailable', tone: 'error' }
-  if (provider.id === 'clipgauge-local') return { label: 'Ready when setup is complete', tone: 'ready' }
+  if (test?.state === 'FAIL') return { label: 'Connection failed', tone: 'error' }
+  if (provider.id === 'clipgauge-local') return localReady ? { label: 'Ready', tone: 'ready' } : { label: 'Setup required', tone: 'warning' }
   if (provider.locality === 'local') return { label: 'Not detected', tone: 'neutral' }
-  const saved = provider.id === 'gemini' ? setup?.has_gemini_key : setup?.provider_keys?.[`preset-${provider.id}`]
-  return saved ? { label: 'Ready with limitations', tone: 'warning' } : { label: 'Not configured', tone: 'neutral' }
+  const saved = provider.id === 'gemini' ? setup?.has_gemini_key : Boolean(setup?.provider_keys?.[provider.id] ?? setup?.provider_keys?.[`preset-${provider.id}`])
+  return saved ? { label: 'Credential saved', tone: 'warning' } : { label: 'Not configured', tone: 'neutral' }
 }
 
-export default function ProviderCenter({ selectedProvider, onSelectProvider, onBack }: Props) {
+export default function ProviderCenter({ selectedProvider, onSelectProvider, onBack, onOpenSetup }: Props) {
   const [setup, setSetup] = useState<SetupState | null>(null)
+  const [inventory, setInventory] = useState<LocalSetupInventory | null>(null)
   const [activeId, setActiveId] = useState(selectedProvider)
   const [credential, setCredential] = useState('')
   const [saved, setSaved] = useState(false)
@@ -58,10 +61,15 @@ export default function ProviderCenter({ selectedProvider, onSelectProvider, onB
 
   useEffect(() => {
     api.setupState().then((value) => setSetup(value)).catch(() => setSetup(null))
+    api.setupInventory().then((value) => setInventory(value as unknown as LocalSetupInventory)).catch(() => setInventory(null))
   }, [])
 
   const active = useMemo(() => PROVIDERS.find((provider) => provider.id === activeId) ?? PROVIDERS[0], [activeId])
-  const status = statusFor(active, setup, testResult)
+  const localReady = Boolean(inventory?.local_ai?.runtime_ready && inventory?.local_ai?.model_ready)
+  const status = statusFor(active, setup, testResult, localReady)
+  const savedFromSetup = active.id === 'gemini' ? Boolean(setup?.has_gemini_key) : Boolean(setup?.provider_keys?.[active.id] ?? setup?.provider_keys?.[`preset-${active.id}`])
+  const hasSavedCredential = active.credential && (saved || savedFromSetup)
+
 
   function selectProvider(id: string) {
     setActiveId(id)
@@ -74,10 +82,27 @@ export default function ProviderCenter({ selectedProvider, onSelectProvider, onB
   async function saveCredential() {
     if (!credential.trim() || !active.credential) return
     try {
-      await api.saveProviderKey(`preset-${active.id}`, credential.trim())
+      if (active.id === 'gemini') await api.saveGeminiKey(credential.trim())
+      else await api.saveProviderKey(`preset-${active.id}`, credential.trim())
       setCredential('')
       setSaved(true)
-      setSetup((current) => current ? { ...current, provider_keys: { ...(current.provider_keys ?? {}), [`preset-${active.id}`]: true }, has_gemini_key: active.id === 'gemini' ? true : current.has_gemini_key } : current)
+      setTestResult(null)
+      setSetup((current) => current ? { ...current, provider_keys: { ...(current.provider_keys ?? {}), [active.id]: active.id === 'gemini' ? Boolean(current.provider_keys?.[active.id]) : true }, has_gemini_key: active.id === 'gemini' ? true : current.has_gemini_key } : current)
+    } catch (error) {
+      setTestResult({ state: 'FAIL', provider: active.id, message: String(error) })
+    }
+  }
+
+  async function removeCredential() {
+    if (!active.credential || !hasSavedCredential) return
+    if (!(await confirm(`Remove the saved ${active.name} credential from this computer? This removes only ClipGauge’s saved credential and does not revoke the provider key.`))) return
+    try {
+      if (active.id === 'gemini') await api.removeGeminiKey()
+      else await api.removeProviderKey(`preset-${active.id}`)
+      setSaved(false)
+      setCredential('')
+      setTestResult(null)
+      setSetup((current) => current ? { ...current, has_gemini_key: active.id === 'gemini' ? false : current.has_gemini_key, provider_keys: { ...(current.provider_keys ?? {}), [active.id]: false, [`preset-${active.id}`]: false } } : current)
     } catch (error) {
       setTestResult({ state: 'FAIL', provider: active.id, message: String(error) })
     }
@@ -108,7 +133,7 @@ export default function ProviderCenter({ selectedProvider, onSelectProvider, onB
           {GROUPS.map((group) => <div className="provider-group" key={group}>
             <div className="provider-group-heading"><span>{group}</span>{group === 'Built in' && <span className="group-note">No account needed</span>}</div>
             {PROVIDERS.filter((provider) => provider.group === group).map((provider) => {
-              const providerStatus = statusFor(provider, setup, provider.id === activeId ? testResult : null)
+              const providerStatus = statusFor(provider, setup, provider.id === activeId ? testResult : null, localReady)
               const Icon = provider.locality === 'local' ? Cpu : Cloud
               return <button type="button" className={`provider-card ${activeId === provider.id ? 'is-selected' : ''}`} key={provider.id} onClick={() => selectProvider(provider.id)} aria-pressed={activeId === provider.id}>
                 <span className="provider-icon"><Icon size={18} aria-hidden="true" /></span>
@@ -128,9 +153,9 @@ export default function ProviderCenter({ selectedProvider, onSelectProvider, onB
             <div><span>Where it runs</span><strong>{active.locality === 'local' ? 'On this computer' : 'Over the internet'}</strong></div>
             <div><span>Privacy</span><strong>{active.locality === 'local' ? 'Video stays local' : 'You choose when to send a video'}</strong></div>
           </div>
-          {active.credential && active.id !== 'custom' && <div className="field-stack"><label htmlFor="provider-credential"><KeyRound size={15} aria-hidden="true" /> API key</label><div className="input-with-action"><input id="provider-credential" type="password" value={credential} onChange={(event) => setCredential(event.target.value)} placeholder="Stored in your OS vault" autoComplete="off" /><button type="button" className="button button-secondary" onClick={saveCredential} disabled={!credential.trim()}><Save size={15} aria-hidden="true" />{saved ? 'Saved' : 'Save'}</button></div><p className="field-help">A saved key is not the same as a working connection. Use Test connection below.</p></div>}
-          {active.id === 'custom' && <div className="custom-fields"><div className="field-stack"><label htmlFor="custom-endpoint"><Network size={15} aria-hidden="true" /> Endpoint</label><input id="custom-endpoint" value={customEndpoint} onChange={(event) => setCustomEndpoint(event.target.value)} placeholder="https://your-endpoint.example/v1" /></div><div className="field-stack"><label htmlFor="custom-model">Model</label><input id="custom-model" value={customModel} onChange={(event) => setCustomModel(event.target.value)} placeholder="Model name" /></div><div className="field-stack"><label htmlFor="custom-credential">Credential</label><input id="custom-credential" type="password" value={credential} onChange={(event) => setCredential(event.target.value)} placeholder="Stored in your OS vault" autoComplete="off" /><button type="button" className="button button-secondary" onClick={saveCredential} disabled={!credential.trim()}><Save size={15} aria-hidden="true" />Save credential</button></div></div>}
-          <div className="detail-actions"><button type="button" className="button button-primary" onClick={testConnection} disabled={testing}>{testing ? 'Testing…' : 'Test connection'}<ChevronRight size={16} aria-hidden="true" /></button><button type="button" className="button button-secondary" onClick={() => { onSelectProvider(active.id); onBack() }}>Use for next clip</button></div>
+          {active.credential && active.id !== 'custom' && <div className="field-stack"><label htmlFor="provider-credential"><KeyRound size={15} aria-hidden="true" /> API key</label><div className="input-with-action"><input id="provider-credential" type="password" value={credential} onChange={(event) => setCredential(event.target.value)} placeholder="Stored in your OS vault" autoComplete="off" /><button type="button" className="button button-secondary" onClick={saveCredential} disabled={!credential.trim()}><Save size={15} aria-hidden="true" />{saved ? 'Saved' : 'Save'}</button>{hasSavedCredential && <button type="button" className="button button-quiet" onClick={removeCredential}>Remove</button>}</div><p className="field-help">A saved key is not the same as a working connection. Use Test connection below.</p></div>}
+          {active.id === 'custom' && <div className="custom-fields"><div className="field-stack"><label htmlFor="custom-endpoint"><Network size={15} aria-hidden="true" /> Endpoint</label><input id="custom-endpoint" value={customEndpoint} onChange={(event) => setCustomEndpoint(event.target.value)} placeholder="https://your-endpoint.example/v1" /></div><div className="field-stack"><label htmlFor="custom-model">Model</label><input id="custom-model" value={customModel} onChange={(event) => setCustomModel(event.target.value)} placeholder="Model name" /></div><div className="field-stack"><label htmlFor="custom-credential">Credential</label><input id="custom-credential" type="password" value={credential} onChange={(event) => setCredential(event.target.value)} placeholder="Stored in your OS vault" autoComplete="off" /><button type="button" className="button button-secondary" onClick={saveCredential} disabled={!credential.trim()}><Save size={15} aria-hidden="true" />Save credential</button>{hasSavedCredential && <button type="button" className="button button-quiet" onClick={removeCredential}>Remove credential</button>}</div></div>}
+          <div className="detail-actions">{active.id === 'clipgauge-local' && !localReady ? <button type="button" className="button button-primary" onClick={() => { if (onOpenSetup) onOpenSetup(); else onBack() }}>Set up local AI<ChevronRight size={16} aria-hidden="true" /></button> : <button type="button" className="button button-primary" onClick={testConnection} disabled={testing}>{testing ? 'Testing…' : 'Test connection'}<ChevronRight size={16} aria-hidden="true" /></button>}<button type="button" className="button button-secondary" onClick={() => { onSelectProvider(active.id); onBack() }}>Use for next clip</button></div>
           {testResult && <div className={`result-callout result-${testResult.state.toLowerCase()}`} role="status"><span className="result-icon">{testResult.state === 'PASS' ? <Check size={16} aria-hidden="true" /> : testResult.state === 'FAIL' ? <CircleAlert size={16} aria-hidden="true" /> : <WifiOff size={16} aria-hidden="true" />}</span><span><strong>{testResult.state === 'PASS' ? 'Connection ready' : testResult.state === 'FAIL' ? 'Connection needs attention' : 'Connection has limits'}</strong><small>{testResult.message ?? 'The provider returned no additional details.'}</small></span></div>}
           <details className="advanced-disclosure"><summary><RotateCcw size={15} aria-hidden="true" /> Advanced settings</summary><div className="technical-grid"><span>Model ID</span><code>{active.id === 'custom' ? customModel || 'not set' : active.model || 'auto'}</code><span>Endpoint</span><code>{active.id === 'custom' ? customEndpoint || 'not set' : active.endpoint || 'provider-managed'}</code><span>Auth</span><code>{active.credential ? 'credential in OS vault' : 'none'}</code></div><p>These values are for troubleshooting and advanced provider configuration. Normal creator actions use the friendly provider name above.</p></details>
           <div className="privacy-note"><ShieldCheck size={16} aria-hidden="true" /><span><strong>Credential privacy</strong><small>Keys are saved in the operating-system vault and are not written into project files.</small></span></div>

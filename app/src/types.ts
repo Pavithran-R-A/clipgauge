@@ -275,7 +275,9 @@ export interface ManagedAssetRow {
   cached?: boolean
   status?: string
   state?: string
-  installed_sha256?: string | null
+  reason?: string
+  managed_download_needed?: boolean
+  capabilities?: Record<string, boolean>
   managed_path?: string
   consent_granted?: boolean
 }
@@ -304,6 +306,8 @@ export interface SetupProgressEvent {
 
 export interface LocalSetupInventory {
   state: 'ready' | 'setup-required' | string
+  video_tools?: VideoToolReadiness
+  local_ai?: LocalAiReadiness
   runtime: Record<string, unknown> & { installed?: boolean; display_name?: string; size_bytes?: number; installed_size_bytes?: number; version?: string }
   models: Array<Record<string, unknown> & { asset_id?: string; installed?: boolean; cached?: boolean; one_time?: boolean; display_name?: string; purpose?: string; size_bytes?: number; installed_size_bytes?: number; version?: string; license?: string }>
   core_assets: Array<Record<string, unknown> & { asset_id?: string; installed?: boolean; cached?: boolean; one_time?: boolean; display_name?: string; purpose?: string; integrity?: string; license?: string; size_bytes?: number; installed_size_bytes?: number; version?: string }>
@@ -317,6 +321,26 @@ export interface SetupState {
   onboarded: boolean
   provider_keys?: Record<string, boolean>
 }
+
+export interface VideoToolReadiness {
+  ready: boolean
+  source: 'configured' | 'managed' | 'legacy-managed' | 'bundled' | 'system' | 'missing' | string
+  executable?: string | null
+  version?: string | null
+  capabilities: Record<string, boolean>
+  managed_download_needed: boolean
+  reason: string
+}
+
+export interface LocalAiReadiness {
+  state: 'ready' | 'runtime-install-required' | 'model-download-required' | string
+  runtime_ready: boolean
+  model_ready: boolean
+  selected_model_id?: string | null
+  required_bytes: number
+  action: string
+}
+
 
 /* ---------- the Instagram loop ---------- */
 

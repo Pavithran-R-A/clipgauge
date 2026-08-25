@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event'
 import { api } from '../api'
 import type { LocalSetupInventory, SetupProgressEvent } from '../types'
 import { formatBytes, formatDuration, formatRate, meaningfulEta, progressPercent } from '../setupFormatting'
+import { summarizeSetupQueue, type SetupQueueSummary } from '../setupState'
 
 interface Props { onDone: () => void }
 
@@ -17,7 +18,9 @@ export default function Onboarding({ onDone }: Props) {
   const [message, setMessage] = useState<string | null>(null)
   const [startedAt, setStartedAt] = useState<number | null>(null)
   const [now, setNow] = useState(() => Date.now())
+  const [, setQueueSummary] = useState<SetupQueueSummary>({ state: 'pending', completed: 0, failed: 0, cancelled: false })
   const queueRef = useRef<string[][]>([])
+  const outcomesRef = useRef<Array<'success' | 'failed' | 'cancelled'>>([])
 
   const refresh = () => api.setupInventory().then((value) => setInventory(value as unknown as LocalSetupInventory)).catch(() => setInventory(null))
 
@@ -28,9 +31,18 @@ export default function Onboarding({ onDone }: Props) {
       setProgress(payload)
       if (payload.event === 'terminal') {
         setOperationId(null)
+        outcomesRef.current.push(payload.code === 'CANCELLED' ? 'cancelled' : payload.ok ? 'success' : 'failed')
         const next = queueRef.current.shift()
         if (next) void begin(next, 'Moving to the next local component.')
-        else { setBusy(false); setMessage(payload.ok ? 'Your local setup is ready.' : payload.message ?? 'Setup needs attention. You can retry it.'); void refresh() }
+        else {
+          setBusy(false)
+          setStartedAt(null)
+          const summary = summarizeSetupQueue(outcomesRef.current, 0)
+          setQueueSummary(summary)
+          setProgress(null)
+          setMessage(summary.state === 'complete' ? 'Your local setup is ready.' : summary.state === 'cancelled' ? 'Setup cancelled. Verified assets remain available.' : summary.state === 'partial_failure' ? 'Setup needs attention. One or more components failed; retry from Setup & Storage.' : payload.message ?? 'Setup needs attention. Retry from Setup & Storage.')
+          void refresh()
+        }
       }
     }).then((unlisten) => { stop = unlisten })
     return () => stop?.()
@@ -55,7 +67,7 @@ export default function Onboarding({ onDone }: Props) {
     setStartedAt((value) => value ?? Date.now())
     setProgress({ event: 'progress', operation: 'Preparing setup…', message: 'Checking the approved local downloads…', state: 'STARTING', elapsed_seconds: 0, one_time_download: true })
     setMessage(text)
-    try { setOperationId(await api.startSetup(args)) } catch (error) { setBusy(false); setMessage(`Setup could not start: ${String(error)}`) }
+    try { setOperationId(await api.startSetup(args)) } catch (error) { setBusy(false); setStartedAt(null); setProgress(null); setQueueSummary({ state: 'failed', completed: 0, failed: 1, cancelled: false }); setMessage(`Setup could not start: ${String(error)}`) }
   }
 
   async function installLocal() {
@@ -64,7 +76,9 @@ export default function Onboarding({ onDone }: Props) {
     if (!runtimeReady) args.push(['install-runtime'])
     if (!modelReady && balanced?.asset_id) args.push(['download-model', String(balanced.asset_id)])
     if (!args.length) { setMessage('ClipGauge Local is already ready.'); return }
+    outcomesRef.current = []
     queueRef.current = args.slice(1)
+    setQueueSummary({ state: 'running', completed: 0, failed: 0, cancelled: false })
     await begin(args[0], 'Installing the local components ClipGauge needs.')
   }
 

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from . import __version__, config, downloads, local_runtime, protocol, runtime
 from .jobs import queue
+from .render import ffmpeg_bin
 from .scoring import providers as providers_mod
 
 
@@ -150,7 +151,7 @@ def _setup_runtime_asset(manager: local_runtime.LocalRuntime) -> downloads.Manag
         url=str(spec["url"]),
         size_bytes=int(spec["size"]),
         sha256=str(spec["sha256"]),
-        required=True,
+        required=False,
         one_time=True,
         license=str(manager.manifest["runtimes"]["llama-server"]["license"]),
         source=str(manager.manifest["runtimes"]["llama-server"]["provenance"]),
@@ -226,18 +227,22 @@ def _core_setup_inventory(manager: local_runtime.LocalRuntime) -> list[dict[str,
     except (KeyError, OSError):
         rows.append({"asset_id": "core:yt-dlp", "display_name": "YouTube compatibility", "installed": False, "integrity": "manifest-error", "required": True})
 
-    ffmpeg_path, captions = ffmpeg_bin.resolve()
+    decision = ffmpeg_bin.readiness()
+    managed_record = manager.manifest.get("runtimes", {}).get("ffmpeg", {}).get("assets", {}).get("win64-gpl", {})
     rows.append({
         "asset_id": "core:ffmpeg",
-        "display_name": "Video engine",
-        "purpose": "Reads, processes, and renders video clips.",
-        "version": manager.manifest.get("runtimes", {}).get("ffmpeg", {}).get("version", "system or managed"),
-        "size_bytes": manager.manifest.get("runtimes", {}).get("ffmpeg", {}).get("assets", {}).get("win64-gpl", {}).get("size"),
-        "installed": bool(ffmpeg_path and (ffmpeg_path == "ffmpeg" or Path(ffmpeg_path).is_file())),
-        "integrity": "system-or-verified" if captions else "available-without-caption-filter",
-        "source": manager.manifest.get("runtimes", {}).get("ffmpeg", {}).get("provenance"),
+        "display_name": "Video tools",
+        "purpose": "Reads, processes, and renders video clips with captions.",
+        "version": decision.version or manager.manifest.get("runtimes", {}).get("ffmpeg", {}).get("version", "unknown"),
+        "size_bytes": int(managed_record.get("size", 0)) if decision.managed_download_needed else 0,
+        "installed": decision.ready,
+        "integrity": "verified" if decision.ready else ("incompatible" if decision.executable else "not-found"),
+        "source": decision.source,
+        "location": decision.executable,
+        "capabilities": decision.capabilities,
+        "managed_download_needed": decision.managed_download_needed,
+        "reason": decision.reason,
         "license": manager.manifest.get("runtimes", {}).get("ffmpeg", {}).get("license"),
-        "location": ffmpeg_path,
         "one_time": True,
         "required": True,
     })
@@ -289,18 +294,77 @@ def cmd_setup(args: argparse.Namespace) -> int:
         if args.setup_cmd == "inventory":
             runtime_binary = manager.binary_path()
             rows = downloads_manager.inventory(model_assets)
+            selected_id = args.selected_model_id or next((str(row["asset_id"]) for row in rows if "balanced" in str(row.get("display_name", "")).lower()), str(rows[0]["asset_id"]) if rows else None)
+            selected_model = next((asset for asset in model_assets if asset.asset_id == selected_id), None)
+            selected_row = next((row for row in rows if str(row.get("asset_id")) == selected_id), None)
+            runtime_ready = runtime_binary.is_file()
+            model_ready = bool(selected_row and selected_row.get("installed"))
+            local_state = "ready" if runtime_ready and model_ready else "model-download-required" if runtime_ready else "runtime-install-required"
+            ffmpeg_decision = ffmpeg_bin.readiness()
+            managed_assets = _managed_asset_objects()
+            if ffmpeg_decision.ready and ffmpeg_decision.source not in {"managed", "legacy-managed"}:
+                managed_assets = [asset for asset in managed_assets if not asset.asset_id.startswith("runtime:ffmpeg:")]
+            storage_assets = [asset for asset in managed_assets]
+            if selected_model is not None:
+                storage_assets.extend([runtime_asset, selected_model])
+            managed_rows = _managed_asset_inventory([runtime_asset, *model_assets])
+            ffmpeg_rows = [row for row in managed_rows if str(row.get("asset_id", "")).startswith("runtime:ffmpeg:")]
+            if ffmpeg_decision.ready and ffmpeg_decision.source not in {"managed", "legacy-managed"}:
+                for row in ffmpeg_rows:
+                    row.update({
+                        "installed": True,
+                        "cached": True,
+                        "size_bytes": 0,
+                        "installed_size_bytes": 0,
+                        "status": "reused-system",
+                        "state": "READY",
+                        "source": "system",
+                        "managed_download_needed": False,
+                        "reason": ffmpeg_decision.reason,
+                        "capabilities": ffmpeg_decision.capabilities,
+                    })
+            if not ffmpeg_rows:
+                managed_rows.append({
+                    "asset_id": "runtime:ffmpeg:capability",
+                    "display_name": "Video tools",
+                    "purpose": "Reads, processes, and renders video clips with captions.",
+                    "destination": "",
+                    "url": "",
+                    "size_bytes": 0,
+                    "required": True,
+                    "one_time": True,
+                    "license": manager.manifest.get("runtimes", {}).get("ffmpeg", {}).get("license", "See upstream"),
+                    "source": ffmpeg_decision.source,
+                    "consent_group": "core",
+                    "installed": ffmpeg_decision.ready,
+                    "cached": ffmpeg_decision.ready,
+                    "status": "reused-system" if ffmpeg_decision.ready else "not-installed",
+                    "state": "READY" if ffmpeg_decision.ready else "NOT_INSTALLED",
+                    "managed_download_needed": ffmpeg_decision.managed_download_needed,
+                    "reason": ffmpeg_decision.reason,
+                    "capabilities": ffmpeg_decision.capabilities,
+                })
             payload = {
-                "state": "ready" if runtime_binary.is_file() else "setup-required",
+                "state": "ready" if runtime_ready else "setup-required",
                 "runtime": {
                     **runtime_asset.to_json(),
-                    "installed": runtime_binary.is_file(),
+                    "installed": runtime_ready,
                     "managed_path": str(runtime_binary),
                     "version": manager.manifest["runtimes"]["llama-server"]["version"],
                 },
                 "models": rows,
                 "core_assets": _core_setup_inventory(manager),
-                "managed_assets": _managed_asset_inventory([runtime_asset, *model_assets]),
-                "storage": downloads_manager.estimate([runtime_asset, *model_assets, *[asset for asset in _managed_asset_objects()]]),
+                "video_tools": ffmpeg_decision.to_dict(),
+                "local_ai": {
+                    "state": local_state,
+                    "runtime_ready": runtime_ready,
+                    "model_ready": model_ready,
+                    "selected_model_id": selected_id,
+                    "required_bytes": (0 if runtime_ready else runtime_asset.size_bytes) + (0 if model_ready or selected_model is None else selected_model.size_bytes),
+                    "action": "Ready" if runtime_ready and model_ready else "Download " + str(selected_model.display_name if selected_model else "selected model") if runtime_ready else "Install ClipGauge Local",
+                },
+                "managed_assets": managed_rows,
+                "storage": downloads_manager.estimate(storage_assets),
                 "catalog": [
                     {
                         "model_id": model.model_id,
@@ -321,7 +385,6 @@ def cmd_setup(args: argparse.Namespace) -> int:
             print(json.dumps({"ok": True, "asset_id": runtime_asset.asset_id, "path": str(binary)}))
             return 0
         if args.setup_cmd == "install-ffmpeg":
-            from .render import ffmpeg_bin
             asset = ffmpeg_bin.managed_asset()
             if asset is None:
                 print(json.dumps({"ok": False, "code": "FFMPEG_PLATFORM_UNSUPPORTED", "message": "No verified managed FFmpeg archive is available for this platform."}))
@@ -742,7 +805,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p_setup = sub.add_parser("setup", help="inspect or install managed local-AI assets")
     setup_sub = p_setup.add_subparsers(dest="setup_cmd", required=True)
-    setup_sub.add_parser("inventory", help="show verified runtime/model inventory")
+    p_inventory = setup_sub.add_parser("inventory", help="show verified runtime/model inventory")
+    p_inventory.add_argument("--model", dest="selected_model_id", choices=sorted(local_runtime.MODEL_CATALOG), default=None)
     setup_sub.add_parser("install-runtime", help="download and install the verified llama.cpp runtime")
     setup_sub.add_parser("install-ffmpeg", help="download, install, and capability-test the managed FFmpeg engine")
     p_install_group = setup_sub.add_parser("install-group", help="download one consented managed asset group")
