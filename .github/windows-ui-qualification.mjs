@@ -106,7 +106,7 @@ async function setupState(page) {
   }
   await text(page, 'Ready · System', 'system-ready marker')
   await text(page, 'System component reused', 'system reuse marker')
-  await text(page, 'Everything needed is here.', 'setup completion marker')
+  await text(page, 'Core components are ready.', 'core setup completion marker')
   await capture(`setup-${suffix}`)
 }
 
