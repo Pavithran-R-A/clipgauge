@@ -259,7 +259,7 @@ async function removalConfirmation(page) {
     throw new Error('credential-removal confirmation was not observed through native UIA')
   }
   console.log(`NATIVE_CONFIRMATION_WINDOW_PASS ${dialogHandle}`)
-  await capture(`credential-removal-confirmation-${suffix}`)
+  await capture(`credential-removal-confirmation-${suffix}`, ['-w', hwnd, '--capture-screen'])
   try {
     execFileSync('winapp', ['ui', 'invoke', 'OK', '-w', dialogHandle], { stdio: 'inherit' })
   } catch {
