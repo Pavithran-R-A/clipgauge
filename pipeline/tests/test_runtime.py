@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from clipgauge_pipeline import local_runtime
 from clipgauge_pipeline import runtime
 from clipgauge_pipeline.models import registry
 from clipgauge_pipeline.models import specs  # noqa: F401 - registers concrete specs
@@ -180,6 +181,40 @@ def test_safe_archive_rejects_tar_traversal(tmp_path):
         handle.addfile(payload, io.BytesIO(b"blocked"))
     with pytest.raises(runtime.RuntimeIntegrityError, match="traversal"):
         runtime.extract_archive_verified(archive, tmp_path / "installed", archive_type="tar.gz")
+
+
+def test_local_runtime_allows_slow_verified_model_startup(monkeypatch, tmp_path):
+    model = tmp_path / "models" / "clipgauge-local" / "Qwen3-1.7B-Q8_0.gguf"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"verified-model")
+    manifest = {"runtimes": {"llama-server": {"version": "test-runtime"}}}
+    instance = local_runtime.LocalRuntime(root=tmp_path, manifest=manifest)
+    monkeypatch.setattr(instance, "command", lambda _model_id, _port: ["llama-server"])
+    monkeypatch.setattr(instance, "_port", lambda _endpoint=None: 18089)
+
+    class DummyProcess:
+        pid = 1234
+        returncode = None
+
+        @staticmethod
+        def poll():
+            return None
+
+    monkeypatch.setattr(local_runtime.subprocess, "Popen", lambda *args, **kwargs: DummyProcess())
+    health_calls = []
+    monkeypatch.setattr(
+        local_runtime.httpx,
+        "get",
+        lambda *args, **kwargs: health_calls.append(args[0]) or type("Response", (), {"status_code": 503})(),
+    )
+    ticks = iter((0.0, 31.0, 121.0))
+    monkeypatch.setattr(local_runtime.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(local_runtime.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(instance, "stop_process", lambda _process: None)
+
+    with pytest.raises(local_runtime.LocalRuntimeError, match="120 seconds"):
+        instance.start("clipgauge-local/qwen3-1.7b-q8_0")
+    assert len(health_calls) == 1
 
 
 def test_valid_staged_archive_installation(tmp_path):
