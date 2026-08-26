@@ -128,6 +128,20 @@ def test_safe_tar_archive_installation(tmp_path):
     assert (output / "llama-b10545/llama-server").read_bytes() == b"server"
 
 
+def test_archive_extraction_preserves_nested_source_archive(tmp_path):
+    destination = tmp_path / "node"
+    destination.mkdir()
+    archive = destination / "runtime.tar.gz"
+    with tarfile.open(archive, "w:gz") as handle:
+        payload = tarfile.TarInfo("node/bin/node")
+        payload.mode = 0o755
+        payload.size = len(b"node")
+        handle.addfile(payload, io.BytesIO(b"node"))
+    runtime.extract_archive_verified(archive, destination, archive_type="tar.gz")
+    assert archive.is_file()
+    assert (destination / "node/bin/node").is_file()
+
+
 def test_safe_archive_preserves_tar_executable_mode(tmp_path):
     archive = tmp_path / "executable.tar.gz"
     with tarfile.open(archive, "w:gz") as handle:

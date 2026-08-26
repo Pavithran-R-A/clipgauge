@@ -216,6 +216,7 @@ def extract_archive_verified(
     staging = destination_dir.with_name(f".{destination_dir.name}.{int(time.time_ns())}.staging")
     staging.mkdir(parents=True, exist_ok=False)
     extracted: list[Path] = []
+    source_archive = archive.resolve()
 
     def safe_member(name: str) -> Path:
         normalized = name.replace("\\", "/")
@@ -321,6 +322,11 @@ def extract_archive_verified(
         destination_dir.parent.mkdir(parents=True, exist_ok=True)
         if destination_dir.exists():
             for path in sorted(destination_dir.rglob("*"), reverse=True):
+                # Portable Node stores its verified archive inside the
+                # extraction root. Preserve that source while replacing the
+                # previously extracted tree.
+                if path == archive or path.resolve() == source_archive:
+                    continue
                 if path.is_file() or path.is_symlink():
                     path.unlink(missing_ok=True)
                 elif path.is_dir():
