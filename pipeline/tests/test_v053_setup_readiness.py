@@ -102,6 +102,7 @@ def test_youtube_test_refreshes_loopback_health_on_success(monkeypatch, tmp_path
     result = youtube_compat.test()
 
     assert result['state'] == 'DEPENDENCIES_READY'
+    assert result['dependency_state'] == 'DEPENDENCIES_READY'
     loopback = next(check for check in result['checks'] if check['name'] == 'loopback-health')
     assert loopback['ready'] is True
     assert loopback['message'] == 'The local PO-token provider is healthy.'

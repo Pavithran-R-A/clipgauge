@@ -360,7 +360,7 @@ def test() -> dict[str, Any]:
         result = supervisor.self_test()
         checks = _merge_live_health_checks(status, result)
         if result.get("ok"):
-            return {**status, "state": "PUBLIC_DOWNLOAD_VERIFIED" if status.get("public_download_verified") else "DEPENDENCIES_READY", "ready": True, "checks": checks, "reason": "YouTube tools are ready. A public download still needs to be verified by a real transfer.", "actions": ["Test"]}
+            return {**status, "state": "PUBLIC_DOWNLOAD_VERIFIED" if status.get("public_download_verified") else "DEPENDENCIES_READY", "ready": True, "dependency_state": "DEPENDENCIES_READY", "checks": checks, "reason": "YouTube tools are ready. A public download still needs to be verified by a real transfer.", "actions": ["Test"]}
         return {**status, "state": "UNHEALTHY", "ready": False, "checks": checks, "reason": "The local YouTube support check failed. Repair the provider and test again.", "actions": ["Repair", "Test"]}
     except (OSError, RuntimeError, runtime.RuntimeIntegrityError) as error:
         return {**status, "state": "UNHEALTHY", "ready": False, "reason": "The local YouTube support provider could not start for its health check.", "actions": ["Repair", "Test"], "error": str(error)}
