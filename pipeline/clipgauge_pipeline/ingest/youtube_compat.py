@@ -232,6 +232,25 @@ def readiness() -> dict[str, Any]:
     return {"state": "READY", "ready": True, "reason": "YouTube support passed its local provider health check.", "actions": ["Test"], "checks": checks}
 
 
+def _merge_live_health_checks(status: dict[str, Any], result: dict[str, Any]) -> list[dict[str, Any]]:
+    checks = [dict(check) for check in status.get("checks", []) if isinstance(check, dict)]
+    live = {
+        "plugin": (bool(result.get("plugin_discoverable")), "The YouTube plugin is discoverable.", "The YouTube plugin is not discoverable."),
+        "loopback-health": (bool((result.get("health") or {}).get("healthy")), "The local PO-token provider is healthy.", "The local PO-token provider is not healthy."),
+    }
+    seen: set[str] = set()
+    for check in checks:
+        name = str(check.get("name", ""))
+        if name in live:
+            ready, success_message, failure_message = live[name]
+            check.update({"ready": ready, "message": success_message if ready else failure_message})
+            seen.add(name)
+    for name, (ready, success_message, failure_message) in live.items():
+        if name not in seen:
+            checks.append({"name": name, "ready": ready, "message": success_message if ready else failure_message})
+    return checks
+
+
 def test() -> dict[str, Any]:
     """Start the loopback provider for one health check, then always stop it."""
     status = readiness()
@@ -241,9 +260,10 @@ def test() -> dict[str, Any]:
     try:
         supervisor.start()
         result = supervisor.self_test()
+        checks = _merge_live_health_checks(status, result)
         if result.get("ok"):
-            return {**status, "state": "READY", "ready": True, "reason": "YouTube support passed its local provider health check.", "actions": ["Test"]}
-        return {**status, "state": "UNHEALTHY", "ready": False, "reason": "The local YouTube support check failed. Repair the provider and test again.", "actions": ["Repair", "Test"]}
+            return {**status, "state": "READY", "ready": True, "checks": checks, "reason": "YouTube support passed its local provider health check.", "actions": ["Test"]}
+        return {**status, "state": "UNHEALTHY", "ready": False, "checks": checks, "reason": "The local YouTube support check failed. Repair the provider and test again.", "actions": ["Repair", "Test"]}
     except (OSError, RuntimeError, runtime.RuntimeIntegrityError) as error:
         return {**status, "state": "UNHEALTHY", "ready": False, "reason": "The local YouTube support provider could not start for its health check.", "actions": ["Repair", "Test"], "error": str(error)}
     finally:

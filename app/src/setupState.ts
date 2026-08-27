@@ -16,3 +16,11 @@ export function summarizeSetupQueue(outcomes: Array<'success' | 'failed' | 'canc
   if (failed === 0) return { state: 'complete', completed, failed, cancelled: false }
   return { state: completed ? 'partial_failure' : 'failed', completed, failed, cancelled: false }
 }
+
+export function selectedLocalModel(inventory: unknown): string | undefined {
+  if (!inventory || typeof inventory !== 'object') return undefined
+  const localAI = (inventory as { local_ai?: unknown }).local_ai
+  if (!localAI || typeof localAI !== 'object') return undefined
+  const selected = (localAI as { selected_model_id?: unknown }).selected_model_id
+  return typeof selected === 'string' && selected.startsWith('clipgauge-local/') ? selected : undefined
+}

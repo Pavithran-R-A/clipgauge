@@ -57,6 +57,7 @@ def _browser_auth_args(browser: str | None) -> list[str]:
 def _youtube_provider_args(url: str) -> list[str]:
     if not _needs_youtube_provider(url):
         return []
+    _provider_supervisor.start()
     status = _provider_supervisor.self_test()
     if not status.get("ok"):
         raise YtDlpError(
@@ -64,7 +65,6 @@ def _youtube_provider_args(url: str) -> list[str]:
             code="YTDLP_PROVIDER_NOT_READY",
             retryable=True,
         )
-    _provider_supervisor.start()
     return [
         "--plugin-dirs", str(youtube_compat.plugin_dir()),
         "--extractor-args", f"youtubepot-bgutilhttp:base_url=http://127.0.0.1:{youtube_compat.DEFAULT_PORT}",

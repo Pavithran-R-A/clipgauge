@@ -15,6 +15,7 @@ import SetupCenter from './components/SetupCenter'
 import Studio from './components/Studio'
 import SupportPage from './components/SupportPage'
 import { sourceKind, type CreatorRunState } from './creatorState'
+import { selectedLocalModel } from './setupState'
 import './styles.css'
 
 type View = 'boot' | 'onboarding' | 'shell' | 'review' | 'loop'
@@ -137,7 +138,8 @@ export default function App() {
     setResults(null)
     setActiveJob(null)
     try {
-      const preflight = await api.preflight(provider, model, endpoint, auth, secretHeader, sourceKind(source) === 'youtube' ? source : undefined)
+      const resolvedModel = model ?? (provider === 'clipgauge-local' ? selectedLocalModel(await api.setupInventory()) : undefined)
+      const preflight = await api.preflight(provider, resolvedModel, endpoint, auth, secretHeader, sourceKind(source) === 'youtube' ? source : undefined)
       const blocked = preflight.checks.filter((check) => check.state === 'blocked')
       const warnings = preflight.checks.filter((check) => check.state === 'warning')
       if (preflight.state === 'blocked' || blocked.length) {
@@ -150,7 +152,7 @@ export default function App() {
       setRunning(true)
       setRunState('RUNNING')
       setRunStartedAt(Date.now())
-      await api.runJob(source, provider, captions, model, endpoint, auth, secretHeader)
+      await api.runJob(source, provider, captions, resolvedModel, endpoint, auth, secretHeader)
     } catch (error) {
       setRunning(false)
       setRunState('FAILED')

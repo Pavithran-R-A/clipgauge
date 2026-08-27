@@ -76,3 +76,54 @@ def test_youtube_readiness_requires_healthy_loopback_provider(monkeypatch, tmp_p
     result = youtube_compat.readiness()
     assert result['state'] == 'UNHEALTHY'
     assert result['ready'] is False
+
+
+def test_youtube_test_refreshes_loopback_health_on_success(monkeypatch, tmp_path):
+    monkeypatch.setattr(youtube_compat.config, 'home_dir', lambda: tmp_path)
+    initial = {
+        'state': 'UNHEALTHY',
+        'ready': False,
+        'checks': [
+            {'name': 'yt-dlp', 'ready': True},
+            {'name': 'loopback-health', 'ready': False, 'message': 'The local PO-token provider is not healthy.'},
+        ],
+    }
+    monkeypatch.setattr(youtube_compat, 'readiness', lambda: initial)
+    monkeypatch.setattr(youtube_compat.ProviderSupervisor, 'start', lambda self: 'http://127.0.0.1:4416')
+    monkeypatch.setattr(youtube_compat.ProviderSupervisor, 'self_test', lambda self: {
+        'plugin_discoverable': True,
+        'server_installed': True,
+        'health': {'healthy': True, 'running': True, 'version': '1.3.2'},
+        'loopback_only': True,
+        'ok': True,
+    })
+    monkeypatch.setattr(youtube_compat.ProviderSupervisor, 'stop', lambda self: None)
+
+    result = youtube_compat.test()
+
+    assert result['state'] == 'READY'
+    loopback = next(check for check in result['checks'] if check['name'] == 'loopback-health')
+    assert loopback['ready'] is True
+    assert loopback['message'] == 'The local PO-token provider is healthy.'
+
+
+def test_youtube_ingest_starts_provider_before_live_health_check(monkeypatch):
+    from clipgauge_pipeline.ingest import ytdlp
+
+    events = []
+
+    class StubSupervisor:
+        def start(self):
+            events.append('start')
+            return 'http://127.0.0.1:4416'
+
+        def self_test(self):
+            events.append('self_test')
+            return {'ok': True}
+
+    monkeypatch.setattr(ytdlp, '_provider_supervisor', StubSupervisor())
+    args = ytdlp._youtube_provider_args('https://www.youtube.com/watch?v=aqz-KE-bpKQ')
+
+    assert events == ['start', 'self_test']
+    assert '--plugin-dirs' in args
+    assert 'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416' in args

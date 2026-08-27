@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { summarizeSetupQueue } from './setupState'
+import { selectedLocalModel, summarizeSetupQueue } from './setupState'
 
 describe('setup queue aggregation', () => {
   it('reports complete only when every operation succeeds', () => {
@@ -20,5 +20,14 @@ describe('setup queue aggregation', () => {
 
   it('keeps an active queue running until the final terminal event', () => {
     expect(summarizeSetupQueue(['success'], 1).state).toBe('running')
+  })
+
+  it('uses the persisted verified lightweight local model from inventory', () => {
+    expect(selectedLocalModel({ local_ai: { selected_model_id: 'clipgauge-local/qwen3-1.7b-q8_0' } })).toBe('clipgauge-local/qwen3-1.7b-q8_0')
+  })
+
+  it('ignores malformed or non-local inventory model selections', () => {
+    expect(selectedLocalModel({ local_ai: { selected_model_id: 'gemini-flash-latest' } })).toBeUndefined()
+    expect(selectedLocalModel({ local_ai: null })).toBeUndefined()
   })
 })
