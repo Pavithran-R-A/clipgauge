@@ -14,6 +14,8 @@ import Sessions from './components/Sessions'
 import SetupCenter from './components/SetupCenter'
 import Studio from './components/Studio'
 import SupportPage from './components/SupportPage'
+import { sourceKind, type CreatorRunState } from './creatorState'
+import { selectedLocalModel } from './setupState'
 import './styles.css'
 
 type View = 'boot' | 'onboarding' | 'shell' | 'review' | 'loop'
@@ -26,7 +28,7 @@ const FRIENDLY_FAILURES: Record<string, string> = {
   SPEAKER_ANALYSIS_FAILED: 'Speaker analysis could not complete. Retry the job or continue without speaker-aware reframing.',
   SPEAKER_CLUSTER_FAILED: 'Speaker grouping could not complete. Retry the job or continue without speaker-aware reframing.',
   PROVIDER_UNAVAILABLE: 'The selected AI is unavailable. Open AI Providers or choose another provider.',
-  YTDLP_ATTESTATION_REQUIRED: 'YouTube needs an additional playback verification step. Enable YouTube support in Setup & Storage and retry.',
+  YTDLP_ATTESTATION_REQUIRED: 'YouTube rejected this download during playback verification. ClipGauge itself is ready; retry later, try optional browser-assisted compatibility with explicit approval, or import the video file directly.',
   YTDLP_LOGIN_REQUIRED: 'This video requires a signed-in YouTube session. Use a browser session only if you explicitly consent.'
 }
 
@@ -39,6 +41,7 @@ export default function App() {
   const [results, setResults] = useState<JobResults | null>(null)
   const [stages, setStages] = useState<Record<string, StageProgress>>({})
   const [running, setRunning] = useState(false)
+  const [runState, setRunState] = useState<CreatorRunState>('IDLE')
   const [cancelling, setCancelling] = useState(false)
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null)
   const [runError, setRunError] = useState<string | null>(null)
@@ -92,12 +95,15 @@ export default function App() {
         setRunStartedAt(null)
         refreshJobs()
         if (payload.code === 'CANCELLED') {
+          setRunState('CANCELLED')
           setRunError(null)
           setRunNotice(payload.message ?? 'Job cancelled. Completed work remains available to resume.')
         } else if (payload.ok && activeJobRef.current) {
+          setRunState('SUCCEEDED')
           setRunNotice(null)
           api.jobResults(activeJobRef.current).then((result) => { setResults(result); setView('review') }).catch((error) => setRunError(String(error)))
         } else if (!payload.ok) {
+          setRunState('FAILED')
           setRunNotice(null)
           const friendly = payload.code ? FRIENDLY_FAILURES[payload.code] : undefined
           const diagnostic = payload.diagnostic_id ? ` Technical details: ${payload.diagnostic_id}.` : ''
@@ -107,11 +113,13 @@ export default function App() {
         setRunning(false)
         setCancelling(false)
         setRunNotice(null)
+        setRunState(payload.ok ? 'SUCCEEDED' : 'FAILED')
         refreshJobs()
         if (payload.ok && activeJobRef.current && payload.stages) api.jobResults(activeJobRef.current).then((result) => { setResults(result); setView('review') }).catch((error) => setRunError(String(error)))
         else if (!payload.ok) setRunError(String(payload.message ?? payload.error ?? 'The video could not be processed.'))
       } else if (payload.event === 'exited') {
         setRunning(false)
+        setRunState('FAILED')
         setCancelling(false)
         setRunNotice(null)
         setRunError('The video stopped before finishing. Retry the job and keep the diagnostic details for support.')
@@ -122,6 +130,7 @@ export default function App() {
 
   const startRun = useCallback(async (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) => {
     setRunning(false)
+    setRunState('IDLE')
     setCancelling(false)
     setRunError(null)
     setRunNotice(null)
@@ -129,20 +138,24 @@ export default function App() {
     setResults(null)
     setActiveJob(null)
     try {
-      const preflight = await api.preflight(provider, model, endpoint, auth, secretHeader)
+      const resolvedModel = model ?? (provider === 'clipgauge-local' ? selectedLocalModel(await api.setupInventory()) : undefined)
+      const preflight = await api.preflight(provider, resolvedModel, endpoint, auth, secretHeader, sourceKind(source) === 'youtube' ? source : undefined)
       const blocked = preflight.checks.filter((check) => check.state === 'blocked')
       const warnings = preflight.checks.filter((check) => check.state === 'warning')
       if (preflight.state === 'blocked' || blocked.length) {
+        setRunState('FAILED')
         const first = blocked[0]
         setRunError(`${first?.message ?? 'This run needs a setup step first.'}${first?.remediation ? ` ${first.remediation}` : ''}`)
         return
       }
       if (warnings.length) setRunNotice(`Before you start: ${warnings.slice(0, 2).map((check) => check.message).join(' ')}`)
       setRunning(true)
+      setRunState('RUNNING')
       setRunStartedAt(Date.now())
-      await api.runJob(source, provider, captions, model, endpoint, auth, secretHeader)
+      await api.runJob(source, provider, captions, resolvedModel, endpoint, auth, secretHeader)
     } catch (error) {
       setRunning(false)
+      setRunState('FAILED')
       setRunError(String(error))
     }
   }, [])
@@ -157,7 +170,7 @@ export default function App() {
   if (view === 'boot') return <div className="boot" />
   if (view === 'onboarding') return <Onboarding onDone={() => { void api.markOnboarded(); setSetup((current) => current ? { ...current, onboarded: true } : current); setView('shell') }} />
   if (view === 'loop') return <Loop onBack={() => { setSection('integrations'); setView('shell') }} />
-  if (view === 'review' && results) return <Review results={results} onBack={() => { setSection('create'); setView('shell'); refreshJobs() }} onRestyle={(captions, camera) => { setRunning(true); setRunStartedAt(Date.now()); setCancelling(false); setRunError(null); setRunNotice(null); setStages({}); setActiveJob(results.job_id); setSection('create'); setView('shell'); void api.resumeJob(results.job_id, undefined, captions, camera) }} />
+  if (view === 'review' && results) return <Review results={results} onBack={() => { setSection('create'); setView('shell'); refreshJobs() }} onRestyle={(captions, camera) => { setRunning(true); setRunState('RUNNING'); setRunStartedAt(Date.now()); setCancelling(false); setRunError(null); setRunNotice(null); setStages({}); setActiveJob(results.job_id); setSection('create'); setView('shell'); void api.resumeJob(results.job_id, undefined, captions, camera) }} />
 
   function navigate(next: AppSection) {
     setRunError(null)
@@ -166,14 +179,14 @@ export default function App() {
   }
 
   let content
-  if (section === 'create') content = <Studio jobs={jobs} running={running} cancelling={cancelling} startedAt={runStartedAt} stages={stages} error={runError} notice={runNotice} onRun={startRun} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { setCancelling(false); setRunError(String(error)) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onOpenJob={openJob} onResume={(id) => { setRunning(true); setCancelling(false); setRunError(null); setRunNotice(null); setStages({}); setActiveJob(id); void api.resumeJob(id) }} />
-  else if (section === 'sessions') content = <Sessions jobs={jobs} onBack={() => setSection('create')} onOpenJob={openJob} onResume={(id) => { setSection('create'); setRunning(true); setActiveJob(id); void api.resumeJob(id) }} />
+  if (section === 'create') content = <Studio jobs={jobs} running={running} runState={runState} cancelling={cancelling} startedAt={runStartedAt} stages={stages} error={runError} notice={runNotice} onRun={startRun} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { setCancelling(false); setRunError(String(error)) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onOpenJob={openJob} onResume={(id) => { setRunning(true); setRunState('RUNNING'); setCancelling(false); setRunError(null); setRunNotice(null); setStages({}); setActiveJob(id); void api.resumeJob(id) }} />
+  else if (section === 'sessions') content = <Sessions jobs={jobs} onBack={() => setSection('create')} onOpenJob={openJob} onResume={(id) => { setSection('create'); setRunning(true); setRunState('RUNNING'); setActiveJob(id); void api.resumeJob(id) }} />
   else if (section === 'setup') content = <SetupCenter onBack={() => setSection('create')} onUseLocal={() => { setSelectedProvider('clipgauge-local'); setSection('create') }} />
   else if (section === 'providers') content = <ProviderCenter selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onBack={() => setSection('create')} onOpenSetup={() => setSection('setup')} />
   else if (section === 'integrations') content = <Integrations onBack={() => setSection('create')} onOpenLoop={() => setView('loop')} />
   else if (section === 'privacy') content = <PrivacyPanel provider={selectedProvider} onBack={() => setSection('create')} />
-  else if (section === 'help') content = <SupportPage onBack={() => setSection('create')} />
+  else if (section === 'help') content = <SupportPage onBack={() => setSection('create')} onNavigate={(next) => setSection(next)} provider={selectedProvider} />
   else content = <About onBack={() => setSection('create')} />
 
-  return <AppShell active={section} onNavigate={navigate} jobs={jobs} running={running} onOpenJob={openJob} onResume={(id) => { setSection('create'); setRunning(true); setActiveJob(id); void api.resumeJob(id) }} onSupport={() => setSection('help')}>{content}</AppShell>
+  return <AppShell active={section} onNavigate={navigate} jobs={jobs} running={running} onOpenJob={openJob} onResume={(id) => { setSection('create'); setRunning(true); setRunState('RUNNING'); setActiveJob(id); void api.resumeJob(id) }} onSupport={() => setSection('help')}>{content}</AppShell>
 }

@@ -216,6 +216,7 @@ def extract_archive_verified(
     staging = destination_dir.with_name(f".{destination_dir.name}.{int(time.time_ns())}.staging")
     staging.mkdir(parents=True, exist_ok=False)
     extracted: list[Path] = []
+    source_archive = archive.resolve()
 
     def safe_member(name: str) -> Path:
         normalized = name.replace("\\", "/")
@@ -223,6 +224,15 @@ def extract_archive_verified(
         if not normalized or path.is_absolute() or ".." in path.parts:
             raise RuntimeIntegrityError("archive contains an absolute or traversal member")
         return path
+
+    def restore_mode(path: Path, mode: int) -> None:
+        # ZIP/TAR extraction creates files with the process umask, which can
+        # strip the executable bit from portable runtimes such as Node.js.
+        # Restore only POSIX permission bits recorded by the trusted archive;
+        # Windows does not use these bits for execution.
+        permissions = mode & 0o777
+        if os.name != "nt" and permissions:
+            path.chmod(permissions)
 
     try:
         if archive_type == "zip":
@@ -241,6 +251,7 @@ def extract_archive_verified(
                     with handle.open(info) as source, output.open("wb") as target:
                         for chunk in iter(lambda: source.read(1024 * 1024), b""):
                             target.write(chunk)
+                    restore_mode(output, (info.external_attr >> 16) & 0o777)
                     extracted.append(output)
         elif archive_type in {"tar.gz", "tgz", "tar.xz", "txz", "tar"}:
             mode = "r:gz" if archive_type in {"tar.gz", "tgz"} else ("r:xz" if archive_type in {"tar.xz", "txz"} else "r:")
@@ -294,16 +305,28 @@ def extract_archive_verified(
                 for path in regular:
                     output = staging / path
                     write_from_member(path, output)
+                    restore_mode(output, regular[resolve_target(path)].mode)
                     extracted.append(output)
                 for path in aliases:
                     output = staging / path
-                    write_from_member(path, output)
+                    target = staging / resolve_target(path)
+                    if os.name != "nt":
+                        output.parent.mkdir(parents=True, exist_ok=True)
+                        output.symlink_to(os.path.relpath(target, output.parent))
+                    else:
+                        write_from_member(path, output)
+                        restore_mode(output, regular[resolve_target(path)].mode)
                     extracted.append(output)
         else:
             raise RuntimeIntegrityError(f"unsupported archive type: {archive_type}")
         destination_dir.parent.mkdir(parents=True, exist_ok=True)
         if destination_dir.exists():
             for path in sorted(destination_dir.rglob("*"), reverse=True):
+                # Portable Node stores its verified archive inside the
+                # extraction root. Preserve that source while replacing the
+                # previously extracted tree.
+                if path == archive or path.resolve() == source_archive:
+                    continue
                 if path.is_file() or path.is_symlink():
                     path.unlink(missing_ok=True)
                 elif path.is_dir():

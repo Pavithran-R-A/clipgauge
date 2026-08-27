@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import json
 import traceback
 import uuid
 from dataclasses import dataclass
@@ -46,6 +47,30 @@ def redact_text(text: str) -> str:
 
 def diagnostic_id() -> str:
     return f"diag-{uuid.uuid4().hex[:16]}"
+
+
+def _redact_json(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_text(value)[:4_000]
+    if isinstance(value, dict):
+        return {str(key)[:120]: _redact_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_json(item) for item in value[:32]]
+    return value
+
+
+def write_json_diagnostic(job_dir: Path, stage: str, payload: dict[str, Any]) -> str:
+    """Persist a bounded JSON diagnostic that already contains no secrets."""
+    identifier = diagnostic_id()
+    directory = job_dir / "diagnostics"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{identifier}.json"
+    path.write_text(json.dumps({"stage": stage, "diagnostic": _redact_json(payload)}, indent=2, sort_keys=True), encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return identifier
 
 
 def write_diagnostic(job_dir: Path, stage: str, exc: BaseException) -> str:

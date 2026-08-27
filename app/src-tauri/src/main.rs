@@ -556,6 +556,7 @@ fn preflight(
     endpoint: Option<String>,
     auth: Option<String>,
     secret_header: Option<String>,
+    source: Option<String>,
 ) -> Result<Value, String> {
     let selected_provider = provider.clone();
     let (program, mut args) = pipeline_invocation();
@@ -569,6 +570,10 @@ fn preflight(
         auth,
         secret_header,
     );
+    if let Some(value) = source {
+        args.push("--source".to_string());
+        args.push(value);
+    }
     let mut command = quiet_command(&program);
     secrets::apply_operation_env(&mut command);
     if let Some((env_name, profile_id)) = selected_provider_env(selected_provider.as_deref()) {
@@ -1254,7 +1259,7 @@ fn start_setup(
     state: State<'_, AppState>,
     args: Vec<String>,
 ) -> Result<String, String> {
-    let valid = matches!(args.as_slice(), [command] if command == "inventory" || command == "install-runtime" || command == "install-ffmpeg")
+    let valid = matches!(args.as_slice(), [command] if command == "inventory" || command == "youtube-status" || command == "youtube-test" || command == "install-runtime" || command == "install-ffmpeg")
         || matches!(args.as_slice(), [command, group, value] if command == "install-group" && group == "--group" && matches!(value.as_str(), "core:asr" | "core:analysis" | "core:youtube"))
         || matches!(args.as_slice(), [command, asset] if command == "install-asset" && asset.len() <= 180 && asset.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '_' | '/' | '.')))
         || matches!(args.as_slice(), [command, model] if command == "download-model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')));
@@ -1291,7 +1296,7 @@ fn cancel_setup(state: State<'_, AppState>, operation_id: String) -> Result<(), 
 
 #[tauri::command]
 fn setup_tool(args: Vec<String>) -> Result<Value, String> {
-    let valid = matches!(args.as_slice(), [command] if command == "inventory" || command == "install-runtime" || command == "install-ffmpeg")
+    let valid = matches!(args.as_slice(), [command] if command == "inventory" || command == "youtube-status" || command == "youtube-test" || command == "install-runtime" || command == "install-ffmpeg")
         || matches!(args.as_slice(), [command, flag, model] if command == "inventory" && flag == "--model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
         || matches!(args.as_slice(), [command, group, value] if command == "install-group" && group == "--group" && matches!(value.as_str(), "core:asr" | "core:analysis" | "core:youtube"))
         || matches!(args.as_slice(), [command, asset] if command == "install-asset" && asset.len() <= 180 && asset.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '_' | '/' | '.')))

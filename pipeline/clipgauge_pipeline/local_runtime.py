@@ -17,6 +17,7 @@ import httpx
 
 QA_TRACE_ENV = "CLIPGAUGE_QA_RUNTIME_TRACE"
 QA_TRACE_MAX_BYTES = 24_000
+STARTUP_TIMEOUT_SECONDS = 120.0
 
 
 def _qa_trace_enabled() -> bool:
@@ -252,7 +253,7 @@ class LocalRuntime:
             stderr_handle.close()
         api = self._loopback_endpoint(port)
         base_url = api.rsplit("/v1", 1)[0]
-        deadline = started_at + 30.0
+        deadline = started_at + STARTUP_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 _qa_trace(self.root, "runtime_exit_before_ready", exit_code=process.returncode, stderr_tail=_stderr_tail(self.root, stderr_path))
@@ -285,7 +286,7 @@ class LocalRuntime:
             time.sleep(0.25)
         self.stop_process(process)
         _qa_trace(self.root, "runtime_timeout_before_ready", stderr_tail=_stderr_tail(self.root, stderr_path))
-        raise LocalRuntimeError("ClipGauge Local runtime did not become ready within 30 seconds.")
+        raise LocalRuntimeError(f"ClipGauge Local runtime did not become ready within {STARTUP_TIMEOUT_SECONDS:g} seconds.")
 
     @staticmethod
     def stop_process(process: subprocess.Popen[Any]) -> None:

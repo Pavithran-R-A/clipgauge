@@ -75,6 +75,127 @@ async function capture(name, selector = ['-w', hwnd]) {
   throw lastError
 }
 
+async function assertLayout(page, state) {
+  const facts = await page.evaluate((layoutState) => {
+    const rect = (element) => {
+      const value = element.getBoundingClientRect()
+      return { left: value.left, right: value.right, top: value.top, bottom: value.bottom, width: value.width, height: value.height }
+    }
+    const visible = (element) => {
+      const value = element.getBoundingClientRect()
+      const style = window.getComputedStyle(element)
+      return value.width > 0 && value.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'
+    }
+    const sidebar = document.querySelector('.app-sidebar')
+    const main = document.querySelector('.app-main')
+    if (!sidebar || !main) throw new Error('layout roots unavailable')
+    const sidebarRect = rect(sidebar)
+    const mainRect = rect(main)
+    const descendants = [...sidebar.querySelectorAll('*')].filter(visible).map(rect)
+    const maxSidebarRight = descendants.reduce((value, item) => Math.max(value, item.right), sidebarRect.right)
+    const controls = [...document.querySelectorAll('button, input, textarea, select, a')].filter(visible).map(rect)
+    const clippedControls = controls.filter((item) => item.left < -1 || item.right > window.innerWidth + 1).length
+    const cardSelectors = layoutState === 'create'
+      ? ['.create-main-column > section', '.create-side-column > section']
+      : layoutState === 'help' ? ['.support-page > section'] : ['.setup-page > section']
+    const cards = cardSelectors.flatMap((selector) => [...document.querySelectorAll(selector)]).filter(visible).map(rect)
+    const overlappingCards = []
+    for (let left = 0; left < cards.length; left += 1) {
+      for (let right = left + 1; right < cards.length; right += 1) {
+        const a = cards[left]
+        const b = cards[right]
+        if (Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1) overlappingCards.push([left, right])
+      }
+    }
+    const horizontalScroll = document.documentElement.scrollWidth > window.innerWidth + 1 || document.body.scrollWidth > window.innerWidth + 1
+    return {
+      css_viewport: { width: window.innerWidth, height: window.innerHeight },
+      sidebar: sidebarRect,
+      main: mainRect,
+      max_sidebar_descendant_right: maxSidebarRight,
+      sidebar_contained: maxSidebarRight <= sidebarRect.right + 2,
+      main_begins_after_sidebar: mainRect.left >= sidebarRect.right - 2,
+      no_horizontal_scroll: !horizontalScroll,
+      clipped_controls: clippedControls,
+      overlapping_cards: overlappingCards,
+      active_breakpoint: window.innerWidth <= 760 ? 'mobile' : window.innerWidth <= 1050 ? 'stacked' : 'wide',
+    }
+  }, state)
+  if (!facts.sidebar_contained || !facts.main_begins_after_sidebar || !facts.no_horizontal_scroll || facts.clipped_controls !== 0 || facts.overlapping_cards.length !== 0) {
+    throw new Error(`layout invariant failed for ${state}: ${JSON.stringify(facts)}`)
+  }
+  return facts
+}
+
+async function writeLayoutEvidence(name, payload) {
+  writeFileSync(`${outputDir}/${name}-${suffix}.json`, `${JSON.stringify(payload, null, 2)}\n`)
+}
+
+async function createState(page, hostile = false) {
+  await clickNav(page, 'Create')
+  await visible(page.getByRole('heading', { name: 'Create clips', exact: true }), 'Create heading')
+  await text(page, 'Add a video', 'Create Step 1')
+  await text(page, 'Choose AI', 'Create Step 2')
+  await text(page, 'Choose caption style', 'Create Step 3')
+  if (hostile) {
+    const hostileTitle = page.locator('.sidebar-session strong').filter({ hasText: 'MrBeast 2' }).first()
+    const unicodeTitle = page.locator('.sidebar-session strong').filter({ hasText: 'Unicode' }).first()
+    await visible(hostileTitle, 'hostile long session title')
+    await visible(unicodeTitle, 'hostile Unicode session title')
+  }
+  const facts = await assertLayout(page, 'create')
+  await writeLayoutEvidence(hostile ? 'create-hostile' : 'create', {
+    state: hostile ? 'CREATE_HOSTILE_SIDEBAR' : 'CREATE_NORMAL',
+    target_viewport: { width: targetWidth, height: targetHeight },
+    hostile_titles_observed: hostile,
+    ...facts,
+  })
+  await capture(`${hostile ? 'create-hostile' : 'create'}-${suffix}`)
+}
+
+async function displayDiagnosticsState(page) {
+  await clickNav(page, 'Help & Diagnostics')
+  await visible(page.getByRole('heading', { name: 'Get unstuck without guessing.', exact: true }), 'Help heading for display diagnostics')
+  await visible(page.getByRole('heading', { name: 'Logical layout facts', exact: true }), 'display diagnostics heading')
+  const diagnostics = await page.evaluate(async ({ requestedWidth, requestedHeight }) => {
+    const invoke = window.__TAURI_INTERNALS__?.invoke
+    if (typeof invoke !== 'function') throw new Error('Tauri invoke unavailable for display diagnostics')
+    const label = 'main'
+    const [inner, outer, scale] = await Promise.all([
+      invoke('plugin:window|inner_size', { label }),
+      invoke('plugin:window|outer_size', { label }),
+      invoke('plugin:window|scale_factor', { label }),
+    ])
+    const css = { width: window.innerWidth, height: window.innerHeight }
+    const factor = Number(scale)
+    if (!inner || !outer || !Number.isFinite(factor) || factor <= 0) throw new Error(`native display facts unavailable: ${JSON.stringify({ inner, outer, scale })}`)
+    return {
+      requested_outer_size: { width: requestedWidth, height: requestedHeight },
+      actual_native_outer_size: { width: Number(outer.width), height: Number(outer.height) },
+      actual_native_inner_size: { width: Number(inner.width), height: Number(inner.height) },
+      tauri_scale_factor: factor,
+      logical_inner_size: { width: Math.round(Number(inner.width) / factor), height: Math.round(Number(inner.height) / factor) },
+      css_viewport: css,
+      device_pixel_ratio: window.devicePixelRatio,
+      screen: { width: window.screen.width, height: window.screen.height },
+      available_screen: { width: window.screen.availWidth, height: window.screen.availHeight },
+      active_layout_breakpoint: css.width <= 760 ? 'mobile' : css.width <= 1050 ? 'stacked' : 'wide',
+    }
+  }, { requestedWidth: targetWidth, requestedHeight: targetHeight })
+  await writeLayoutEvidence('display-diagnostics', diagnostics)
+  await capture(`display-diagnostics-${suffix}`)
+}
+
+async function helpState(page) {
+  await clickNav(page, 'Help & Diagnostics')
+  await visible(page.getByRole('heading', { name: 'Get unstuck without guessing.', exact: true }), 'Help heading')
+  await visible(page.getByRole('heading', { name: 'Local system check', exact: true }), 'Help health heading')
+  await visible(page.getByRole('heading', { name: 'Logical layout facts', exact: true }), 'Help display heading')
+  const facts = await assertLayout(page, 'help')
+  await writeLayoutEvidence('help', { state: 'HELP_DIAGNOSTICS', target_viewport: { width: targetWidth, height: targetHeight }, ...facts })
+  await capture(`help-${suffix}`)
+}
+
 async function setupState(page) {
   await clickNav(page, 'Setup & Storage')
   const inventoryDiagnostic = await page.evaluate(async () => {
@@ -106,7 +227,7 @@ async function setupState(page) {
   }
   await text(page, 'Ready · System', 'system-ready marker')
   await text(page, 'System component reused', 'system reuse marker')
-  await text(page, 'Everything needed is here.', 'setup completion marker')
+  await text(page, 'Core components are ready.', 'core setup completion marker')
   await capture(`setup-${suffix}`)
 }
 
@@ -347,6 +468,10 @@ try {
   page.setDefaultTimeout(120_000)
   await visible(page.getByRole('button', { name: 'Setup & Storage', exact: true }).first(), 'application navigation')
   if (state === 'setup') await setupState(page)
+  else if (state === 'create') await createState(page)
+  else if (state === 'create-hostile') await createState(page, true)
+  else if (state === 'help') await helpState(page)
+  else if (state === 'display-diagnostics') await displayDiagnosticsState(page)
   else if (state === 'local-ai') await localState(page)
   else if (state === 'providers') await providersBaseline(page)
   else if (state === 'openrouter-saved') await openRouterSaved(page)

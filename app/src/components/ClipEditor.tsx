@@ -522,7 +522,7 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
 
       {/* timeline */}
       <div
-        className="timeline"
+        className="editor-timeline"
         ref={railRef}
         onMouseDown={(e) => {
           seekTo(fromClientX(e.clientX))

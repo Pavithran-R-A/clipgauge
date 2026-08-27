@@ -13,6 +13,7 @@ import shutil
 from pathlib import Path
 
 from ..jobs.queue import Stage, StageContext, StageError
+from .. import protocol
 from . import normalize, ytdlp
 
 
@@ -52,23 +53,50 @@ class IngestStage(Stage):
         browser_session = ctx.settings.provider_metadata.get("cookies_from_browser")
         if browser_session is not None and not isinstance(browser_session, str):
             browser_session = None
+        compatibility_method = "bgutil"
         if job.source_type == "url":
             try:
-                meta = ytdlp.fetch_meta(job.source, prog, cookies_from_browser=browser_session)
+                try:
+                    meta = ytdlp.fetch_meta(job.source, prog, cookies_from_browser=browser_session, compatibility_method="bgutil")
+                except ytdlp.YtDlpError as primary_meta_error:
+                    if primary_meta_error.code != "YTDLP_ATTESTATION_REQUIRED":
+                        raise
+                    compatibility_method = "mweb"
+                    meta = ytdlp.fetch_meta(job.source, prog, cookies_from_browser=browser_session, compatibility_method="mweb")
                 heatmap = meta.heatmap
                 title = meta.title
                 media_path = ctx.job_dir / "media.mp4"
                 if not media_path.exists():
-                    ytdlp.download(job.source, media_path, prog, cookies_from_browser=browser_session)
+                    try:
+                        ytdlp.download(job.source, media_path, prog, cookies_from_browser=browser_session, compatibility_method="bgutil")
+                    except ytdlp.YtDlpError as primary_download_error:
+                        if primary_download_error.code != "YTDLP_ATTESTATION_REQUIRED":
+                            raise
+                        compatibility_method = "mweb"
+                        try:
+                            ytdlp.download(job.source, media_path, prog, cookies_from_browser=browser_session, compatibility_method="mweb")
+                        except ytdlp.YtDlpError as fallback_error:
+                            fallback_details = getattr(fallback_error, "details", {})
+                            if isinstance(fallback_details, dict):
+                                fallback_details["primary_failure"] = getattr(primary_download_error, "details", {})
+                            raise
             except ytdlp.YtDlpError as err:
+                if getattr(err, "code", None) == "YTDLP_ATTESTATION_REQUIRED" and not browser_session:
+                    from . import youtube_compat
+                    youtube_compat.invalidate_public_compatibility()
                 message = str(err)
                 code = getattr(err, "code", None) or ("YTDLP_LOGIN_REQUIRED" if ytdlp.is_auth_error(message) else "YTDLP_METADATA_FAILED")
                 if code == "YTDLP_ERROR" and ("download" in message.lower() or "connection" in message.lower()):
                     code = "YTDLP_DOWNLOAD_FAILED"
+                diagnostic_id = None
+                details = getattr(err, "details", None)
+                if isinstance(details, dict) and details:
+                    diagnostic_id = protocol.write_json_diagnostic(job.dir, "ingest", details)
                 raise StageError(
                     f"yt-dlp could not process this video: {message}",
                     code=code,
                     retryable=getattr(err, "retryable", True),
+                    diagnostic_id=diagnostic_id,
                 ) from err
         else:
             source_path = Path(job.source).expanduser().resolve()
@@ -108,6 +136,14 @@ class IngestStage(Stage):
             raise StageError(
                 "This video has no audio track. ClipGauge needs speech to find moments."
             )
+        if job.source_type == "url" and not browser_session:
+            try:
+                manifest, _, _ = ytdlp._manifest_record()
+                ytdlp_version = str(manifest["runtimes"]["yt-dlp"]["version"])
+                from . import youtube_compat
+                youtube_compat.record_public_compatibility_success(method=compatibility_method, ytdlp_version=ytdlp_version)
+            except (KeyError, TypeError, ValueError, OSError):
+                pass
 
         if info.vfr:
             cfr_path = ctx.job_dir / "media_cfr.mp4"

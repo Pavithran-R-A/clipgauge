@@ -10,6 +10,20 @@ $winapp = (Get-Command winapp -ErrorAction Stop).Source
 $appName = [System.IO.Path]::GetFileNameWithoutExtension($AppPath)
 $proc = $null
 
+function Seed-HostileSessions {
+  $jobs = Join-Path $env:CLIPGAUGE_HOME 'jobs'
+  New-Item -ItemType Directory -Force $jobs | Out-Null
+  $records = @(
+    @{ id = '20260825-120001-a1b2c3'; title = 'How I Tricked The Internet - MrBeast 2 (1080p, h264) — extremely long session title designed to prove sidebar containment across a real packaged Windows WebView' },
+    @{ id = '20260825-120002-d4e5f6'; title = 'Unicode — 这是一个非常长的会话标题 — café — العربية — русский — emoji-safe filename continuation for containment' }
+  )
+  foreach ($record in $records) {
+    $dir = Join-Path $jobs $record.id
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    @{ data = @{ title = $record.title } } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 (Join-Path $dir 'ingest.json')
+  }
+}
+
 function Invoke-WindowCapture {
   param([Parameter(Mandatory = $true)] [string] $Name)
   $path = Join-Path $OutputDir "$Name.png"
@@ -128,6 +142,7 @@ $realFfmpeg = Get-ChildItem -Path (Join-Path $chocoRoot 'lib\ffmpeg') -Filter 'f
 $realFfmpegPath = if ($realFfmpeg) { $realFfmpeg.FullName } else { (Get-Command ffmpeg -ErrorAction Stop).Source }
 $env:PATH = "$(Split-Path -Parent $realFfmpegPath);$env:PATH"
 Write-Host "qualification system FFmpeg: $realFfmpegPath"
+Seed-HostileSessions
 $proc = Start-Process -FilePath $AppPath -PassThru
 $deadline = (Get-Date).AddSeconds(30)
 while ((Get-Date) -lt $deadline) {
@@ -169,12 +184,25 @@ try {
   Invoke-State 'openrouter-connected' 1920 1080 '1920x1080'
   Invoke-State 'gemini-saved-unverified' 1920 1080 '1920x1080'
   Invoke-State 'credential-removal-confirmation' 1920 1080 '1920x1080'
+  Invoke-State 'setup' 1920 1200 '1920x1200'
+  Invoke-State 'local-ai' 1920 1200 '1920x1200'
+  Invoke-State 'providers' 1920 1200 '1920x1200'
+  Invoke-State 'openrouter-saved' 1920 1200 '1920x1200'
+  Invoke-State 'openrouter-connected' 1920 1200 '1920x1200'
+  Invoke-State 'gemini-saved-unverified' 1920 1200 '1920x1200'
+  Invoke-State 'credential-removal-confirmation' 1920 1200 '1920x1200'
+  Invoke-State 'create' 1920 1200 '1920x1200'
+  Invoke-State 'create-hostile' 1920 1200 '1920x1200'
+  Invoke-State 'help' 1920 1200 '1920x1200'
+  Invoke-State 'display-diagnostics' 1920 1200 '1920x1200'
 
   $pairs = @(
     @('providers-1366x768.png', 'local-ai-1366x768.png'),
     @('providers-1920x1080.png', 'local-ai-1920x1080.png'),
     @('openrouter-saved-1366x768.png', 'openrouter-connected-1366x768.png'),
-    @('openrouter-saved-1920x1080.png', 'openrouter-connected-1920x1080.png')
+    @('openrouter-saved-1920x1080.png', 'openrouter-connected-1920x1080.png'),
+    @('providers-1920x1200.png', 'local-ai-1920x1200.png'),
+    @('openrouter-saved-1920x1200.png', 'openrouter-connected-1920x1200.png')
   )
   foreach ($pair in $pairs) {
     if ((Hash-File (Join-Path $OutputDir $pair[0])) -eq (Hash-File (Join-Path $OutputDir $pair[1]))) { throw "screenshots unexpectedly identical: $($pair -join ' == ')" }

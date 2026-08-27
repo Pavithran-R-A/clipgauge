@@ -40,3 +40,13 @@ ClipGauge uses three structured-output levels: native JSON Schema, JSON mode wit
 ## Privacy and terms
 
 For current endpoint details, quotas, terms, and retention practices, consult the official provider documentation linked in [`PROVIDER_RESEARCH_2026.md`](./PROVIDER_RESEARCH_2026.md). Do not paste credentials into issues, chat, screenshots, or documentation. Optional Pexels and Instagram features have separate credentials and network disclosures.
+
+## YouTube public-link compatibility
+
+YouTube URL import is a **best-effort compatibility feature** whose availability depends on YouTube’s current playback rules. Local-file import is the supported fallback and does not depend on YouTube.
+
+Setup reports two distinct states. **YouTube tools ready** means the pinned yt-dlp runtime, Node runtime, released bgutil provider source, provider plugin, and loopback health check are verified. **YouTube download tested** means a real unauthenticated public transfer completed and its media was probed successfully. A loopback `/ping` check never implies that YouTube will accept a media request. The most recent successful public check stores only a timestamp, yt-dlp version, provider version, and compatibility method; it never stores tokens, cookies, visitor IDs, or browser-profile data. A later attestation failure invalidates that public-verification claim.
+
+The managed provider is the official `Brainicism/bgutil-ytdlp-pot-provider` source archive from tag `1.3.2`, with the archive URL and SHA-256 pinned in the runtime manifest. ClipGauge builds the server and copies the plugin from that same archive, so the server and plugin remain on one compatible released revision. The integration uses yt-dlp’s normal provider path first and may try its documented `mweb` guest-client alternative after an attestation-specific failure. It does not enable `formats=missing_pot`.
+
+ClipGauge does not read browser cookies or profiles by default. The optional WPC browser-assisted provider is not part of the normal creator path. If it is separately installed and a local Chrome or Chromium executable is detected, a future explicit user action may launch it only after explaining that it is optional, uses a local browser to obtain public playback attestation, requires no account, and can be cancelled. ClipGauge never installs a browser automatically and never uses logged-in browser state for normal operation.

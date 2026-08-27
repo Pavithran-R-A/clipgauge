@@ -11,8 +11,12 @@ import json
 import os
 import platform
 import shutil
+import signal
+import socket
 import subprocess
+import threading
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -21,10 +25,17 @@ import httpx
 
 from .. import config, downloads, runtime
 
+DownloadManager = downloads.DownloadManager
+
 PROVIDER_VERSION = "1.3.2"
 NODE_VERSION = "24.19.0"
 PROVIDER_GROUP = "core:youtube"
 DEFAULT_PORT = 4416
+STARTUP_TIMEOUT_SECONDS = 30.0
+PUBLIC_COMPATIBILITY_FILENAME = "youtube-public-compatibility.json"
+WPC_VERSION = "1.1.2"
+WPC_SOURCE = "https://github.com/coletdjnz/yt-dlp-getpot-wpc/tree/v1.1.2"
+WPC_LICENSE = "MIT"
 
 
 @dataclass(frozen=True)
@@ -185,6 +196,202 @@ def _server_ready() -> bool:
     return (server_home() / "build" / "main.js").is_file() and plugin_dir().is_dir() and node_path().is_file()
 
 
+def _yt_dlp_ready() -> bool:
+    try:
+        from . import ytdlp
+
+        _manifest, entry, _name = ytdlp._manifest_record()
+        path = ytdlp.binary_path()
+        return path.is_file() and runtime.sha256_file(path).lower() == str(entry["sha256"]).lower()
+    except (OSError, KeyError, TypeError, ValueError, runtime.RuntimeIntegrityError):
+        return False
+
+
+def _public_compatibility_path() -> Path:
+    return config.home_dir() / PUBLIC_COMPATIBILITY_FILENAME
+
+
+def public_compatibility_status() -> dict[str, Any]:
+    """Return only non-sensitive metadata from the latest public compatibility check."""
+    try:
+        payload = json.loads(_public_compatibility_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"verified": False}
+    if not isinstance(payload, dict):
+        return {"verified": False}
+    allowed = {"verified_at", "yt_dlp_version", "provider_version", "method"}
+    return {key: payload[key] for key in allowed if key in payload} | {"verified": bool(payload.get("verified"))}
+
+
+def invalidate_public_compatibility() -> None:
+    """Invalidate only the public verification claim after a later transfer failure."""
+    path = _public_compatibility_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(payload, dict):
+        return
+    payload["verified"] = False
+    temporary = path.with_name(f".{path.name}.part")
+    try:
+        temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        temporary.replace(path)
+    except OSError:
+        pass
+
+
+def record_public_compatibility_success(*, method: str, ytdlp_version: str, provider_version: str = PROVIDER_VERSION) -> None:
+    """Cache successful public compatibility metadata, never tokens or session data."""
+    config.ensure_home()
+    payload = {
+        "verified": True,
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "yt_dlp_version": str(ytdlp_version)[:64],
+        "provider_version": str(provider_version)[:64],
+        "method": str(method)[:64],
+    }
+    path = _public_compatibility_path()
+    temporary = path.with_name(f".{path.name}.part")
+    temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _find_browser() -> str | None:
+    """Detect an installed browser without launching it or reading its profile."""
+    candidates = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"]
+    return next((shutil.which(candidate) for candidate in candidates if shutil.which(candidate)), None)
+
+
+def _wpc_plugin_installed() -> bool:
+    return (config.runtimes_dir() / "youtube" / "wpc" / "yt_dlp_plugins" / "extractor" / "getpot_wpc.py").is_file()
+
+
+def wpc_availability() -> dict[str, Any]:
+    """Describe optional WPC availability without installing or launching anything."""
+    browser_path = _find_browser()
+    installed = _wpc_plugin_installed()
+    return {
+        "available": bool(browser_path and installed),
+        "browser_path": browser_path,
+        "plugin_installed": installed,
+        "version": WPC_VERSION,
+        "source": WPC_SOURCE,
+        "license": WPC_LICENSE,
+        "reason": "Optional browser-assisted compatibility is available." if browser_path and installed else "Install the optional WPC provider and have Chrome or Chromium installed before using browser-assisted compatibility.",
+    }
+
+
+def _launch_wpc_browser(browser_path: str) -> dict[str, Any]:
+    """Production hook deliberately requires an explicit integration launcher."""
+    return {"state": "NOT_CONFIGURED", "browser_path": browser_path, "provider": "wpc"}
+
+
+def wpc_launch_decision(*, approved: bool, browser_path: str | None = None, launcher: Callable[[str], dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Enforce explicit approval before any optional browser-assisted launch."""
+    if not approved:
+        return {"state": "USER_DECLINED", "provider": "wpc"}
+    path = browser_path or _find_browser()
+    if not path:
+        return {"state": "BROWSER_REQUIRED", "provider": "wpc", "reason": "Chrome or Chromium must be installed; ClipGauge will not install it."}
+    return (launcher or _launch_wpc_browser)(path)
+
+
+def readiness() -> dict[str, Any]:
+    """Return dependency readiness separately from verified public-download readiness."""
+    checks: list[dict[str, Any]] = []
+    public_status = public_compatibility_status()
+    wpc_status = wpc_availability()
+    ytdlp_ok = _yt_dlp_ready()
+    checks.append({"name": "yt-dlp", "ready": ytdlp_ok, "message": "Pinned yt-dlp is verified." if ytdlp_ok else "Pinned yt-dlp is not installed or failed verification."})
+    if not ytdlp_ok:
+        return {"state": "NOT_INSTALLED", "ready": False, "dependency_state": "NOT_INSTALLED", "public_download_verified": False, "wpc": wpc_status, "reason": "Install the verified YouTube runtime before testing public links.", "actions": ["Install"], "checks": checks}
+
+    rows = DownloadManager().inventory(assets())
+    installed = [bool(row.get("installed")) for row in rows]
+    checks.extend({"name": str(row.get("asset_id", "youtube-asset")), "ready": bool(row.get("installed")), "message": "Verified asset is installed." if row.get("installed") else "Verified asset is missing or needs repair."} for row in rows)
+    if not all(installed):
+        state = "NOT_INSTALLED" if not any(installed) else "INSTALL_INCOMPLETE"
+        return {"state": state, "ready": False, "dependency_state": state, "public_download_verified": False, "wpc": wpc_status, "reason": "Install the complete YouTube support bundle, then test it.", "actions": ["Install", "Retry"], "checks": checks}
+
+    if not _server_ready():
+        checks.append({"name": "provider-build", "ready": False, "message": "The PO-token provider build or plugin is incomplete."})
+        return {"state": "BUILD_REQUIRED", "ready": False, "dependency_state": "BUILD_REQUIRED", "public_download_verified": False, "wpc": wpc_status, "reason": "Build the installed PO-token provider before using YouTube.", "actions": ["Repair", "Retry"], "checks": checks}
+
+    result = ProviderSupervisor().self_test()
+    plugin_ok = bool(result.get("plugin_discoverable"))
+    server_ok = bool(result.get("server_installed"))
+    health_ok = bool((result.get("health") or {}).get("healthy"))
+    checks.extend([
+        {"name": "plugin", "ready": plugin_ok, "message": "The YouTube plugin is discoverable." if plugin_ok else "The YouTube plugin is not discoverable."},
+        {"name": "loopback-health", "ready": health_ok, "message": "The local PO-token provider is healthy." if health_ok else "The local PO-token provider is not healthy."},
+    ])
+    if not server_ok or not plugin_ok:
+        return {"state": "REPAIR_REQUIRED", "ready": False, "dependency_state": "REPAIR_REQUIRED", "public_download_verified": False, "wpc": wpc_status, "reason": "Repair the installed YouTube support components, then test again.", "actions": ["Repair", "Retry"], "checks": checks}
+    if not health_ok:
+        return {"state": "UNHEALTHY", "ready": False, "dependency_state": "UNHEALTHY", "public_download_verified": False, "wpc": wpc_status, "reason": "The local YouTube support check failed. Start a test to retry safely.", "actions": ["Test", "Retry"], "checks": checks}
+    public_verified = bool(public_status.get("verified"))
+    return {"state": "PUBLIC_DOWNLOAD_VERIFIED" if public_verified else "DEPENDENCIES_READY", "ready": True, "dependency_state": "DEPENDENCIES_READY", "public_download_verified": public_verified, "public_compatibility": public_status, "wpc": wpc_status, "reason": "YouTube download was tested successfully." if public_verified else "YouTube tools are ready. A public download has not been verified on this installation.", "actions": ["Test"], "checks": checks}
+
+
+def _merge_live_health_checks(status: dict[str, Any], result: dict[str, Any]) -> list[dict[str, Any]]:
+    checks = [dict(check) for check in status.get("checks", []) if isinstance(check, dict)]
+    live = {
+        "plugin": (bool(result.get("plugin_discoverable")), "The YouTube plugin is discoverable.", "The YouTube plugin is not discoverable."),
+        "loopback-health": (bool((result.get("health") or {}).get("healthy")), "The local PO-token provider is healthy.", "The local PO-token provider is not healthy."),
+    }
+    seen: set[str] = set()
+    for check in checks:
+        name = str(check.get("name", ""))
+        if name in live:
+            ready, success_message, failure_message = live[name]
+            check.update({"ready": ready, "message": success_message if ready else failure_message})
+            seen.add(name)
+    for name, (ready, success_message, failure_message) in live.items():
+        if name not in seen:
+            checks.append({"name": name, "ready": ready, "message": success_message if ready else failure_message})
+    return checks
+
+
+_STARTUP_ERROR_MESSAGES = {
+    "BUILD_MISSING": "YouTube compatibility service is not built. Repair it from Setup Center.",
+    "HEALTH_TIMEOUT": "YouTube compatibility service did not become healthy before the startup timeout.",
+    "NODE_FAILURE": "YouTube compatibility service could not start its managed runtime.",
+    "PORT_IN_USE": "Another process is using the required local YouTube compatibility port.",
+    "PROCESS_EXITED": "YouTube compatibility service exited before becoming healthy.",
+    "VERSION_MISMATCH": "Another process is using the YouTube compatibility port with the wrong provider version.",
+}
+
+
+def startup_error_code(error: BaseException) -> str:
+    code = str(error).split(":", 1)[0].strip()
+    return code if code in _STARTUP_ERROR_MESSAGES else "UNKNOWN_STARTUP_FAILURE"
+
+
+def startup_error_message(code: str) -> str:
+    return _STARTUP_ERROR_MESSAGES.get(code, "YouTube compatibility service could not start.")
+
+
+def test() -> dict[str, Any]:
+    """Start the loopback provider for one health check, then always stop it."""
+    status = readiness()
+    if status["state"] not in {"READY", "DEPENDENCIES_READY", "PUBLIC_DOWNLOAD_VERIFIED", "UNHEALTHY"}:
+        return status
+    supervisor = ProviderSupervisor()
+    try:
+        supervisor.start()
+        result = supervisor.self_test()
+        checks = _merge_live_health_checks(status, result)
+        if result.get("ok"):
+            return {**status, "state": "PUBLIC_DOWNLOAD_VERIFIED" if status.get("public_download_verified") else "DEPENDENCIES_READY", "ready": True, "dependency_state": "DEPENDENCIES_READY", "checks": checks, "reason": "YouTube tools are ready. A public download still needs to be verified by a real transfer.", "actions": ["Test"]}
+        return {**status, "state": "UNHEALTHY", "ready": False, "checks": checks, "reason": "The local YouTube support check failed. Repair the provider and test again.", "actions": ["Repair", "Test"]}
+    except (OSError, RuntimeError, runtime.RuntimeIntegrityError) as error:
+        code = startup_error_code(error)
+        return {**status, "state": "UNHEALTHY", "ready": False, "startup_error_code": code, "reason": startup_error_message(code), "actions": ["Repair", "Test"], "error": str(error)}
+    finally:
+        supervisor.stop()
+
+
 def install(*, event: downloads.EventFn | None = None, cancel: Callable[[], bool] | None = None, require_consent: bool = True) -> dict[str, Any]:
     manager = downloads.DownloadManager(event=event)
     group_assets = assets()
@@ -223,62 +430,156 @@ class ProviderHandle:
 class ProviderSupervisor:
     def __init__(self) -> None:
         self.handle: ProviderHandle | None = None
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _endpoint_for_health(result: dict[str, Any]) -> str:
+        family = result.get("address_family")
+        return f"http://[::1]:{DEFAULT_PORT}" if family == "ipv6" else f"http://127.0.0.1:{DEFAULT_PORT}"
+
+    @staticmethod
+    def _port_occupied() -> bool:
+        for family, address in ((socket.AF_INET, ("127.0.0.1", DEFAULT_PORT)), (socket.AF_INET6, ("::1", DEFAULT_PORT))):
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            sock.settimeout(0.25)
+            try:
+                if sock.connect_ex(address) == 0:
+                    return True
+            finally:
+                sock.close()
+        return False
 
     def health(self) -> dict[str, Any]:
-        try:
-            response = httpx.get(f"http://127.0.0.1:{DEFAULT_PORT}/ping", timeout=1.5, follow_redirects=False)
-            if response.status_code == 200:
+        observed: list[dict[str, Any]] = []
+        for family, url in (
+            ("ipv4", f"http://127.0.0.1:{DEFAULT_PORT}/ping"),
+            ("ipv6", f"http://[::1]:{DEFAULT_PORT}/ping"),
+        ):
+            try:
+                response = httpx.get(url, timeout=1.5, follow_redirects=False)
+                if response.status_code != 200:
+                    continue
                 payload = response.json()
-                return {"running": True, "healthy": payload.get("version") == PROVIDER_VERSION, **payload}
-        except (httpx.HTTPError, ValueError):
-            pass
+                if not isinstance(payload, dict):
+                    payload = {}
+                result = {"running": True, "healthy": payload.get("version") == PROVIDER_VERSION, "address_family": family, **payload}
+                observed.append(result)
+                if result["healthy"]:
+                    return result
+            except (httpx.HTTPError, ValueError):
+                continue
+        if observed:
+            return observed[0]
         return {"running": False, "healthy": False, "version": None}
 
-    def start(self) -> str:
-        if self.handle and self.handle.process.poll() is None and self.health().get("healthy"):
-            return self.handle.endpoint
-        if not _server_ready():
-            raise runtime.RuntimeIntegrityError("YouTube compatibility is not installed. Open Setup Center to install it.")
-        command = [str(node_path()), "build/main.js", "--port", str(DEFAULT_PORT)]
-        env = os.environ.copy()
-        env["PATH"] = str(node_path().parent) + os.pathsep + env.get("PATH", "")
-        log_path = _root() / "provider.log"
-        log = log_path.open("ab")
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
-        kwargs: dict[str, Any] = {
-            "cwd": str(server_home()), "stdin": subprocess.DEVNULL,
-            "stdout": log, "stderr": log, "creationflags": creationflags,
-        }
-        if os.name != "nt":
-            kwargs["start_new_session"] = True
-        process = subprocess.Popen(command, **kwargs)
-        endpoint = f"http://127.0.0.1:{DEFAULT_PORT}"
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                raise runtime.RuntimeIntegrityError("The managed PO-token provider exited before becoming healthy.")
-            if self.health().get("healthy"):
-                self.handle = ProviderHandle(process=process, endpoint=endpoint)
-                return endpoint
-            time.sleep(0.25)
-        self.stop()
-        raise runtime.RuntimeIntegrityError("The managed PO-token provider did not become healthy within 30 seconds.")
-
-    def stop(self) -> None:
-        if not self.handle:
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen[Any]) -> None:
+        if process.poll() is not None:
             return
-        process = self.handle.process
-        if process.poll() is None:
+        if os.name != "nt":
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
+        else:
             try:
                 process.terminate()
-                process.wait(timeout=5)
-            except (OSError, subprocess.TimeoutExpired):
+            except OSError:
+                pass
+        try:
+            process.wait(timeout=5)
+            return
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if os.name != "nt":
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except (OSError, ProcessLookupError):
                 try:
                     process.kill()
-                    process.wait(timeout=5)
-                except (OSError, subprocess.TimeoutExpired):
+                except OSError:
                     pass
-        self.handle = None
+        else:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        try:
+            process.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    def start(self) -> str:
+        with self._lock:
+            if self.handle:
+                if self.handle.process.poll() is None:
+                    current = self.health()
+                    if current.get("healthy"):
+                        self.handle.endpoint = self._endpoint_for_health(current)
+                        return self.handle.endpoint
+                self.stop()
+
+            existing = self.health()
+            if existing.get("running"):
+                if existing.get("healthy") and existing.get("version") == PROVIDER_VERSION:
+                    return self._endpoint_for_health(existing)
+                if existing.get("version") is not None:
+                    raise runtime.RuntimeIntegrityError(f"VERSION_MISMATCH: provider port returned version {existing.get('version')}")
+                raise runtime.RuntimeIntegrityError("PORT_IN_USE: provider port is occupied by an unrelated listener")
+            if self._port_occupied():
+                raise runtime.RuntimeIntegrityError("PORT_IN_USE: provider port is occupied by an unrelated listener")
+            if not _server_ready():
+                raise runtime.RuntimeIntegrityError("BUILD_MISSING: YouTube compatibility provider is not installed or built.")
+
+            command = [str(node_path()), "build/main.js", "--port", str(DEFAULT_PORT)]
+            env = os.environ.copy()
+            env["PATH"] = str(node_path().parent) + os.pathsep + env.get("PATH", "")
+            log_path = _root() / "provider.log"
+            log = None
+            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+            kwargs: dict[str, Any] = {
+                "cwd": str(server_home()), "stdin": subprocess.DEVNULL,
+                "creationflags": creationflags,
+            }
+            if os.name != "nt":
+                kwargs["start_new_session"] = True
+            try:
+                log = log_path.open("ab")
+                kwargs.update({"stdout": log, "stderr": log})
+                process = subprocess.Popen(command, **kwargs)
+            except OSError as error:
+                raise runtime.RuntimeIntegrityError(f"NODE_FAILURE: managed provider could not be spawned: {error}") from error
+            finally:
+                if log is not None:
+                    log.close()
+
+            endpoint = f"http://127.0.0.1:{DEFAULT_PORT}"
+            self.handle = ProviderHandle(process=process, endpoint=endpoint)
+            deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
+            try:
+                while time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        raise runtime.RuntimeIntegrityError("PROCESS_EXITED: managed PO-token provider exited before becoming healthy")
+                    health = self.health()
+                    if health.get("healthy"):
+                        self.handle.endpoint = self._endpoint_for_health(health)
+                        return self.handle.endpoint
+                    time.sleep(0.25)
+                raise runtime.RuntimeIntegrityError("HEALTH_TIMEOUT: managed PO-token provider did not become healthy before the startup timeout")
+            except Exception:
+                self.stop()
+                raise
+
+    def stop(self) -> None:
+        with self._lock:
+            handle = self.handle
+            self.handle = None
+            if not handle:
+                return
+            self._terminate_process(handle.process)
 
     def self_test(self) -> dict[str, Any]:
         health = self.health()
