@@ -101,7 +101,7 @@ def test_youtube_test_refreshes_loopback_health_on_success(monkeypatch, tmp_path
 
     result = youtube_compat.test()
 
-    assert result['state'] == 'READY'
+    assert result['state'] == 'DEPENDENCIES_READY'
     loopback = next(check for check in result['checks'] if check['name'] == 'loopback-health')
     assert loopback['ready'] is True
     assert loopback['message'] == 'The local PO-token provider is healthy.'
@@ -127,3 +127,136 @@ def test_youtube_ingest_starts_provider_before_live_health_check(monkeypatch):
     assert events == ['start', 'self_test']
     assert '--plugin-dirs' in args
     assert 'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416' in args
+
+
+def test_youtube_readiness_distinguishes_dependencies_from_public_download(monkeypatch, tmp_path):
+    monkeypatch.setattr(youtube_compat.config, 'home_dir', lambda: tmp_path)
+    monkeypatch.setattr(youtube_compat, '_yt_dlp_ready', lambda: True)
+    monkeypatch.setattr(youtube_compat.DownloadManager, 'inventory', lambda self, assets: [
+        {'asset_id': asset.asset_id, 'installed': True, 'status': 'ready'} for asset in assets
+    ])
+    monkeypatch.setattr(youtube_compat, '_server_ready', lambda: True)
+    monkeypatch.setattr(youtube_compat.ProviderSupervisor, 'self_test', lambda self: {
+        'plugin_discoverable': True, 'server_installed': True,
+        'health': {'healthy': True, 'running': True, 'version': '1.3.2'}, 'loopback_only': True, 'ok': True,
+    })
+    result = youtube_compat.readiness()
+    assert result['state'] == 'DEPENDENCIES_READY'
+    assert result['ready'] is True
+    assert result['public_download_verified'] is False
+    assert result['dependency_state'] == 'DEPENDENCIES_READY'
+
+
+def test_public_compatibility_success_is_metadata_only_and_secret_free(tmp_path, monkeypatch):
+    monkeypatch.setattr(youtube_compat.config, 'home_dir', lambda: tmp_path)
+    youtube_compat.record_public_compatibility_success(method='bgutil-http', ytdlp_version='2026.07.04')
+    payload = (tmp_path / youtube_compat.PUBLIC_COMPATIBILITY_FILENAME).read_text(encoding='utf-8')
+    assert 'token' not in payload.lower()
+    assert 'cookie' not in payload.lower()
+    status = youtube_compat.public_compatibility_status()
+    assert status['verified'] is True
+    assert status['method'] == 'bgutil-http'
+    assert status['yt_dlp_version'] == '2026.07.04'
+    assert 'verified_at' in status
+
+
+def test_wpc_availability_does_not_launch_browser_and_requires_explicit_use(monkeypatch):
+    launches = []
+    monkeypatch.setattr(youtube_compat, '_find_browser', lambda: '/usr/bin/chromium')
+    monkeypatch.setattr(youtube_compat, '_wpc_plugin_installed', lambda: True)
+    monkeypatch.setattr(youtube_compat, '_launch_wpc_browser', lambda *args, **kwargs: launches.append(True))
+    result = youtube_compat.wpc_availability()
+    assert result['available'] is True
+    assert result['browser_path'] == '/usr/bin/chromium'
+    assert launches == []
+
+
+def test_wpc_user_declines_without_browser_side_effect(monkeypatch):
+    launches = []
+    monkeypatch.setattr(youtube_compat, '_launch_wpc_browser', lambda *args, **kwargs: launches.append(True))
+    result = youtube_compat.wpc_launch_decision(approved=False, browser_path='/usr/bin/chromium')
+    assert result['state'] == 'USER_DECLINED'
+    assert launches == []
+
+
+def test_wpc_success_fixture_requires_explicit_approval_and_keeps_browser_path_only():
+    result = youtube_compat.wpc_launch_decision(
+        approved=True,
+        browser_path='/usr/bin/chromium',
+        launcher=lambda path: {'state': 'STARTED', 'provider': 'wpc', 'browser_path': path, 'public_session': True},
+    )
+    assert result == {'state': 'STARTED', 'provider': 'wpc', 'browser_path': '/usr/bin/chromium', 'public_session': True}
+    assert 'cookie' not in str(result).lower()
+    assert 'profile' not in str(result).lower()
+
+
+def test_supported_mweb_fallback_is_explicit_and_not_missing_pot(monkeypatch):
+    from clipgauge_pipeline.ingest import ytdlp
+    class StubSupervisor:
+        def start(self):
+            return 'http://127.0.0.1:4416'
+        def self_test(self):
+            return {'ok': True}
+    monkeypatch.setattr(ytdlp, '_provider_supervisor', StubSupervisor())
+    args = ytdlp._youtube_provider_args('https://www.youtube.com/watch?v=aqz-KE-bpKQ', compatibility_method='mweb')
+    assert '--extractor-args' in args
+    joined = ' '.join(args)
+    assert 'youtube:player_client=mweb' in joined
+    assert 'missing_pot' not in joined
+
+
+def test_youtube_failure_diagnostic_is_sanitized_and_classifies_gvs():
+    from clipgauge_pipeline.ingest import ytdlp
+    diagnostic = ytdlp.compatibility_diagnostic(
+        phase='GVS_TRANSFER',
+        method='bgutil-http',
+        stderr='[debug] [youtube] [pot] PO Token Providers: bgutil:http-1.3.2 (external)\nERROR: HTTP Error 403: Forbidden',
+        http_status=403,
+    )
+    assert diagnostic['failure_phase'] == 'GVS_TRANSFER'
+    assert diagnostic['provider'] == 'bgutil:http-1.3.2'
+    assert diagnostic['http_status'] == 403
+    assert diagnostic['token_contexts_requested'] == ['GVS']
+    assert diagnostic['cache_invalidated'] is False
+    assert '403' in diagnostic['error_summary']
+    assert 'token contents' not in str(diagnostic).lower()
+
+
+def test_attestation_failure_invalidates_public_verification_without_deleting_dependencies(tmp_path, monkeypatch):
+    monkeypatch.setattr(youtube_compat.config, 'home_dir', lambda: tmp_path)
+    youtube_compat.record_public_compatibility_success(method='bgutil-http', ytdlp_version='2026.07.04')
+    youtube_compat.invalidate_public_compatibility()
+    assert youtube_compat.public_compatibility_status()['verified'] is False
+    assert (tmp_path / youtube_compat.PUBLIC_COMPATIBILITY_FILENAME).exists()
+
+
+def test_readiness_exposes_wpc_as_optional_metadata_only(monkeypatch, tmp_path):
+    monkeypatch.setattr(youtube_compat.config, 'home_dir', lambda: tmp_path)
+    monkeypatch.setattr(youtube_compat, '_yt_dlp_ready', lambda: True)
+    monkeypatch.setattr(youtube_compat.DownloadManager, 'inventory', lambda self, assets: [
+        {'asset_id': asset.asset_id, 'installed': True, 'status': 'ready'} for asset in assets
+    ])
+    monkeypatch.setattr(youtube_compat, '_server_ready', lambda: True)
+    monkeypatch.setattr(youtube_compat.ProviderSupervisor, 'self_test', lambda self: {
+        'plugin_discoverable': True, 'server_installed': True,
+        'health': {'healthy': True, 'running': True, 'version': '1.3.2'}, 'loopback_only': True, 'ok': True,
+    })
+    monkeypatch.setattr(youtube_compat, '_find_browser', lambda: None)
+    result = youtube_compat.readiness()
+    assert result['wpc']['available'] is False
+    assert result['wpc']['plugin_installed'] is False
+    assert 'install Chrome' in result['wpc']['reason'] or 'Chrome' in result['wpc']['reason']
+
+
+def test_mweb_fallback_uses_supported_automatic_format_selection():
+    from clipgauge_pipeline.ingest import ytdlp
+    selected = ytdlp.download_format_for('mweb')
+    assert 'missing_pot' not in selected
+    assert '[ext=mp4]' not in selected
+    assert 'height<=' in selected
+
+
+def test_local_file_fallback_bypasses_all_youtube_providers():
+    from clipgauge_pipeline.ingest import ytdlp
+    assert ytdlp._youtube_provider_args('/managed/jobs/example/media.mp4') == []
+    assert ytdlp._needs_youtube_provider('/managed/jobs/example/media.mp4') is False

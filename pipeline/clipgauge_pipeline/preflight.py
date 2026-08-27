@@ -256,13 +256,25 @@ def run(selected_llm: providers_mod.ProviderProfile | str = "gemini", source: st
         from .ingest import youtube_compat
 
         youtube_status = youtube_compat.readiness()
+        dependency_ready = youtube_status.get("dependency_state") == "DEPENDENCIES_READY" or youtube_status.get("state") == "PUBLIC_DOWNLOAD_VERIFIED"
+        public_verified = bool(youtube_status.get("public_download_verified"))
+        if not youtube_status.get("ready"):
+            youtube_check_state = "blocked"
+            remediation = "Open Setup Center, repair YouTube support, and retry."
+        elif public_verified:
+            youtube_check_state = "ready"
+            remediation = None
+        else:
+            youtube_check_state = "warning"
+            remediation = "Retry the public link later, or import the downloaded video file directly."
         _check(
             checks,
             "youtube-support",
-            "ready" if youtube_status.get("ready") else "blocked",
-            str(youtube_status.get("reason") or "YouTube support needs attention."),
-            "Open Setup Center, run Test, and retry." if not youtube_status.get("ready") else None,
+            youtube_check_state,
+            str(youtube_status.get("reason") or ("YouTube tools are ready; public download availability depends on YouTube." if dependency_ready else "YouTube support needs attention.")),
+            remediation,
             youtube_state=youtube_status.get("state"),
+            public_download_verified=public_verified,
         )
     profile = providers_mod.legacy_profile(selected_llm) if isinstance(selected_llm, str) else selected_llm
     _provider(checks, profile)

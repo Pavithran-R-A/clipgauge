@@ -28,7 +28,7 @@ const FRIENDLY_FAILURES: Record<string, string> = {
   SPEAKER_ANALYSIS_FAILED: 'Speaker analysis could not complete. Retry the job or continue without speaker-aware reframing.',
   SPEAKER_CLUSTER_FAILED: 'Speaker grouping could not complete. Retry the job or continue without speaker-aware reframing.',
   PROVIDER_UNAVAILABLE: 'The selected AI is unavailable. Open AI Providers or choose another provider.',
-  YTDLP_ATTESTATION_REQUIRED: 'YouTube needs an additional playback verification step. Enable YouTube support in Setup & Storage and retry.',
+  YTDLP_ATTESTATION_REQUIRED: 'YouTube rejected this download during playback verification. ClipGauge itself is ready; retry later, try optional browser-assisted compatibility with explicit approval, or import the video file directly.',
   YTDLP_LOGIN_REQUIRED: 'This video requires a signed-in YouTube session. Use a browser session only if you explicitly consent.'
 }
 

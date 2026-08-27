@@ -247,11 +247,15 @@ export interface PreflightStorage {
   assets: Array<Record<string, unknown>>
 }
 
-export type YouTubeReadinessState = 'NOT_INSTALLED' | 'INSTALL_INCOMPLETE' | 'BUILD_REQUIRED' | 'UNHEALTHY' | 'READY' | 'REPAIR_REQUIRED'
+export type YouTubeReadinessState = 'NOT_INSTALLED' | 'INSTALL_INCOMPLETE' | 'BUILD_REQUIRED' | 'UNHEALTHY' | 'READY' | 'DEPENDENCIES_READY' | 'PUBLIC_DOWNLOAD_VERIFIED' | 'REPAIR_REQUIRED'
 
 export interface YouTubeReadiness {
   state: YouTubeReadinessState
   ready: boolean
+  dependency_state?: string
+  public_download_verified?: boolean
+  public_compatibility?: { verified?: boolean; verified_at?: string; yt_dlp_version?: string; provider_version?: string; method?: string }
+  wpc?: { available?: boolean; browser_path?: string | null; plugin_installed?: boolean; version?: string; source?: string; license?: string; reason?: string }
   reason: string
   actions: string[]
   checks: Array<{ name: string; ready: boolean; message: string }>

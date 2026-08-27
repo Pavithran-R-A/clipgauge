@@ -12,6 +12,8 @@ export function creatorHeadline(state: CreatorRunState): string {
   return HEADLINES[state]
 }
 
+export const YOUTUBE_HELPER_COPY = 'YouTube links are best-effort and depend on current YouTube playback rules. Import a local video file if a public link is rejected.'
+
 export function providerHelperCopy(provider: string): string {
   switch (provider) {
     case 'clipgauge-local':

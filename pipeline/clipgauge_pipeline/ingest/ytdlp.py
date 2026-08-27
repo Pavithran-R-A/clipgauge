@@ -54,9 +54,19 @@ def _browser_auth_args(browser: str | None) -> list[str]:
     return ["--cookies-from-browser", normalized]
 
 
-def _youtube_provider_args(url: str) -> list[str]:
+def _youtube_provider_args(url: str, compatibility_method: str = "bgutil") -> list[str]:
     if not _needs_youtube_provider(url):
         return []
+    if compatibility_method == "mweb":
+        _provider_supervisor.start()
+        status = _provider_supervisor.self_test()
+        if not status.get("ok"):
+            raise YtDlpError("The managed YouTube provider is not ready for the supported fallback client.", code="YTDLP_PROVIDER_NOT_READY", retryable=True)
+        return [
+            "--plugin-dirs", str(youtube_compat.plugin_dir()),
+            "--extractor-args", f"youtubepot-bgutilhttp:base_url=http://127.0.0.1:{youtube_compat.DEFAULT_PORT}",
+            "--extractor-args", "youtube:player_client=mweb",
+        ]
     _provider_supervisor.start()
     status = _provider_supervisor.self_test()
     if not status.get("ok"):
@@ -71,13 +81,50 @@ def _youtube_provider_args(url: str) -> list[str]:
     ]
 
 
+def _first_match(pattern: str, text: str) -> str | None:
+    match = re.search(pattern, text, flags=re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def compatibility_diagnostic(*, phase: str, method: str, stderr: str = "", http_status: int | None = None, accepted: bool | None = None, cache_invalidated: bool = False) -> dict[str, object]:
+    """Return bounded provider-path facts without token, cookie, or session contents."""
+    provider = (_first_match(r"PO Token Providers:\s*([^\n]+)", stderr) or method).split(" ", 1)[0]
+    client = _first_match(r"player_client[=:]([A-Za-z0-9_, -]+)", stderr)
+    format_id = _first_match(r"(?:format|format_id)[=: ]+([A-Za-z0-9+/._-]+)", stderr)
+    protocol = _first_match(r"(?:protocol|proto)[=: ]+([A-Za-z0-9_-]+)", stderr)
+    contexts = []
+    for name in ("GVS", "Player", "Subs"):
+        if re.search(rf"\b{name}\b", stderr, flags=re.IGNORECASE):
+            contexts.append(name)
+    if not contexts and phase.upper() == "GVS_TRANSFER":
+        contexts = ["GVS"]
+    status = http_status
+    if status is None:
+        raw_status = _first_match(r"HTTP Error\s+(\d{3})", stderr)
+        status = int(raw_status) if raw_status else None
+    summary = _clean_error(stderr) or (f"HTTP {status}" if status else "compatibility operation failed")
+    return {
+        "failure_phase": str(phase)[:64],
+        "player_client": client,
+        "provider": provider[:120],
+        "token_contexts_requested": contexts,
+        "provider_response_accepted": accepted,
+        "selected_format": format_id,
+        "selected_protocol": protocol,
+        "http_status": status,
+        "cache_invalidated": bool(cache_invalidated),
+        "error_summary": re.sub(r"(?i)token\s*[:=]\s*[^\s,;]+", "token=[REDACTED]", summary)[:300],
+    }
+
+
 class YtDlpError(Exception):
     """yt-dlp process failure with a cleaned, user-facing message and stable code."""
 
-    def __init__(self, message: str, code: str = "YTDLP_ERROR", retryable: bool = True) -> None:
+    def __init__(self, message: str, code: str = "YTDLP_ERROR", retryable: bool = True, details: dict[str, object] | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        self.details = details or {}
 
 
 def _binary_name() -> str:
@@ -254,7 +301,7 @@ def _run(
         msg = _clean_error(stderr) or f"yt-dlp exited with code {code}"
         if code in (-9, -15) and not _clean_error(stderr):
             msg = "yt-dlp stalled (no output for a while) and was stopped. Check your connection and retry."
-        raise YtDlpError(msg, code=classify_error(msg), retryable=True)
+        raise YtDlpError(msg, code=classify_error(msg), retryable=True, details=compatibility_diagnostic(phase="GVS_TRANSFER", method="bgutil-http", stderr=stderr))
     return "".join(stdout_parts)
 
 
@@ -293,12 +340,17 @@ def _pick_playlist_entry(data: dict) -> dict:
     return merged
 
 
-def fetch_meta(url: str, progress: ProgressFn, cookies_from_browser: str | None = None) -> UrlMeta:
+def fetch_meta(url: str, progress: ProgressFn, cookies_from_browser: str | None = None, compatibility_method: str = "bgutil") -> UrlMeta:
     bin_path = ensure_ytdlp(progress)
 
     def _go() -> str:
-        args = [*_youtube_provider_args(url), *_browser_auth_args(cookies_from_browser)]
-        return _run(bin_path, [*args, "-J", "--no-playlist", "--no-warnings", url])
+        args = [*_youtube_provider_args(url, compatibility_method=compatibility_method), *_browser_auth_args(cookies_from_browser)]
+        try:
+            return _run(bin_path, [*args, "-J", "--no-playlist", "--no-warnings", url])
+        except YtDlpError as error:
+            if error.details:
+                error.details["method"] = compatibility_method
+            raise
 
     out = _with_self_update_retry(bin_path, progress, _go)
     data = json.loads(out)
@@ -333,17 +385,23 @@ DOWNLOAD_FORMAT = (
     f"bv*[height<={config.MAX_HEIGHT}][ext=mp4]+ba[ext=m4a]"
     f"/b[height<={config.MAX_HEIGHT}][ext=mp4]/b"
 )
+MWEB_DOWNLOAD_FORMAT = f"bv*[height<={config.MAX_HEIGHT}]+ba/b[height<={config.MAX_HEIGHT}]/b"
+
+
+def download_format_for(compatibility_method: str = "bgutil") -> str:
+    """Use yt-dlp automatic compatible formats for guest-client fallback."""
+    return MWEB_DOWNLOAD_FORMAT if compatibility_method == "mweb" else DOWNLOAD_FORMAT
 
 _PCT_RE = re.compile(r"\[download\]\s+([\d.]+)%")
 
 
-def download(url: str, out_path: Path, progress: ProgressFn, cookies_from_browser: str | None = None) -> None:
+def download(url: str, out_path: Path, progress: ProgressFn, cookies_from_browser: str | None = None, compatibility_method: str = "bgutil") -> None:
     bin_path = ensure_ytdlp(progress)
     ffmpeg = shutil.which("ffmpeg")
     args = [
-        *_youtube_provider_args(url),
+        *_youtube_provider_args(url, compatibility_method=compatibility_method),
         *_browser_auth_args(cookies_from_browser),
-        "-f", DOWNLOAD_FORMAT,
+        "-f", download_format_for(compatibility_method),
         "--merge-output-format", "mp4",
         "--no-playlist",
         "--no-warnings",
@@ -363,7 +421,12 @@ def download(url: str, out_path: Path, progress: ProgressFn, cookies_from_browse
             progress(0.96, "Merging streams…")
 
     def _go() -> str:
-        return _run(bin_path, args, on_line=_on_line)
+        try:
+            return _run(bin_path, args, on_line=_on_line)
+        except YtDlpError as error:
+            if error.details:
+                error.details["method"] = compatibility_method
+            raise
 
     _with_self_update_retry(bin_path, progress, _go)
     if not out_path.exists():

@@ -40,11 +40,11 @@ The packaged screenshots below show the creator workflow. Setup & Storage separa
 1. Download the installer for your operating system from the [latest release](https://github.com/Pavithran-R-A/clipgauge/releases/latest).
 2. Open ClipGauge and approve the one-time core-component setup. Setup & Storage tells you what will be installed, what is already available, and when an existing verified file will be reused.
 3. If you want local scoring, choose a model in Optional local AI. A verified existing model shows as installed and contributes zero additional download bytes; a failed integrity check shows Needs repair instead of silently redownloading.
-4. For YouTube, open Setup & Storage and run Test YouTube support. The app checks the pinned runtime, provider build, plugin discovery, loopback startup, and health before Create allows a public-link job.
+4. For YouTube, open Setup & Storage and run Test YouTube support. The app checks the pinned runtime, provider build, plugin discovery, loopback startup, and health. **YouTube tools ready** means those local dependencies are available; **YouTube download tested** is a separate state based on a real public transfer. Public-link availability can change with YouTube, and a local video file remains the dependable fallback.
 5. Add a video from your computer or paste a supported link. Choose the scoring provider and caption style that fit this clip.
 6. Review the suggested clips, adjust a cut or caption style if needed, and export the MP4 you want to publish.
 
-If a setup step needs attention, open **Setup & Storage**. Core readiness, optional local-AI readiness, and YouTube readiness are shown independently. Use Install, Test, Repair, or Retry as offered by the current state. If a connection or render needs investigation, open **Help & Diagnostics** for a local health summary and create a redacted support bundle. The bundle is designed for troubleshooting and does not include provider credentials.
+If a setup step needs attention, open **Setup & Storage**. Core readiness, optional local-AI readiness, and best-effort YouTube readiness are shown independently. Use Install, Test, Repair, or Retry as offered by the current state. If YouTube rejects a public download during playback verification, retry later, use the optional browser-assisted route only after explicit approval when it is available, or import the video file directly. Open **Help & Diagnostics** for a local health summary and create a redacted support bundle. The bundle is designed for troubleshooting and does not include provider credentials, tokens, cookies, or browser-profile data.
 
 ## AI providers
 

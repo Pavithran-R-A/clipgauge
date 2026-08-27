@@ -13,6 +13,7 @@ import platform
 import shutil
 import subprocess
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -27,6 +28,10 @@ PROVIDER_VERSION = "1.3.2"
 NODE_VERSION = "24.19.0"
 PROVIDER_GROUP = "core:youtube"
 DEFAULT_PORT = 4416
+PUBLIC_COMPATIBILITY_FILENAME = "youtube-public-compatibility.json"
+WPC_VERSION = "1.1.2"
+WPC_SOURCE = "https://github.com/coletdjnz/yt-dlp-getpot-wpc/tree/v1.1.2"
+WPC_LICENSE = "MIT"
 
 
 @dataclass(frozen=True)
@@ -198,24 +203,116 @@ def _yt_dlp_ready() -> bool:
         return False
 
 
+def _public_compatibility_path() -> Path:
+    return config.home_dir() / PUBLIC_COMPATIBILITY_FILENAME
+
+
+def public_compatibility_status() -> dict[str, Any]:
+    """Return only non-sensitive metadata from the latest public compatibility check."""
+    try:
+        payload = json.loads(_public_compatibility_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"verified": False}
+    if not isinstance(payload, dict):
+        return {"verified": False}
+    allowed = {"verified_at", "yt_dlp_version", "provider_version", "method"}
+    return {key: payload[key] for key in allowed if key in payload} | {"verified": bool(payload.get("verified"))}
+
+
+def invalidate_public_compatibility() -> None:
+    """Invalidate only the public verification claim after a later transfer failure."""
+    path = _public_compatibility_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(payload, dict):
+        return
+    payload["verified"] = False
+    temporary = path.with_name(f".{path.name}.part")
+    try:
+        temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        temporary.replace(path)
+    except OSError:
+        pass
+
+
+def record_public_compatibility_success(*, method: str, ytdlp_version: str, provider_version: str = PROVIDER_VERSION) -> None:
+    """Cache successful public compatibility metadata, never tokens or session data."""
+    config.ensure_home()
+    payload = {
+        "verified": True,
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "yt_dlp_version": str(ytdlp_version)[:64],
+        "provider_version": str(provider_version)[:64],
+        "method": str(method)[:64],
+    }
+    path = _public_compatibility_path()
+    temporary = path.with_name(f".{path.name}.part")
+    temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _find_browser() -> str | None:
+    """Detect an installed browser without launching it or reading its profile."""
+    candidates = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"]
+    return next((shutil.which(candidate) for candidate in candidates if shutil.which(candidate)), None)
+
+
+def _wpc_plugin_installed() -> bool:
+    return (config.runtimes_dir() / "youtube" / "wpc" / "yt_dlp_plugins" / "extractor" / "getpot_wpc.py").is_file()
+
+
+def wpc_availability() -> dict[str, Any]:
+    """Describe optional WPC availability without installing or launching anything."""
+    browser_path = _find_browser()
+    installed = _wpc_plugin_installed()
+    return {
+        "available": bool(browser_path and installed),
+        "browser_path": browser_path,
+        "plugin_installed": installed,
+        "version": WPC_VERSION,
+        "source": WPC_SOURCE,
+        "license": WPC_LICENSE,
+        "reason": "Optional browser-assisted compatibility is available." if browser_path and installed else "Install the optional WPC provider and have Chrome or Chromium installed before using browser-assisted compatibility.",
+    }
+
+
+def _launch_wpc_browser(browser_path: str) -> dict[str, Any]:
+    """Production hook deliberately requires an explicit integration launcher."""
+    return {"state": "NOT_CONFIGURED", "browser_path": browser_path, "provider": "wpc"}
+
+
+def wpc_launch_decision(*, approved: bool, browser_path: str | None = None, launcher: Callable[[str], dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Enforce explicit approval before any optional browser-assisted launch."""
+    if not approved:
+        return {"state": "USER_DECLINED", "provider": "wpc"}
+    path = browser_path or _find_browser()
+    if not path:
+        return {"state": "BROWSER_REQUIRED", "provider": "wpc", "reason": "Chrome or Chromium must be installed; ClipGauge will not install it."}
+    return (launcher or _launch_wpc_browser)(path)
+
+
 def readiness() -> dict[str, Any]:
-    """Return the single source of truth for whether a YouTube run can start."""
+    """Return dependency readiness separately from verified public-download readiness."""
     checks: list[dict[str, Any]] = []
+    public_status = public_compatibility_status()
+    wpc_status = wpc_availability()
     ytdlp_ok = _yt_dlp_ready()
     checks.append({"name": "yt-dlp", "ready": ytdlp_ok, "message": "Pinned yt-dlp is verified." if ytdlp_ok else "Pinned yt-dlp is not installed or failed verification."})
     if not ytdlp_ok:
-        return {"state": "NOT_INSTALLED", "ready": False, "reason": "Install the verified YouTube runtime before testing public links.", "actions": ["Install"], "checks": checks}
+        return {"state": "NOT_INSTALLED", "ready": False, "dependency_state": "NOT_INSTALLED", "public_download_verified": False, "wpc": wpc_status, "reason": "Install the verified YouTube runtime before testing public links.", "actions": ["Install"], "checks": checks}
 
     rows = DownloadManager().inventory(assets())
     installed = [bool(row.get("installed")) for row in rows]
     checks.extend({"name": str(row.get("asset_id", "youtube-asset")), "ready": bool(row.get("installed")), "message": "Verified asset is installed." if row.get("installed") else "Verified asset is missing or needs repair."} for row in rows)
     if not all(installed):
         state = "NOT_INSTALLED" if not any(installed) else "INSTALL_INCOMPLETE"
-        return {"state": state, "ready": False, "reason": "Install the complete YouTube support bundle, then test it.", "actions": ["Install", "Retry"], "checks": checks}
+        return {"state": state, "ready": False, "dependency_state": state, "public_download_verified": False, "wpc": wpc_status, "reason": "Install the complete YouTube support bundle, then test it.", "actions": ["Install", "Retry"], "checks": checks}
 
     if not _server_ready():
         checks.append({"name": "provider-build", "ready": False, "message": "The PO-token provider build or plugin is incomplete."})
-        return {"state": "BUILD_REQUIRED", "ready": False, "reason": "Build the installed PO-token provider before using YouTube.", "actions": ["Repair", "Retry"], "checks": checks}
+        return {"state": "BUILD_REQUIRED", "ready": False, "dependency_state": "BUILD_REQUIRED", "public_download_verified": False, "wpc": wpc_status, "reason": "Build the installed PO-token provider before using YouTube.", "actions": ["Repair", "Retry"], "checks": checks}
 
     result = ProviderSupervisor().self_test()
     plugin_ok = bool(result.get("plugin_discoverable"))
@@ -226,10 +323,11 @@ def readiness() -> dict[str, Any]:
         {"name": "loopback-health", "ready": health_ok, "message": "The local PO-token provider is healthy." if health_ok else "The local PO-token provider is not healthy."},
     ])
     if not server_ok or not plugin_ok:
-        return {"state": "REPAIR_REQUIRED", "ready": False, "reason": "Repair the installed YouTube support components, then test again.", "actions": ["Repair", "Retry"], "checks": checks}
+        return {"state": "REPAIR_REQUIRED", "ready": False, "dependency_state": "REPAIR_REQUIRED", "public_download_verified": False, "wpc": wpc_status, "reason": "Repair the installed YouTube support components, then test again.", "actions": ["Repair", "Retry"], "checks": checks}
     if not health_ok:
-        return {"state": "UNHEALTHY", "ready": False, "reason": "The local YouTube support check failed. Start a test to retry safely.", "actions": ["Test", "Retry"], "checks": checks}
-    return {"state": "READY", "ready": True, "reason": "YouTube support passed its local provider health check.", "actions": ["Test"], "checks": checks}
+        return {"state": "UNHEALTHY", "ready": False, "dependency_state": "UNHEALTHY", "public_download_verified": False, "wpc": wpc_status, "reason": "The local YouTube support check failed. Start a test to retry safely.", "actions": ["Test", "Retry"], "checks": checks}
+    public_verified = bool(public_status.get("verified"))
+    return {"state": "PUBLIC_DOWNLOAD_VERIFIED" if public_verified else "DEPENDENCIES_READY", "ready": True, "dependency_state": "DEPENDENCIES_READY", "public_download_verified": public_verified, "public_compatibility": public_status, "wpc": wpc_status, "reason": "YouTube download was tested successfully." if public_verified else "YouTube tools are ready. A public download has not been verified on this installation.", "actions": ["Test"], "checks": checks}
 
 
 def _merge_live_health_checks(status: dict[str, Any], result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -254,7 +352,7 @@ def _merge_live_health_checks(status: dict[str, Any], result: dict[str, Any]) ->
 def test() -> dict[str, Any]:
     """Start the loopback provider for one health check, then always stop it."""
     status = readiness()
-    if status["state"] not in {"READY", "UNHEALTHY"}:
+    if status["state"] not in {"READY", "DEPENDENCIES_READY", "PUBLIC_DOWNLOAD_VERIFIED", "UNHEALTHY"}:
         return status
     supervisor = ProviderSupervisor()
     try:
@@ -262,7 +360,7 @@ def test() -> dict[str, Any]:
         result = supervisor.self_test()
         checks = _merge_live_health_checks(status, result)
         if result.get("ok"):
-            return {**status, "state": "READY", "ready": True, "checks": checks, "reason": "YouTube support passed its local provider health check.", "actions": ["Test"]}
+            return {**status, "state": "PUBLIC_DOWNLOAD_VERIFIED" if status.get("public_download_verified") else "DEPENDENCIES_READY", "ready": True, "checks": checks, "reason": "YouTube tools are ready. A public download still needs to be verified by a real transfer.", "actions": ["Test"]}
         return {**status, "state": "UNHEALTHY", "ready": False, "checks": checks, "reason": "The local YouTube support check failed. Repair the provider and test again.", "actions": ["Repair", "Test"]}
     except (OSError, RuntimeError, runtime.RuntimeIntegrityError) as error:
         return {**status, "state": "UNHEALTHY", "ready": False, "reason": "The local YouTube support provider could not start for its health check.", "actions": ["Repair", "Test"], "error": str(error)}
