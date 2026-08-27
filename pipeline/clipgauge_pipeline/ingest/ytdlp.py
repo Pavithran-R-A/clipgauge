@@ -57,17 +57,16 @@ def _browser_auth_args(browser: str | None) -> list[str]:
 def _youtube_provider_args(url: str, compatibility_method: str = "bgutil") -> list[str]:
     if not _needs_youtube_provider(url):
         return []
-    if compatibility_method == "mweb":
-        _provider_supervisor.start()
-        status = _provider_supervisor.self_test()
-        if not status.get("ok"):
-            raise YtDlpError("The managed YouTube provider is not ready for the supported fallback client.", code="YTDLP_PROVIDER_NOT_READY", retryable=True)
-        return [
-            "--plugin-dirs", str(youtube_compat.plugin_dir()),
-            "--extractor-args", f"youtubepot-bgutilhttp:base_url=http://127.0.0.1:{youtube_compat.DEFAULT_PORT}",
-            "--extractor-args", "youtube:player_client=mweb",
-        ]
-    _provider_supervisor.start()
+    try:
+        endpoint = _provider_supervisor.start()
+    except runtime.RuntimeIntegrityError as error:
+        startup_code = youtube_compat.startup_error_code(error)
+        raise YtDlpError(
+            youtube_compat.startup_error_message(startup_code),
+            code=f"YTDLP_PROVIDER_{startup_code}",
+            retryable=startup_code not in {"BUILD_MISSING", "VERSION_MISMATCH", "PORT_IN_USE"},
+            details={"startup_error_code": startup_code, "error_summary": youtube_compat.startup_error_message(startup_code)},
+        ) from error
     status = _provider_supervisor.self_test()
     if not status.get("ok"):
         raise YtDlpError(
@@ -75,10 +74,13 @@ def _youtube_provider_args(url: str, compatibility_method: str = "bgutil") -> li
             code="YTDLP_PROVIDER_NOT_READY",
             retryable=True,
         )
-    return [
+    provider_args = [
         "--plugin-dirs", str(youtube_compat.plugin_dir()),
-        "--extractor-args", f"youtubepot-bgutilhttp:base_url=http://127.0.0.1:{youtube_compat.DEFAULT_PORT}",
+        "--extractor-args", f"youtubepot-bgutilhttp:base_url={endpoint}",
     ]
+    if compatibility_method == "mweb":
+        provider_args.extend(["--extractor-args", "youtube:player_client=mweb"])
+    return provider_args
 
 
 def _first_match(pattern: str, text: str) -> str | None:

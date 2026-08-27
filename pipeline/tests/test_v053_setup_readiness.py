@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from clipgauge_pipeline import setup_models
 from clipgauge_pipeline.ingest import youtube_compat
 
@@ -261,3 +263,21 @@ def test_local_file_fallback_bypasses_all_youtube_providers():
     from clipgauge_pipeline.ingest import ytdlp
     assert ytdlp._youtube_provider_args('/managed/jobs/example/media.mp4') == []
     assert ytdlp._needs_youtube_provider('/managed/jobs/example/media.mp4') is False
+
+
+def test_ytdlp_classifies_provider_startup_failure(monkeypatch):
+    from clipgauge_pipeline import runtime
+    from clipgauge_pipeline.ingest import ytdlp
+
+    class StubSupervisor:
+        def start(self):
+            raise runtime.RuntimeIntegrityError("HEALTH_TIMEOUT: provider did not become healthy")
+
+    monkeypatch.setattr(ytdlp, '_provider_supervisor', StubSupervisor())
+    with pytest.raises(ytdlp.YtDlpError) as caught:
+        ytdlp._youtube_provider_args('https://www.youtube.com/watch?v=aqz-KE-bpKQ')
+    assert caught.value.code == 'YTDLP_PROVIDER_HEALTH_TIMEOUT'
+    assert caught.value.details == {
+        'startup_error_code': 'HEALTH_TIMEOUT',
+        'error_summary': 'YouTube compatibility service did not become healthy before the startup timeout.',
+    }

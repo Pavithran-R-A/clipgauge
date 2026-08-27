@@ -11,7 +11,10 @@ import json
 import os
 import platform
 import shutil
+import signal
+import socket
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -28,6 +31,7 @@ PROVIDER_VERSION = "1.3.2"
 NODE_VERSION = "24.19.0"
 PROVIDER_GROUP = "core:youtube"
 DEFAULT_PORT = 4416
+STARTUP_TIMEOUT_SECONDS = 30.0
 PUBLIC_COMPATIBILITY_FILENAME = "youtube-public-compatibility.json"
 WPC_VERSION = "1.1.2"
 WPC_SOURCE = "https://github.com/coletdjnz/yt-dlp-getpot-wpc/tree/v1.1.2"
@@ -349,6 +353,25 @@ def _merge_live_health_checks(status: dict[str, Any], result: dict[str, Any]) ->
     return checks
 
 
+_STARTUP_ERROR_MESSAGES = {
+    "BUILD_MISSING": "YouTube compatibility service is not built. Repair it from Setup Center.",
+    "HEALTH_TIMEOUT": "YouTube compatibility service did not become healthy before the startup timeout.",
+    "NODE_FAILURE": "YouTube compatibility service could not start its managed runtime.",
+    "PORT_IN_USE": "Another process is using the required local YouTube compatibility port.",
+    "PROCESS_EXITED": "YouTube compatibility service exited before becoming healthy.",
+    "VERSION_MISMATCH": "Another process is using the YouTube compatibility port with the wrong provider version.",
+}
+
+
+def startup_error_code(error: BaseException) -> str:
+    code = str(error).split(":", 1)[0].strip()
+    return code if code in _STARTUP_ERROR_MESSAGES else "UNKNOWN_STARTUP_FAILURE"
+
+
+def startup_error_message(code: str) -> str:
+    return _STARTUP_ERROR_MESSAGES.get(code, "YouTube compatibility service could not start.")
+
+
 def test() -> dict[str, Any]:
     """Start the loopback provider for one health check, then always stop it."""
     status = readiness()
@@ -363,7 +386,8 @@ def test() -> dict[str, Any]:
             return {**status, "state": "PUBLIC_DOWNLOAD_VERIFIED" if status.get("public_download_verified") else "DEPENDENCIES_READY", "ready": True, "dependency_state": "DEPENDENCIES_READY", "checks": checks, "reason": "YouTube tools are ready. A public download still needs to be verified by a real transfer.", "actions": ["Test"]}
         return {**status, "state": "UNHEALTHY", "ready": False, "checks": checks, "reason": "The local YouTube support check failed. Repair the provider and test again.", "actions": ["Repair", "Test"]}
     except (OSError, RuntimeError, runtime.RuntimeIntegrityError) as error:
-        return {**status, "state": "UNHEALTHY", "ready": False, "reason": "The local YouTube support provider could not start for its health check.", "actions": ["Repair", "Test"], "error": str(error)}
+        code = startup_error_code(error)
+        return {**status, "state": "UNHEALTHY", "ready": False, "startup_error_code": code, "reason": startup_error_message(code), "actions": ["Repair", "Test"], "error": str(error)}
     finally:
         supervisor.stop()
 
@@ -406,62 +430,156 @@ class ProviderHandle:
 class ProviderSupervisor:
     def __init__(self) -> None:
         self.handle: ProviderHandle | None = None
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _endpoint_for_health(result: dict[str, Any]) -> str:
+        family = result.get("address_family")
+        return f"http://[::1]:{DEFAULT_PORT}" if family == "ipv6" else f"http://127.0.0.1:{DEFAULT_PORT}"
+
+    @staticmethod
+    def _port_occupied() -> bool:
+        for family, address in ((socket.AF_INET, ("127.0.0.1", DEFAULT_PORT)), (socket.AF_INET6, ("::1", DEFAULT_PORT))):
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            sock.settimeout(0.25)
+            try:
+                if sock.connect_ex(address) == 0:
+                    return True
+            finally:
+                sock.close()
+        return False
 
     def health(self) -> dict[str, Any]:
-        try:
-            response = httpx.get(f"http://127.0.0.1:{DEFAULT_PORT}/ping", timeout=1.5, follow_redirects=False)
-            if response.status_code == 200:
+        observed: list[dict[str, Any]] = []
+        for family, url in (
+            ("ipv4", f"http://127.0.0.1:{DEFAULT_PORT}/ping"),
+            ("ipv6", f"http://[::1]:{DEFAULT_PORT}/ping"),
+        ):
+            try:
+                response = httpx.get(url, timeout=1.5, follow_redirects=False)
+                if response.status_code != 200:
+                    continue
                 payload = response.json()
-                return {"running": True, "healthy": payload.get("version") == PROVIDER_VERSION, **payload}
-        except (httpx.HTTPError, ValueError):
-            pass
+                if not isinstance(payload, dict):
+                    payload = {}
+                result = {"running": True, "healthy": payload.get("version") == PROVIDER_VERSION, "address_family": family, **payload}
+                observed.append(result)
+                if result["healthy"]:
+                    return result
+            except (httpx.HTTPError, ValueError):
+                continue
+        if observed:
+            return observed[0]
         return {"running": False, "healthy": False, "version": None}
 
-    def start(self) -> str:
-        if self.handle and self.handle.process.poll() is None and self.health().get("healthy"):
-            return self.handle.endpoint
-        if not _server_ready():
-            raise runtime.RuntimeIntegrityError("YouTube compatibility is not installed. Open Setup Center to install it.")
-        command = [str(node_path()), "build/main.js", "--port", str(DEFAULT_PORT)]
-        env = os.environ.copy()
-        env["PATH"] = str(node_path().parent) + os.pathsep + env.get("PATH", "")
-        log_path = _root() / "provider.log"
-        log = log_path.open("ab")
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
-        kwargs: dict[str, Any] = {
-            "cwd": str(server_home()), "stdin": subprocess.DEVNULL,
-            "stdout": log, "stderr": log, "creationflags": creationflags,
-        }
-        if os.name != "nt":
-            kwargs["start_new_session"] = True
-        process = subprocess.Popen(command, **kwargs)
-        endpoint = f"http://127.0.0.1:{DEFAULT_PORT}"
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                raise runtime.RuntimeIntegrityError("The managed PO-token provider exited before becoming healthy.")
-            if self.health().get("healthy"):
-                self.handle = ProviderHandle(process=process, endpoint=endpoint)
-                return endpoint
-            time.sleep(0.25)
-        self.stop()
-        raise runtime.RuntimeIntegrityError("The managed PO-token provider did not become healthy within 30 seconds.")
-
-    def stop(self) -> None:
-        if not self.handle:
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen[Any]) -> None:
+        if process.poll() is not None:
             return
-        process = self.handle.process
-        if process.poll() is None:
+        if os.name != "nt":
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
+        else:
             try:
                 process.terminate()
-                process.wait(timeout=5)
-            except (OSError, subprocess.TimeoutExpired):
+            except OSError:
+                pass
+        try:
+            process.wait(timeout=5)
+            return
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if os.name != "nt":
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except (OSError, ProcessLookupError):
                 try:
                     process.kill()
-                    process.wait(timeout=5)
-                except (OSError, subprocess.TimeoutExpired):
+                except OSError:
                     pass
-        self.handle = None
+        else:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        try:
+            process.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    def start(self) -> str:
+        with self._lock:
+            if self.handle:
+                if self.handle.process.poll() is None:
+                    current = self.health()
+                    if current.get("healthy"):
+                        self.handle.endpoint = self._endpoint_for_health(current)
+                        return self.handle.endpoint
+                self.stop()
+
+            existing = self.health()
+            if existing.get("running"):
+                if existing.get("healthy") and existing.get("version") == PROVIDER_VERSION:
+                    return self._endpoint_for_health(existing)
+                if existing.get("version") is not None:
+                    raise runtime.RuntimeIntegrityError(f"VERSION_MISMATCH: provider port returned version {existing.get('version')}")
+                raise runtime.RuntimeIntegrityError("PORT_IN_USE: provider port is occupied by an unrelated listener")
+            if self._port_occupied():
+                raise runtime.RuntimeIntegrityError("PORT_IN_USE: provider port is occupied by an unrelated listener")
+            if not _server_ready():
+                raise runtime.RuntimeIntegrityError("BUILD_MISSING: YouTube compatibility provider is not installed or built.")
+
+            command = [str(node_path()), "build/main.js", "--port", str(DEFAULT_PORT)]
+            env = os.environ.copy()
+            env["PATH"] = str(node_path().parent) + os.pathsep + env.get("PATH", "")
+            log_path = _root() / "provider.log"
+            log = None
+            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+            kwargs: dict[str, Any] = {
+                "cwd": str(server_home()), "stdin": subprocess.DEVNULL,
+                "creationflags": creationflags,
+            }
+            if os.name != "nt":
+                kwargs["start_new_session"] = True
+            try:
+                log = log_path.open("ab")
+                kwargs.update({"stdout": log, "stderr": log})
+                process = subprocess.Popen(command, **kwargs)
+            except OSError as error:
+                raise runtime.RuntimeIntegrityError(f"NODE_FAILURE: managed provider could not be spawned: {error}") from error
+            finally:
+                if log is not None:
+                    log.close()
+
+            endpoint = f"http://127.0.0.1:{DEFAULT_PORT}"
+            self.handle = ProviderHandle(process=process, endpoint=endpoint)
+            deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
+            try:
+                while time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        raise runtime.RuntimeIntegrityError("PROCESS_EXITED: managed PO-token provider exited before becoming healthy")
+                    health = self.health()
+                    if health.get("healthy"):
+                        self.handle.endpoint = self._endpoint_for_health(health)
+                        return self.handle.endpoint
+                    time.sleep(0.25)
+                raise runtime.RuntimeIntegrityError("HEALTH_TIMEOUT: managed PO-token provider did not become healthy before the startup timeout")
+            except Exception:
+                self.stop()
+                raise
+
+    def stop(self) -> None:
+        with self._lock:
+            handle = self.handle
+            self.handle = None
+            if not handle:
+                return
+            self._terminate_process(handle.process)
 
     def self_test(self) -> dict[str, Any]:
         health = self.health()
