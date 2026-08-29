@@ -3,6 +3,7 @@ import { confirm } from '@tauri-apps/plugin-dialog'
 import { Check, ChevronRight, CircleAlert, Cloud, Cpu, ExternalLink, KeyRound, Network, RotateCcw, Save, ShieldCheck, WifiOff } from 'lucide-react'
 import { api } from '../api'
 import type { LocalSetupInventory, ProviderTestResult, SetupState } from '../types'
+import { selectedLocalModel } from '../setupState'
 
 interface Props {
   selectedProvider: string
@@ -25,7 +26,7 @@ type ProviderDefinition = {
 }
 
 const PROVIDERS: ProviderDefinition[] = [
-  { id: 'clipgauge-local', name: 'ClipGauge Local', group: 'Built in', description: 'Runs scoring on this computer.', detail: 'No API key. Your video stays on this computer while the local engine is ready.', locality: 'local', model: 'clipgauge-local/qwen3-4b-q4_k_m', endpoint: 'http://127.0.0.1:8080/v1', badge: 'Recommended for privacy' },
+  { id: 'clipgauge-local', name: 'ClipGauge Local', group: 'Built in', description: 'Runs scoring on this computer.', detail: 'No API key. Your video stays on this computer while the local engine is ready.', locality: 'local', model: '', endpoint: 'http://127.0.0.1:8080/v1', badge: 'Recommended for privacy' },
   { id: 'openrouter', name: 'OpenRouter Free', group: 'Free-friendly cloud', description: 'Use available free cloud models.', detail: 'Internet required. Availability and limits depend on the current free route.', locality: 'cloud', model: 'openrouter/free', badge: 'Free route available', credential: true },
   { id: 'gemini', name: 'Gemini', group: 'Cloud providers', description: 'Google cloud models for scoring.', detail: 'A Google AI Studio key is required. Credentials are stored in your operating-system vault.', locality: 'cloud', model: 'gemini-flash-latest', credential: true },
   { id: 'groq', name: 'Groq', group: 'Cloud providers', description: 'Fast cloud inference from Groq.', detail: 'Internet required. Add a Groq API key to use this provider.', locality: 'cloud', model: 'openai/gpt-oss-20b', credential: true },
@@ -66,6 +67,7 @@ export default function ProviderCenter({ selectedProvider, onSelectProvider, onB
 
   const active = useMemo(() => PROVIDERS.find((provider) => provider.id === activeId) ?? PROVIDERS[0], [activeId])
   const localReady = Boolean(inventory?.local_ai?.runtime_ready && inventory?.local_ai?.model_ready)
+  const localModelId = selectedLocalModel(inventory)
   const status = statusFor(active, setup, testResult, localReady)
   const savedFromSetup = active.id === 'gemini' ? Boolean(setup?.has_gemini_key) : Boolean(setup?.provider_keys?.[active.id] ?? setup?.provider_keys?.[`preset-${active.id}`])
   const hasSavedCredential = active.credential && (saved || savedFromSetup)
@@ -112,7 +114,7 @@ export default function ProviderCenter({ selectedProvider, onSelectProvider, onB
     setTesting(true)
     setTestResult(null)
     try {
-      const model = active.id === 'custom' ? customModel : active.model
+      const model = active.id === 'custom' ? customModel : active.id === 'clipgauge-local' ? localModelId : active.model
       const endpoint = active.id === 'custom' ? customEndpoint : active.endpoint
       setTestResult(await api.testConnection(active.id, model || undefined, endpoint || undefined, active.credential ? 'bearer' : 'none'))
     } catch (error) {
@@ -157,7 +159,7 @@ export default function ProviderCenter({ selectedProvider, onSelectProvider, onB
           {active.id === 'custom' && <div className="custom-fields"><div className="field-stack"><label htmlFor="custom-endpoint"><Network size={15} aria-hidden="true" /> Endpoint</label><input id="custom-endpoint" value={customEndpoint} onChange={(event) => setCustomEndpoint(event.target.value)} placeholder="https://your-endpoint.example/v1" /></div><div className="field-stack"><label htmlFor="custom-model">Model</label><input id="custom-model" value={customModel} onChange={(event) => setCustomModel(event.target.value)} placeholder="Model name" /></div><div className="field-stack"><label htmlFor="custom-credential">Credential</label><input id="custom-credential" type="password" value={credential} onChange={(event) => setCredential(event.target.value)} placeholder="Stored in your OS vault" autoComplete="off" /><button type="button" className="button button-secondary" onClick={saveCredential} disabled={!credential.trim()}><Save size={15} aria-hidden="true" />Save credential</button>{hasSavedCredential && <button type="button" className="button button-quiet" onClick={removeCredential}>Remove credential</button>}</div></div>}
           <div className="detail-actions">{active.id === 'clipgauge-local' && !localReady ? <button type="button" className="button button-primary" onClick={() => { if (onOpenSetup) onOpenSetup(); else onBack() }}>Set up local AI<ChevronRight size={16} aria-hidden="true" /></button> : <button type="button" className="button button-primary" onClick={testConnection} disabled={testing}>{testing ? 'Testing…' : 'Test connection'}<ChevronRight size={16} aria-hidden="true" /></button>}<button type="button" className="button button-secondary" onClick={() => { onSelectProvider(active.id); onBack() }}>Use for next clip</button></div>
           {testResult && <div className={`result-callout result-${testResult.state.toLowerCase()}`} role="status"><span className="result-icon">{testResult.state === 'PASS' ? <Check size={16} aria-hidden="true" /> : testResult.state === 'FAIL' ? <CircleAlert size={16} aria-hidden="true" /> : <WifiOff size={16} aria-hidden="true" />}</span><span><strong>{testResult.state === 'PASS' ? 'Connection ready' : testResult.state === 'FAIL' ? 'Connection needs attention' : 'Connection has limits'}</strong><small>{testResult.message ?? 'The provider returned no additional details.'}</small></span></div>}
-          <details className="advanced-disclosure"><summary><RotateCcw size={15} aria-hidden="true" /> Advanced settings</summary><div className="technical-grid"><span>Model ID</span><code>{active.id === 'custom' ? customModel || 'not set' : active.model || 'auto'}</code><span>Endpoint</span><code>{active.id === 'custom' ? customEndpoint || 'not set' : active.endpoint || 'provider-managed'}</code><span>Auth</span><code>{active.credential ? 'credential in OS vault' : 'none'}</code></div><p>These values are for troubleshooting and advanced provider configuration. Normal creator actions use the friendly provider name above.</p></details>
+          <details className="advanced-disclosure"><summary><RotateCcw size={15} aria-hidden="true" /> Advanced settings</summary><div className="technical-grid"><span>Model ID</span><code>{active.id === 'custom' ? customModel || 'not set' : active.id === 'clipgauge-local' ? localModelId || 'selected model unavailable' : active.model || 'auto'}</code><span>Endpoint</span><code>{active.id === 'custom' ? customEndpoint || 'not set' : active.endpoint || 'provider-managed'}</code><span>Auth</span><code>{active.credential ? 'credential in OS vault' : 'none'}</code></div><p>These values are for troubleshooting and advanced provider configuration. Normal creator actions use the friendly provider name above.</p></details>
           <div className="privacy-note"><ShieldCheck size={16} aria-hidden="true" /><span><strong>Credential privacy</strong><small>Keys are saved in the operating-system vault and are not written into project files.</small></span></div>
           {active.id === 'openrouter' && <a className="text-link" href="https://openrouter.ai/" target="_blank" rel="noreferrer">Learn about OpenRouter <ExternalLink size={14} aria-hidden="true" /></a>}
         </aside>

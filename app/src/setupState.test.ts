@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { selectedLocalModel, summarizeSetupQueue } from './setupState'
+import { resolveSelectedLocalModel, selectedLocalModel, summarizeSetupQueue } from './setupState'
 
 describe('setup queue aggregation', () => {
   it('reports complete only when every operation succeeds', () => {
@@ -29,5 +29,24 @@ describe('setup queue aggregation', () => {
   it('ignores malformed or non-local inventory model selections', () => {
     expect(selectedLocalModel({ local_ai: { selected_model_id: 'gemini-flash-latest' } })).toBeUndefined()
     expect(selectedLocalModel({ local_ai: null })).toBeUndefined()
+  })
+
+  it('keeps the explicitly chosen model when inventory returns a different server default', () => {
+    const inventory = {
+      local_ai: { selected_model_id: 'clipgauge-local/qwen3-4b-q4_k_m' },
+      models: [
+        { asset_id: 'clipgauge-local/qwen3-1.7b-q8_0' },
+        { asset_id: 'clipgauge-local/qwen3-4b-q4_k_m' }
+      ]
+    }
+    expect(resolveSelectedLocalModel(inventory, 'clipgauge-local/qwen3-1.7b-q8_0')).toBe('clipgauge-local/qwen3-1.7b-q8_0')
+  })
+
+  it('falls back to the persisted verified selection', () => {
+    const inventory = {
+      local_ai: { selected_model_id: 'clipgauge-local/qwen3-1.7b-q8_0' },
+      models: [{ asset_id: 'clipgauge-local/qwen3-1.7b-q8_0' }]
+    }
+    expect(resolveSelectedLocalModel(inventory)).toBe('clipgauge-local/qwen3-1.7b-q8_0')
   })
 })

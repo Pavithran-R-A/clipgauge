@@ -183,6 +183,16 @@ fn quiet_command(program: &str) -> Command {
     cmd
 }
 
+async fn spawn_blocking_result<T, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| diagnostics::redact(&format!("background task failed: {error}")))?
+}
+
 /// Where the Python pipeline lives and how to invoke it.
 /// Dev builds call `uv run` against the repo's pipeline/ directory. Packaged
 /// builds invoke the bundled python env (M6); resolution stays in one place.
@@ -502,11 +512,12 @@ fn generate_support_bundle_at(
 }
 
 #[tauri::command]
-fn generate_support_bundle(
+async fn generate_support_bundle(
     job_id: Option<String>,
     diagnostic_id: Option<String>,
 ) -> Result<String, String> {
-    generate_support_bundle_at(&home_dir(), job_id, diagnostic_id)
+    spawn_blocking_result(move || generate_support_bundle_at(&home_dir(), job_id, diagnostic_id))
+        .await
 }
 
 fn append_provider_args(
@@ -549,7 +560,7 @@ fn append_provider_args(
 }
 
 #[tauri::command]
-fn preflight(
+async fn preflight(
     llm: Option<String>,
     provider: Option<String>,
     model: Option<String>,
@@ -558,43 +569,46 @@ fn preflight(
     secret_header: Option<String>,
     source: Option<String>,
 ) -> Result<Value, String> {
-    let selected_provider = provider.clone();
-    let (program, mut args) = pipeline_invocation();
-    args.push("preflight".to_string());
-    append_provider_args(
-        &mut args,
-        llm,
-        provider,
-        model,
-        endpoint,
-        auth,
-        secret_header,
-    );
-    if let Some(value) = source {
-        args.push("--source".to_string());
-        args.push(value);
-    }
-    let mut command = quiet_command(&program);
-    secrets::apply_operation_env(&mut command);
-    if let Some((env_name, profile_id)) = selected_provider_env(selected_provider.as_deref()) {
-        secrets::apply_provider_operation_env(&mut command, &profile_id, env_name);
-    }
-    let output = command
-        .env("CLIPGAUGE_HOME", home_dir())
-        .args(&args)
-        .output()
-        .map_err(|error| diagnostics::redact(&error.to_string()))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout
-        .lines()
-        .rev()
-        .find(|line| line.trim_start().starts_with('{'))
-        .ok_or_else(|| "preflight returned no JSON result".to_string())?;
-    serde_json::from_str(line).map_err(|error| diagnostics::redact(&error.to_string()))
+    spawn_blocking_result(move || {
+        let selected_provider = provider.clone();
+        let (program, mut args) = pipeline_invocation();
+        args.push("preflight".to_string());
+        append_provider_args(
+            &mut args,
+            llm,
+            provider,
+            model,
+            endpoint,
+            auth,
+            secret_header,
+        );
+        if let Some(value) = source {
+            args.push("--source".to_string());
+            args.push(value);
+        }
+        let mut command = quiet_command(&program);
+        secrets::apply_operation_env(&mut command);
+        if let Some((env_name, profile_id)) = selected_provider_env(selected_provider.as_deref()) {
+            secrets::apply_provider_operation_env(&mut command, &profile_id, env_name);
+        }
+        let output = command
+            .env("CLIPGAUGE_HOME", home_dir())
+            .args(&args)
+            .output()
+            .map_err(|error| diagnostics::redact(&error.to_string()))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let line = stdout
+            .lines()
+            .rev()
+            .find(|line| line.trim_start().starts_with('{'))
+            .ok_or_else(|| "preflight returned no JSON result".to_string())?;
+        serde_json::from_str(line).map_err(|error| diagnostics::redact(&error.to_string()))
+    })
+    .await
 }
 
 #[tauri::command]
-fn test_connection(
+async fn test_connection(
     llm: Option<String>,
     provider: Option<String>,
     model: Option<String>,
@@ -602,35 +616,38 @@ fn test_connection(
     auth: Option<String>,
     secret_header: Option<String>,
 ) -> Result<Value, String> {
-    let selected_provider = provider.clone();
-    let (program, mut args) = pipeline_invocation();
-    args.push("provider-test".to_string());
-    append_provider_args(
-        &mut args,
-        llm,
-        provider,
-        model,
-        endpoint,
-        auth,
-        secret_header,
-    );
-    let mut command = quiet_command(&program);
-    secrets::apply_operation_env(&mut command);
-    if let Some((env_name, profile_id)) = selected_provider_env(selected_provider.as_deref()) {
-        secrets::apply_provider_operation_env(&mut command, &profile_id, env_name);
-    }
-    let output = command
-        .env("CLIPGAUGE_HOME", home_dir())
-        .args(&args)
-        .output()
-        .map_err(|error| diagnostics::redact(&error.to_string()))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout
-        .lines()
-        .rev()
-        .find(|line| line.trim_start().starts_with('{'))
-        .ok_or_else(|| "provider test returned no JSON result".to_string())?;
-    serde_json::from_str(line).map_err(|error| diagnostics::redact(&error.to_string()))
+    spawn_blocking_result(move || {
+        let selected_provider = provider.clone();
+        let (program, mut args) = pipeline_invocation();
+        args.push("provider-test".to_string());
+        append_provider_args(
+            &mut args,
+            llm,
+            provider,
+            model,
+            endpoint,
+            auth,
+            secret_header,
+        );
+        let mut command = quiet_command(&program);
+        secrets::apply_operation_env(&mut command);
+        if let Some((env_name, profile_id)) = selected_provider_env(selected_provider.as_deref()) {
+            secrets::apply_provider_operation_env(&mut command, &profile_id, env_name);
+        }
+        let output = command
+            .env("CLIPGAUGE_HOME", home_dir())
+            .args(&args)
+            .output()
+            .map_err(|error| diagnostics::redact(&error.to_string()))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let line = stdout
+            .lines()
+            .rev()
+            .find(|line| line.trim_start().starts_with('{'))
+            .ok_or_else(|| "provider test returned no JSON result".to_string())?;
+        serde_json::from_str(line).map_err(|error| diagnostics::redact(&error.to_string()))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1021,12 +1038,16 @@ fn cancel_job(state: State<'_, AppState>, job_id: String) -> Result<(), String> 
 }
 
 #[tauri::command]
-fn job_results(job_id: String) -> Result<Value, String> {
-    artifact::job_results(&home_dir(), &job_id)
+async fn job_results(job_id: String) -> Result<Value, String> {
+    spawn_blocking_result(move || artifact::job_results(&home_dir(), &job_id)).await
 }
 
 #[tauri::command]
-fn list_job_dirs() -> Result<Vec<Value>, String> {
+async fn list_job_dirs() -> Result<Vec<Value>, String> {
+    spawn_blocking_result(list_job_dirs_blocking).await
+}
+
+fn list_job_dirs_blocking() -> Result<Vec<Value>, String> {
     let jobs_dir = home_dir().join("jobs");
     let mut out = vec![];
     if let Ok(entries) = fs::read_dir(&jobs_dir) {
@@ -1071,33 +1092,49 @@ fn list_job_dirs() -> Result<Vec<Value>, String> {
 }
 
 #[tauri::command]
-fn save_gemini_key(key: String) -> Result<bool, String> {
-    secrets::set(secrets::SecretName::GeminiApiKey, key.trim())?;
-    Ok(true)
+async fn save_gemini_key(key: String) -> Result<bool, String> {
+    spawn_blocking_result(move || {
+        secrets::set(secrets::SecretName::GeminiApiKey, key.trim())?;
+        Ok(true)
+    })
+    .await
 }
 
 #[tauri::command]
-fn save_provider_key(profile_id: String, key: String) -> Result<bool, String> {
-    let canonical = canonical_provider_id(&profile_id)?;
-    secrets::set_provider_auth(&canonical, key.trim())?;
-    Ok(true)
+async fn save_provider_key(profile_id: String, key: String) -> Result<bool, String> {
+    spawn_blocking_result(move || {
+        let canonical = canonical_provider_id(&profile_id)?;
+        secrets::set_provider_auth(&canonical, key.trim())?;
+        Ok(true)
+    })
+    .await
 }
 
 #[tauri::command]
-fn remove_provider_key(profile_id: String) -> Result<bool, String> {
-    let canonical = canonical_provider_id(&profile_id)?;
-    secrets::delete_provider_auth(&canonical)?;
-    Ok(true)
+async fn remove_provider_key(profile_id: String) -> Result<bool, String> {
+    spawn_blocking_result(move || {
+        let canonical = canonical_provider_id(&profile_id)?;
+        secrets::delete_provider_auth(&canonical)?;
+        Ok(true)
+    })
+    .await
 }
 
 #[tauri::command]
-fn remove_gemini_key() -> Result<bool, String> {
-    secrets::delete(secrets::SecretName::GeminiApiKey)?;
-    Ok(true)
+async fn remove_gemini_key() -> Result<bool, String> {
+    spawn_blocking_result(|| {
+        secrets::delete(secrets::SecretName::GeminiApiKey)?;
+        Ok(true)
+    })
+    .await
 }
 
 #[tauri::command]
-fn get_setup_state() -> Result<Value, String> {
+async fn get_setup_state() -> Result<Value, String> {
+    spawn_blocking_result(get_setup_state_blocking).await
+}
+
+fn get_setup_state_blocking() -> Result<Value, String> {
     let has_key = secrets::get(secrets::SecretName::GeminiApiKey)?.is_some();
     let mut provider_keys = serde_json::Map::new();
     for kind in [
@@ -1117,10 +1154,13 @@ fn get_setup_state() -> Result<Value, String> {
 }
 
 #[tauri::command]
-fn mark_onboarded() -> Result<(), String> {
-    let home = home_dir();
-    fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-    fs::write(home.join("onboarded"), "1").map_err(|e| e.to_string())
+async fn mark_onboarded() -> Result<(), String> {
+    spawn_blocking_result(|| {
+        let home = home_dir();
+        fs::create_dir_all(&home).map_err(|e| e.to_string())?;
+        fs::write(home.join("onboarded"), "1").map_err(|e| e.to_string())
+    })
+    .await
 }
 
 fn loopback_json(path: &str) -> Result<Value, String> {
@@ -1175,28 +1215,31 @@ fn loopback_json(path: &str) -> Result<Value, String> {
 
 #[tauri::command]
 async fn check_ollama() -> Result<Value, String> {
-    let parsed = match loopback_json("/api/tags") {
-        Ok(value) => value,
-        Err(message) => {
-            return Ok(
-                json!({"state": "service-stopped", "running": false, "models": [], "message": message}),
-            )
-        }
-    };
-    let models: Vec<String> = parsed["models"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|m| m["name"].as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let state = if models.is_empty() {
-        "model-missing"
-    } else {
-        "service-healthy"
-    };
-    Ok(json!({"state": state, "running": true, "models": models}))
+    spawn_blocking_result(|| {
+        let parsed = match loopback_json("/api/tags") {
+            Ok(value) => value,
+            Err(message) => {
+                return Ok(
+                    json!({"state": "service-stopped", "running": false, "models": [], "message": message}),
+                )
+            }
+        };
+        let models: Vec<String> = parsed["models"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m["name"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let state = if models.is_empty() {
+            "model-missing"
+        } else {
+            "service-healthy"
+        };
+        Ok(json!({"state": state, "running": true, "models": models}))
+    })
+    .await
 }
 
 fn stream_setup(
@@ -1295,7 +1338,11 @@ fn cancel_setup(state: State<'_, AppState>, operation_id: String) -> Result<(), 
 }
 
 #[tauri::command]
-fn setup_tool(args: Vec<String>) -> Result<Value, String> {
+async fn setup_tool(args: Vec<String>) -> Result<Value, String> {
+    spawn_blocking_result(move || setup_tool_blocking(args)).await
+}
+
+fn setup_tool_blocking(args: Vec<String>) -> Result<Value, String> {
     let valid = matches!(args.as_slice(), [command] if command == "inventory" || command == "youtube-status" || command == "youtube-test" || command == "install-runtime" || command == "install-ffmpeg")
         || matches!(args.as_slice(), [command, flag, model] if command == "inventory" && flag == "--model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
         || matches!(args.as_slice(), [command, group, value] if command == "install-group" && group == "--group" && matches!(value.as_str(), "core:asr" | "core:analysis" | "core:youtube"))
@@ -1348,6 +1395,10 @@ fn setup_tool(args: Vec<String>) -> Result<Value, String> {
 /// instead so progress streams.
 #[tauri::command]
 async fn edit_tool(args: Vec<String>) -> Result<Value, String> {
+    spawn_blocking_result(move || edit_tool_blocking(args)).await
+}
+
+fn edit_tool_blocking(args: Vec<String>) -> Result<Value, String> {
     let (program, base_args) = pipeline_invocation();
     let mut full = base_args;
     full.push("edit".to_string());
@@ -1402,7 +1453,17 @@ fn run_edit_render(
 }
 
 #[tauri::command]
-fn save_clip_edits(job_id: String, input: edit_schema::SaveClipEditsInput) -> Result<(), String> {
+async fn save_clip_edits(
+    job_id: String,
+    input: edit_schema::SaveClipEditsInput,
+) -> Result<(), String> {
+    spawn_blocking_result(move || save_clip_edits_blocking(job_id, input)).await
+}
+
+fn save_clip_edits_blocking(
+    job_id: String,
+    input: edit_schema::SaveClipEditsInput,
+) -> Result<(), String> {
     let dir = validate_job_id(&job_id)?;
     let score_path = dir.join("score.json");
     let score: Value = serde_json::from_str(
@@ -1435,13 +1496,20 @@ fn save_clip_edits(job_id: String, input: edit_schema::SaveClipEditsInput) -> Re
 }
 
 #[tauri::command]
-fn save_pexels_key(key: String) -> Result<bool, String> {
-    secrets::set(secrets::SecretName::PexelsApiKey, key.trim())?;
-    Ok(true)
+async fn save_pexels_key(key: String) -> Result<bool, String> {
+    spawn_blocking_result(move || {
+        secrets::set(secrets::SecretName::PexelsApiKey, key.trim())?;
+        Ok(true)
+    })
+    .await
 }
 
 #[tauri::command]
-fn ig_status() -> Result<Value, String> {
+async fn ig_status() -> Result<Value, String> {
+    spawn_blocking_result(ig_status_blocking).await
+}
+
+fn ig_status_blocking() -> Result<Value, String> {
     let connected = secrets::get(secrets::SecretName::InstagramConnection)?
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
     match connected {
@@ -1487,6 +1555,10 @@ fn ig_failure_message(stderr: &str, stdout: &str, exit_code: Option<i32>) -> Str
 /// browser" state until this returns.
 #[tauri::command]
 async fn ig_connect(app_id: String, app_secret: String) -> Result<String, String> {
+    spawn_blocking_result(move || ig_connect_blocking(app_id, app_secret)).await
+}
+
+fn ig_connect_blocking(app_id: String, app_secret: String) -> Result<String, String> {
     let (program, base_args) = pipeline_invocation();
     let args = ig_connect_args(base_args, app_id);
     let connection_output = home_dir().join(format!(
@@ -1531,6 +1603,10 @@ async fn ig_connect(app_id: String, app_secret: String) -> Result<String, String
 /// (sync / overview / link / unlink / reject — same contract as edit_tool).
 #[tauri::command]
 async fn ig_tool(args: Vec<String>) -> Result<Value, String> {
+    spawn_blocking_result(move || ig_tool_blocking(args)).await
+}
+
+fn ig_tool_blocking(args: Vec<String>) -> Result<Value, String> {
     let (program, base_args) = pipeline_invocation();
     let mut full = base_args;
     full.push("ig".to_string());
@@ -1607,29 +1683,36 @@ fn record_media_event(input: Value) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn request_playback_url(
+async fn request_playback_url(
     state: State<'_, AppState>,
     job_id: String,
     artifact_type: String,
     clip: Option<u32>,
 ) -> Result<String, String> {
-    let path = match artifact_type.as_str() {
-        "render" => artifact::render_artifact(&home_dir(), &job_id, clip.unwrap_or(0))?,
-        "source" => artifact::source_media_artifact(&home_dir(), &job_id)?,
-        _ => return Err("unsupported playback artifact".into()),
-    };
-    state.media.authorize(path)
+    let media = state.media.clone();
+    spawn_blocking_result(move || {
+        let path = match artifact_type.as_str() {
+            "render" => artifact::render_artifact(&home_dir(), &job_id, clip.unwrap_or(0))?,
+            "source" => artifact::source_media_artifact(&home_dir(), &job_id)?,
+            _ => return Err("unsupported playback artifact".into()),
+        };
+        media.authorize(path)
+    })
+    .await
 }
 
 #[tauri::command]
-fn export_clip(job_id: String, clip: u32, title: Option<String>) -> Result<String, String> {
-    artifact::export_clip(
-        &home_dir(),
-        &dirs_home().join("Downloads"),
-        &job_id,
-        clip,
-        title,
-    )
+async fn export_clip(job_id: String, clip: u32, title: Option<String>) -> Result<String, String> {
+    spawn_blocking_result(move || {
+        artifact::export_clip(
+            &home_dir(),
+            &dirs_home().join("Downloads"),
+            &job_id,
+            clip,
+            title,
+        )
+    })
+    .await
 }
 
 #[cfg(target_os = "windows")]
@@ -1710,15 +1793,36 @@ fn main() {
 mod tests {
     use std::fs;
     use std::io::Read;
+    use std::thread;
 
     #[cfg(target_os = "linux")]
     use super::packaged_resource_dir;
     use super::{
         canonical_provider_id, generate_support_bundle_at, ig_connect_args, ig_failure_message,
-        is_completion_payload, migrate_legacy_data_from, selected_provider_env, ResumeJobRequest,
-        RunJobRequest,
+        is_completion_payload, migrate_legacy_data_from, selected_provider_env,
+        spawn_blocking_result, ResumeJobRequest, RunJobRequest,
     };
     use serde_json::json;
+
+    #[test]
+    fn blocking_bridge_helper_runs_work_on_a_worker_thread() {
+        let caller = thread::current().id();
+        let worker = tauri::async_runtime::block_on(spawn_blocking_result(|| {
+            Ok::<_, String>(thread::current().id())
+        }))
+        .unwrap();
+
+        assert_ne!(worker, caller);
+    }
+
+    #[test]
+    fn blocking_bridge_helper_preserves_worker_errors() {
+        let result = tauri::async_runtime::block_on(spawn_blocking_result(|| {
+            Err::<(), _>("worker failed".to_string())
+        }));
+
+        assert_eq!(result, Err("worker failed".to_string()));
+    }
 
     #[test]
     fn canonical_provider_ids_are_stable_for_bare_and_preset_forms() {

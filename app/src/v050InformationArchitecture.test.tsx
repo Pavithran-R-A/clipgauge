@@ -7,6 +7,7 @@ import SetupCenter from './components/SetupCenter'
 const mocks = vi.hoisted(() => ({
   setupState: vi.fn(),
   setupInventory: vi.fn(),
+  youtubeReadiness: vi.fn(),
   startSetup: vi.fn(),
   cancelSetup: vi.fn(),
   saveProviderKey: vi.fn(),
@@ -40,6 +41,7 @@ beforeEach(() => {
     storage: { required_bytes: 1800000000, installed_bytes: 1000000, available_bytes: null, assets: [], consent_required: true },
     catalog: []
   })
+  mocks.youtubeReadiness.mockResolvedValue({ state: 'DEPENDENCIES_READY', ready: true, public_download_verified: false, reason: 'YouTube tools are ready.', actions: ['Test'], checks: [] })
   mocks.listen.mockResolvedValue(() => undefined)
 })
 
@@ -122,6 +124,45 @@ describe('v0.5 information architecture', () => {
     mocks.testConnection.mockResolvedValue({ state: 'FAIL', provider: 'gemini', message: 'Rejected.' })
     await userEvent.click(screen.getByRole('button', { name: /Test connection/i }))
     expect((await screen.findAllByText('Connection failed')).length).toBeGreaterThan(0)
+  })
+
+  it('tests the exact selected local model identity', async () => {
+    mocks.setupInventory.mockResolvedValue({
+      local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/light' },
+      models: [
+        { asset_id: 'clipgauge-local/light', display_name: 'Lightweight', size_bytes: 1 },
+        { asset_id: 'clipgauge-local/balanced', display_name: 'Balanced', size_bytes: 2 }
+      ]
+    })
+    mocks.testConnection.mockResolvedValue({ state: 'PASS', provider: 'clipgauge-local', message: 'Verified.' })
+    render(<ProviderCenter selectedProvider="clipgauge-local" onSelectProvider={vi.fn()} onBack={vi.fn()} />)
+    await userEvent.click(await screen.findByRole('button', { name: /Test connection/i }))
+    await waitFor(() => expect(mocks.testConnection).toHaveBeenCalledWith('clipgauge-local', 'clipgauge-local/light', 'http://127.0.0.1:8080/v1', 'none'))
+  })
+
+  it('keeps YouTube installation explicit and separate from core readiness', async () => {
+    mocks.setupInventory.mockResolvedValue({
+      state: 'ready',
+      video_tools: { ready: true, source: 'system', managed_download_needed: false },
+      local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/light' },
+      models: [{ asset_id: 'clipgauge-local/light', display_name: 'Lightweight', size_bytes: 1 }],
+      managed_assets: [
+        { asset_id: 'model:asr:test', display_name: 'Speech', purpose: 'Speech recognition', size_bytes: 1, installed: true, license: 'MIT' },
+        { asset_id: 'model:panns:test', display_name: 'Audio analysis', purpose: 'Audio analysis', size_bytes: 1, installed: true, license: 'MIT' }
+      ],
+      runtime: { installed: true },
+      core_assets: [],
+      storage: { required_bytes: 0, installed_bytes: 1, available_bytes: null, assets: [], consent_required: false },
+      catalog: []
+    })
+    mocks.youtubeReadiness.mockResolvedValue({ state: 'NOT_INSTALLED', ready: false, reason: 'Install the verified YouTube runtime before testing public links.', actions: ['Install'], checks: [] })
+    mocks.startSetup.mockResolvedValue('setup:test-youtube')
+    render(<SetupCenter onBack={vi.fn()} />)
+    expect(await screen.findByText(/Install the verified YouTube runtime/i)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Ready to create clips' })).toBeInTheDocument()
+    await userEvent.click(screen.getByLabelText(/I approve YouTube support installation/i))
+    await userEvent.click(screen.getByRole('button', { name: 'Install YouTube support' }))
+    await waitFor(() => expect(mocks.startSetup).toHaveBeenCalledWith(['install-group', '--group', 'core:youtube']))
   })
 
   it('keeps the original failed component retryable when a later queued component succeeds', async () => {
