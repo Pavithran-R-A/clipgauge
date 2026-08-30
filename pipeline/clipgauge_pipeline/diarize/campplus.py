@@ -15,6 +15,7 @@ import numpy as np
 import torch
 
 from ..vendor.campplus.dtdnn import CAMPPlus
+from ..models import registry, specs
 
 EMBED_DIM = 192
 WINDOW_SEC = 1.5
@@ -24,7 +25,8 @@ MIN_WINDOW_SEC = 0.5
 
 def load_model(checkpoint_path: str, device: torch.device) -> CAMPPlus:
     model = CAMPPlus(feat_dim=80, embedding_size=EMBED_DIM)
-    state = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    verified_path = registry.require_verified_model(specs.CAMPPLUS, checkpoint_path)
+    state = torch.load(verified_path, map_location=device, weights_only=True)
     model.load_state_dict(state, strict=True)
     model.to(device)
     model.eval()

@@ -9,7 +9,6 @@ only selected clips need it (computed on-demand in M4).
 
 from __future__ import annotations
 
-import librosa
 import numpy as np
 
 GRID_SEC = 0.1  # 100 ms analysis grid shared by all curve consumers
@@ -22,8 +21,11 @@ def energy_curves(y16k: np.ndarray, sr: int = 16000) -> dict:
     flat delivery scores 0, punchy delivery spikes)."""
     hop = int(sr * GRID_SEC)
     frame = hop * 2
-    rms = librosa.feature.rms(y=y16k, frame_length=frame, hop_length=hop)[0]
-    stft = np.abs(librosa.stft(y=y16k, n_fft=frame, hop_length=hop))
+    padded = np.pad(np.asarray(y16k, dtype=np.float32), (frame // 2, frame // 2))
+    frames = np.lib.stride_tricks.sliding_window_view(padded, frame)[::hop]
+    rms = np.sqrt(np.mean(frames * frames, axis=1))
+    window = np.hanning(frame).astype(np.float32)
+    stft = np.abs(np.fft.rfft(frames * window, axis=1)).T
     flux = np.sqrt(np.mean(np.diff(stft, axis=1, prepend=stft[:, :1]) ** 2, axis=0))
     flux = flux[: len(rms)]
 

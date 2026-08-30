@@ -2,6 +2,24 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.4] — 2026-08-30
+
+ClipGauge v0.5.4 closes the Windows release-candidate repair and qualification work.
+
+### Fixed
+
+- Removed application-owned Windows resources during uninstall while preserving user data.
+- Added run-scoped qualification vaults and verified native responsive/DPI evidence.
+- Hardened managed model loading with identity, size, hash, metadata, and local-only checks.
+- Added CPU fallback messaging when accelerator speech execution fails.
+- Replaced the fragile DSP librosa path with deterministic audio helpers.
+
+### Validation
+
+- Added deterministic installer, vault, model-boundary, DPI, and creator-lifecycle checks.
+- Recorded the remaining Python advisories with per-finding VEX evidence.
+- Linux, Windows, and macOS candidate CI remain required before publication.
+
 ## [0.5.3] — 2026-08-25
 
 ClipGauge v0.5.3 is a real-device UX and readiness repair. It keeps the deep-ocean creator workflow while making responsive containment, optional local-AI state, YouTube support, provider copy, and terminal run status explicit and truthful.

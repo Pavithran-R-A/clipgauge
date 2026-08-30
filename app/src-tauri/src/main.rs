@@ -183,6 +183,11 @@ fn quiet_command(program: &str) -> Command {
     cmd
 }
 
+#[tauri::command]
+fn vault_scope() -> &'static str {
+    secrets::namespace_kind()
+}
+
 async fn spawn_blocking_result<T, F>(work: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -1729,7 +1734,9 @@ fn main() {
         if std::env::var_os("CLIPGAUGE_QA_WEBVIEW2_CDP").is_some() {
             let mut context = context;
             if let Some(window) = context.config_mut().app.windows.first_mut() {
-                window.additional_browser_args = Some("--remote-debugging-port=9222".to_string());
+                let port = std::env::var("CLIPGAUGE_QA_WEBVIEW2_PORT")
+                    .unwrap_or_else(|_| "9222".to_string());
+                window.additional_browser_args = Some(format!("--remote-debugging-port={port}"));
             }
             context
         } else {
@@ -1758,6 +1765,7 @@ fn main() {
             save_provider_key,
             remove_provider_key,
             remove_gemini_key,
+            vault_scope,
             get_setup_state,
             mark_onboarded,
             check_ollama,

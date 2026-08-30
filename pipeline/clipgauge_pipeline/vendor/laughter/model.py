@@ -15,6 +15,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ...models import registry, specs
+
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, stride: int = 1):
@@ -94,7 +96,8 @@ class ResNetBigger(nn.Module):
 
 def load_model(checkpoint_path: str, device: torch.device) -> ResNetBigger:
     model = ResNetBigger(dropout_rate=0.0, linear_layer_size=128, filter_sizes=[128, 64, 32, 32])
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    verified_path = registry.require_verified_model(specs.LAUGHTER, checkpoint_path)
+    checkpoint = torch.load(verified_path, map_location=device, weights_only=True)
     state = checkpoint.get("state_dict", checkpoint)
     model.load_state_dict(state, strict=True)
     model.to(device)

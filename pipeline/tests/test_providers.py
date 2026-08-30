@@ -219,7 +219,7 @@ def test_clipgauge_local_runtime_command_is_loopback_only(monkeypatch, tmp_path)
     binary.write_text("binary")
     model.write_text("model")
     monkeypatch.setattr(manager, "binary_path", lambda: binary)
-    monkeypatch.setattr(manager, "model_path", lambda _model_id: model)
+    monkeypatch.setattr(manager, "verified_model_path", lambda _model_id: model)
     command = manager.command("clipgauge-local/qwen3-4b-q4_k_m", 43210)
     assert command[command.index("--host") + 1] == "127.0.0.1"
     assert command[command.index("--port") + 1] == "43210"

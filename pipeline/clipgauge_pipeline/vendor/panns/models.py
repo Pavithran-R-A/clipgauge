@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchlibrosa.stft import LogmelFilterBank, Spectrogram
+from ...models import registry, specs
 
 SAMPLE_RATE = 32000
 WINDOW_SIZE = 1024
@@ -169,7 +170,8 @@ class Cnn14_DecisionLevelMax(nn.Module):
 
 def load_model(checkpoint_path: str, device: torch.device) -> Cnn14_DecisionLevelMax:
     model = Cnn14_DecisionLevelMax()
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    verified_path = registry.require_verified_model(specs.PANNS_CNN14_MAX, checkpoint_path)
+    checkpoint = torch.load(verified_path, map_location=device, weights_only=True)
     model.load_state_dict(checkpoint["model"], strict=False)
     model.to(device)
     model.eval()

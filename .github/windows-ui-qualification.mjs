@@ -4,6 +4,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
 import { parseWinAppJsonText } from './windows-ui-json.mjs'
+import { isLocalAiActionLabel, isLocalAiHeading, isSetupReadyLabel, isSetupReuseLabel } from './windows-ui-evidence-contract.mjs'
 const args = new Map()
 for (let index = 2; index < process.argv.length; index += 2) args.set(process.argv[index].replace(/^--/, ''), process.argv[index + 1])
 const state = args.get('state')
@@ -42,6 +43,38 @@ async function visible(locator, label) {
   await locator.waitFor({ state: 'visible', timeout: 120_000 })
   if (!(await locator.isVisible())) throw new Error(`${label} was not visible`)
   return locator
+}
+
+async function setLogicalSize(page) {
+  try {
+    await page.waitForFunction(({ width, height }) => window.innerWidth === width && window.innerHeight === height, { width: targetWidth, height: targetHeight }, { timeout: 30_000 })
+  } catch (error) {
+    const viewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio }))
+    throw new Error(`logical viewport mismatch: expected ${targetWidth}x${targetHeight}, observed ${JSON.stringify(viewport)}`, { cause: error })
+  }
+}
+
+async function collectDisplayFacts(page) {
+  return await page.evaluate(async ({ width, height }) => {
+    const invoke = window.__TAURI_INTERNALS__?.invoke
+    if (typeof invoke !== 'function') throw new Error('Tauri invoke unavailable for display facts')
+    const [inner, outer, scale] = await Promise.all([
+      invoke('plugin:window|inner_size', { label: 'main' }),
+      invoke('plugin:window|outer_size', { label: 'main' }),
+      invoke('plugin:window|scale_factor', { label: 'main' }),
+    ])
+    return {
+      requested_logical_size: { width, height },
+      css_viewport: { width: window.innerWidth, height: window.innerHeight },
+      document_client: { width: document.documentElement.clientWidth, height: document.documentElement.clientHeight },
+      actual_native_inner_size: { width: Number(inner.width), height: Number(inner.height) },
+      actual_native_outer_size: { width: Number(outer.width), height: Number(outer.height) },
+      tauri_scale_factor: Number(scale),
+      device_pixel_ratio: window.devicePixelRatio,
+      screen: { width: window.screen.width, height: window.screen.height },
+      available_screen: { width: window.screen.availWidth, height: window.screen.availHeight },
+    }
+  }, { width: targetWidth, height: targetHeight })
 }
 
 async function text(page, value, label = value) {
@@ -225,8 +258,10 @@ async function setupState(page) {
     const bodyText = (await page.locator('.setup-page').innerText()).replaceAll(sentinel, '[REDACTED]')
     throw new Error(`Setup is not ready: ${headingText}; page=${bodyText.slice(0, 2400)}`)
   }
-  await text(page, 'Ready · System', 'system-ready marker')
-  await text(page, 'System component reused', 'system reuse marker')
+  const readyLabels = (await page.locator('.status-pill').allTextContents()).map((value) => value.trim())
+  if (!readyLabels.some(isSetupReadyLabel)) throw new Error(`setup ready marker missing: ${JSON.stringify(readyLabels)}`)
+  const reuseLabels = (await page.locator('.reuse-note').allTextContents()).map((value) => value.trim())
+  if (!reuseLabels.some(isSetupReuseLabel)) throw new Error(`setup reuse marker missing: ${JSON.stringify(reuseLabels)}`)
   await text(page, 'Core components are ready.', 'core setup completion marker')
   await capture(`setup-${suffix}`)
 }
@@ -250,10 +285,13 @@ async function localState(page) {
   await visible(page.getByRole('heading', { name: 'Choose one model', exact: true }), 'local model choices heading')
   const choices = page.locator('input[name="local-model"]:checked')
   if (await choices.count() !== 1) throw new Error(`expected exactly one selected local model, found ${await choices.count()}`)
-  const action = page.getByRole('button', { name: 'Install ClipGauge Local', exact: true })
+  const action = page.getByRole('button', { name: /^(Install|Use) ClipGauge Local$/ }).first()
   await action.scrollIntoViewIfNeeded()
   await visible(action, 'Install ClipGauge Local action')
-  await text(page, 'Run scoring locally', 'local scoring heading')
+  if (!isLocalAiActionLabel((await action.innerText()).trim())) throw new Error('unexpected Local AI action label')
+  const localHeading = page.getByRole('heading', { name: /^(Run scoring locally|ClipGauge Local is ready)$/ }).first()
+  await visible(localHeading, 'local scoring heading')
+  if (!isLocalAiHeading((await localHeading.innerText()).trim())) throw new Error('unexpected Local AI heading')
   await capture(`local-ai-${suffix}`)
 }
 
@@ -282,6 +320,8 @@ async function openRouterSaved(page) {
 }
 
 async function openRouterConnected(page) {
+  await clickNav(page, 'AI Providers')
+  await clickProvider(page, 'OpenRouter Free')
   await page.getByRole('button', { name: 'Test connection', exact: true }).click()
   await text(page, 'Connected', 'OpenRouter connected state')
   const body = await page.locator('body').innerText()
@@ -457,16 +497,27 @@ async function removalConfirmation(page) {
   writeFileSync(`${outputDir}/credential-removal-confirmation-${suffix}.json`, `${JSON.stringify(metadata, null, 2)}\n`)
 }
 
-async function removeOpenRouter(page) {
+async function verifyOpenRouterRemoved(page) {
+  await clickNav(page, 'AI Providers')
   await clickProvider(page, 'OpenRouter Free')
-  await page.getByRole('button', { name: 'Remove', exact: true }).click()
   await text(page, 'Not configured', 'OpenRouter post-removal state')
+  const removeButton = page.getByRole('button', { name: 'Remove', exact: true })
+  if (await removeButton.count() > 0 && await removeButton.first().isVisible()) throw new Error('OpenRouter removal action remained after restart')
 }
 
 const { browser, page } = await connect()
 try {
   page.setDefaultTimeout(120_000)
   await visible(page.getByRole('button', { name: 'Setup & Storage', exact: true }).first(), 'application navigation')
+  const vaultScope = await page.evaluate(async () => {
+    const invoke = window.__TAURI_INTERNALS__?.invoke
+    if (typeof invoke !== 'function') throw new Error('Tauri invoke unavailable for vault scope')
+    return await invoke('vault_scope')
+  })
+  if (vaultScope !== 'qualification') throw new Error(`qualification build required, got ${String(vaultScope)}`)
+  await setLogicalSize(page)
+  const displayFacts = await collectDisplayFacts(page)
+  writeFileSync(`${outputDir}/display-${state}-${suffix}.json`, `${JSON.stringify(displayFacts, null, 2)}\n`)
   if (state === 'setup') await setupState(page)
   else if (state === 'create') await createState(page)
   else if (state === 'create-hostile') await createState(page, true)
@@ -478,7 +529,7 @@ try {
   else if (state === 'openrouter-connected') await openRouterConnected(page)
   else if (state === 'gemini-saved-unverified') await geminiSaved(page)
   else if (state === 'credential-removal-confirmation') await removalConfirmation(page)
-  else if (state === 'openrouter-remove') await removeOpenRouter(page)
+  else if (state === 'openrouter-remove') await verifyOpenRouterRemoved(page)
   else throw new Error(`unknown state: ${state}`)
   console.log(`STATE_ASSERTION_PASS ${state} ${suffix}`)
 } finally {

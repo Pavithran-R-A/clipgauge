@@ -159,6 +159,21 @@ class LocalRuntime:
             raise LocalRuntimeError("managed model path escapes the ClipGauge model root")
         return path
 
+    def verified_model_path(self, model_id: str) -> Path:
+        """Return a catalog model only after size and hash verification."""
+        try:
+            model = MODEL_CATALOG[model_id]
+        except KeyError as exc:
+            raise LocalRuntimeError("The selected ClipGauge Local model is not in the verified catalog.") from exc
+        path = self.model_path(model_id)
+        if not path.is_file():
+            raise runtime.RuntimeIntegrityError("managed local model is missing")
+        if path.stat().st_size != model.size_bytes:
+            raise runtime.RuntimeIntegrityError("managed local model size mismatch")
+        if runtime.sha256_file(path).lower() != model.sha256.lower():
+            raise runtime.RuntimeIntegrityError("managed local model hash mismatch")
+        return path
+
     def install_runtime(self, archive: Path) -> Path:
         asset = self.runtime_asset()
         if runtime.sha256_file(archive).lower() != str(asset["sha256"]).lower():
@@ -187,11 +202,14 @@ class LocalRuntime:
 
     def command(self, model_id: str, port: int) -> list[str]:
         binary = self.binary_path()
-        model = self.model_path(model_id)
         if not binary.is_file():
             raise LocalRuntimeError("ClipGauge Local runtime is not installed. Open Setup Center to install it.")
-        if not model.is_file():
-            raise LocalRuntimeError("The selected ClipGauge Local model is not installed. Open Setup Center to download it.")
+        try:
+            model = self.verified_model_path(model_id)
+        except runtime.RuntimeIntegrityError as exc:
+            raise LocalRuntimeError(
+                "The selected ClipGauge Local model failed verification. Delete it and retry the verified download."
+            ) from exc
         return [
             str(binary),
             "--model",

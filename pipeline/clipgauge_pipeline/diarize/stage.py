@@ -54,10 +54,10 @@ class DiarizeStage(Stage):
                 retryable=True,
             ) from exc
 
-        import librosa
+        from ..audio.io import load_mono
 
         try:
-            y16k, _ = librosa.load(str(audio_path), sr=16000, mono=True)
+            y16k, _ = load_mono(audio_path, 16000)
             duration = len(y16k) / 16000.0
         except Exception as exc:  # noqa: BLE001 - audio boundary is intentionally typed
             raise StageError(

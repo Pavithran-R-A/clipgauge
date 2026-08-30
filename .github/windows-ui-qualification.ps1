@@ -9,18 +9,38 @@ New-Item -ItemType Directory -Force $OutputDir | Out-Null
 $winapp = (Get-Command winapp -ErrorAction Stop).Source
 $appName = [System.IO.Path]::GetFileNameWithoutExtension($AppPath)
 $proc = $null
+$qualificationRunId = [Guid]::NewGuid().ToString('N')
+$qualificationService = "io.github.pavithranra.clipgauge.qualification.$qualificationRunId"
+$qaPort = 9222
+while (Get-NetTCPConnection -LocalPort $qaPort -State Listen -ErrorAction SilentlyContinue) { $qaPort += 1 }
+
+function Remove-QualificationCredential {
+  param([Parameter(Mandatory = $true)] [string] $Account)
+  $target = "$Account.$qualificationService"
+  & cmdkey.exe "/delete:$target" | Out-Null
+  if ($LASTEXITCODE -notin @(0, 1)) { throw "qualification credential cleanup failed: $target ($LASTEXITCODE)" }
+}
 
 function Seed-HostileSessions {
-  $jobs = Join-Path $env:CLIPGAUGE_HOME 'jobs'
+  $jobs = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.clipgauge\jobs'
   New-Item -ItemType Directory -Force $jobs | Out-Null
   $records = @(
-    @{ id = '20260825-120001-a1b2c3'; title = 'How I Tricked The Internet - MrBeast 2 (1080p, h264) — extremely long session title designed to prove sidebar containment across a real packaged Windows WebView' },
-    @{ id = '20260825-120002-d4e5f6'; title = 'Unicode — 这是一个非常长的会话标题 — café — العربية — русский — emoji-safe filename continuation for containment' }
+    @{ id = '20990830-120001-a1b2c3'; title = 'How I Tricked The Internet - MrBeast 2' },
+    @{ id = '20990830-120002-d4e5f6'; title = 'Unicode session title for containment' }
   )
   foreach ($record in $records) {
     $dir = Join-Path $jobs $record.id
     New-Item -ItemType Directory -Force $dir | Out-Null
-    @{ data = @{ title = $record.title } } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 (Join-Path $dir 'ingest.json')
+    $payload = @{ stage = 'ingest'; schema_version = 1; created_at = 0; data = @{ title = $record.title } } | ConvertTo-Json -Depth 5
+    [IO.File]::WriteAllText((Join-Path $dir 'ingest.json'), $payload, [Text.UTF8Encoding]::new($false))
+  }
+}
+
+function Remove-HostileSessions {
+  $jobs = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.clipgauge\jobs'
+  foreach ($id in @('20990830-120001-a1b2c3', '20990830-120002-d4e5f6', '20260825-120001-a1b2c3', '20260825-120002-d4e5f6')) {
+    $path = Join-Path $jobs $id
+    if (Test-Path -LiteralPath $path) { [IO.Directory]::Delete($path, $true) }
   }
 }
 
@@ -67,7 +87,8 @@ function Validate-NativeDialogEvidence {
   param([Parameter(Mandatory = $true)] [string] $State, [Parameter(Mandatory = $true)] [string] $Suffix, [Parameter(Mandatory = $true)] [int] $Width, [Parameter(Mandatory = $true)] [int] $Height, [Parameter(Mandatory = $true)] [string] $OwnerPath)
   $dialogPath = Join-Path $OutputDir "$State-dialog-$Suffix.png"
   $metadataPath = Join-Path $OutputDir "$State-$Suffix.json"
-  $ownerFacts = Validate-Image $OwnerPath $Width $Height
+  $ownerFacts = Get-ImageFacts $OwnerPath
+  if (-not $ownerFacts.nonuniform) { throw "owner screenshot is blank or near-uniform: $OwnerPath" }
   $dialogFacts = Get-ImageFacts $dialogPath
   if ($dialogFacts.width -le 0 -or $dialogFacts.height -le 0 -or $dialogFacts.width -gt 4096 -or $dialogFacts.height -gt 4096) { throw "native dialog screenshot dimensions are implausible: $($dialogFacts.width)x$($dialogFacts.height)" }
   if (-not $dialogFacts.nonuniform) { throw "native dialog screenshot is blank or near-uniform: $dialogPath" }
@@ -94,49 +115,171 @@ function Validate-NativeDialogEvidence {
 
 function Hash-File([string] $Path) { return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant() }
 
-function Size-Window([int] $Width, [int] $Height) {
-  Add-Type @"
+Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-public static class ClipGaugeWindowSize {
+public static class ClipGaugeNativeDisplay {
   [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left; public int Top; public int Right; public int Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct Point { public int X; public int Y; }
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] public struct MonitorInfo {
+    public int cbSize;
+    public Rect rcMonitor;
+    public Rect rcWork;
+    public uint dwFlags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string szDevice;
+  }
   [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out Rect rect);
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hWnd, out Rect rect);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hWnd, ref Point point);
+  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint flags);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MonitorInfo info);
+  [DllImport("user32.dll")] public static extern IntPtr GetWindowDpiAwarenessContext(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern int GetAwarenessFromDpiAwarenessContext(IntPtr value);
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hWnd, uint attribute, out Rect value, int size);
 }
+
 "@
-  $handle = [IntPtr]$proc.MainWindowHandle
-  $probe = Join-Path $OutputDir '.window-size-probe.png'
-  $windowWidth = $Width
-  $windowHeight = $Height
-  for ($attempt = 1; $attempt -le 4; $attempt++) {
-    [ClipGaugeWindowSize]::MoveWindow($handle, 0, 0, $windowWidth, $windowHeight, $true) | Out-Null
-    [ClipGaugeWindowSize]::SetForegroundWindow($handle) | Out-Null
-    Start-Sleep -Milliseconds 700
-    Remove-Item -Force -ErrorAction SilentlyContinue $probe
-    & $winapp ui screenshot -w "$($handle.ToInt64())" --output $probe | Out-Null
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $probe)) { continue }
-    Add-Type -AssemblyName System.Drawing
-    $bmp = [System.Drawing.Bitmap]::new($probe)
-    try {
-      $actualWidth = $bmp.Width
-      $actualHeight = $bmp.Height
-    } finally { $bmp.Dispose() }
-    if ($actualWidth -eq $Width -and $actualHeight -eq $Height) { break }
-    $windowWidth += $Width - $actualWidth
-    $windowHeight += $Height - $actualHeight
+function Convert-NativeRect($Rect) {
+  return [ordered]@{
+    left = [int]$Rect.Left
+    top = [int]$Rect.Top
+    right = [int]$Rect.Right
+    bottom = [int]$Rect.Bottom
+    width = [int]($Rect.Right - $Rect.Left)
+    height = [int]($Rect.Bottom - $Rect.Top)
   }
-  Remove-Item -Force -ErrorAction SilentlyContinue $probe
-  [ClipGaugeWindowSize]::SetForegroundWindow($handle) | Out-Null
-  Start-Sleep -Milliseconds 500
+}
+
+function Get-DpiAwarenessLabel([int] $Value) {
+  switch ($Value) {
+    0 { return 'unaware' }
+    1 { return 'system' }
+    2 { return 'per-monitor' }
+    default { return 'invalid' }
+  }
+}
+
+function Get-NativeWindowFacts([IntPtr] $Handle) {
+  [ClipGaugeNativeDisplay]::SetThreadDpiAwarenessContext([IntPtr](-4)) | Out-Null
+  $window = New-Object ClipGaugeNativeDisplay+Rect
+  $client = New-Object ClipGaugeNativeDisplay+Rect
+  $origin = New-Object ClipGaugeNativeDisplay+Point
+  $extended = New-Object ClipGaugeNativeDisplay+Rect
+  $monitorInfo = New-Object ClipGaugeNativeDisplay+MonitorInfo
+  $monitorInfo.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($monitorInfo)
+  if (-not [ClipGaugeNativeDisplay]::GetWindowRect($Handle, [ref]$window)) { throw 'GetWindowRect failed' }
+  if (-not [ClipGaugeNativeDisplay]::GetClientRect($Handle, [ref]$client)) { throw 'GetClientRect failed' }
+  if (-not [ClipGaugeNativeDisplay]::ClientToScreen($Handle, [ref]$origin)) { throw 'ClientToScreen failed' }
+  $monitor = [ClipGaugeNativeDisplay]::MonitorFromWindow($Handle, 2)
+  if ($monitor -eq [IntPtr]::Zero -or -not [ClipGaugeNativeDisplay]::GetMonitorInfo($monitor, [ref]$monitorInfo)) { throw 'GetMonitorInfo failed' }
+  $dwmResult = [ClipGaugeNativeDisplay]::DwmGetWindowAttribute($Handle, 9, [ref]$extended, [Runtime.InteropServices.Marshal]::SizeOf($extended))
+  if ($dwmResult -ne 0) { $extended = $window }
+  $dpi = [ClipGaugeNativeDisplay]::GetDpiForWindow($Handle)
+  $awareness = [ClipGaugeNativeDisplay]::GetAwarenessFromDpiAwarenessContext([ClipGaugeNativeDisplay]::GetWindowDpiAwarenessContext($Handle))
+  return [ordered]@{
+    dpi_for_window = [int]$dpi
+    dpi_awareness = Get-DpiAwarenessLabel $awareness
+    dpi_awareness_value = [int]$awareness
+    window_rect = Convert-NativeRect $window
+    native_client_rect = Convert-NativeRect $client
+    client_origin_screen = [ordered]@{ x = [int]$origin.X; y = [int]$origin.Y }
+    dwm_extended_frame_bounds = Convert-NativeRect $extended
+    monitor_physical_rect = Convert-NativeRect $monitorInfo.rcMonitor
+    monitor_work_area = Convert-NativeRect $monitorInfo.rcWork
+  }
+}
+
+function Set-LogicalWindowSize {
+  param([Parameter(Mandatory = $true)] [int] $Width, [Parameter(Mandatory = $true)] [int] $Height)
+  $handle = [IntPtr]::Zero
+  $facts = $null
+  $readyDeadline = (Get-Date).AddSeconds(30)
+  while ((Get-Date) -lt $readyDeadline) {
+    $proc.Refresh()
+    $handle = [IntPtr]$proc.MainWindowHandle
+    if ($handle -eq [IntPtr]::Zero) {
+      Start-Sleep -Milliseconds 250
+      continue
+    }
+    try { $facts = Get-NativeWindowFacts $handle } catch { $facts = $null }
+    if ($facts -and $facts.native_client_rect.width -gt 0 -and $facts.native_client_rect.height -gt 0) { break }
+    Start-Sleep -Milliseconds 250
+  }
+  if (-not $facts -or $facts.native_client_rect.width -le 0 -or $facts.native_client_rect.height -le 0) { throw 'native window client geometry never became valid' }
+  $scale = $facts.dpi_for_window / 96.0
+  $clientWidth = [int][Math]::Floor($Width * $scale)
+  $clientHeight = [int][Math]::Floor($Height * $scale)
+  $frameWidth = $facts.window_rect.width - $facts.native_client_rect.width
+  $frameHeight = $facts.window_rect.height - $facts.native_client_rect.height
+  Write-Host "NATIVE_RESIZE_BASE window=$($facts.window_rect.width)x$($facts.window_rect.height) client=$($facts.native_client_rect.width)x$($facts.native_client_rect.height) frame=${frameWidth}x${frameHeight}"
+  $outerWidth = $clientWidth + $frameWidth
+  $outerHeight = $clientHeight + $frameHeight
+  $observed = $null
+  for ($attempt = 1; $attempt -le 8; $attempt++) {
+    if (-not [ClipGaugeNativeDisplay]::MoveWindow($handle, $facts.window_rect.left, $facts.window_rect.top, $outerWidth, $outerHeight, $true)) { throw 'native logical resize failed' }
+    [ClipGaugeNativeDisplay]::SetForegroundWindow($handle) | Out-Null
+    Start-Sleep -Milliseconds 750
+    $observed = Get-NativeWindowFacts $handle
+    if ($observed.native_client_rect.width -eq $clientWidth -and $observed.native_client_rect.height -eq $clientHeight) { break }
+  }
+  if ($observed.native_client_rect.width -ne $clientWidth -or $observed.native_client_rect.height -ne $clientHeight) {
+    throw "native logical resize did not settle: requested ${clientWidth}x${clientHeight}, observed $($observed.native_client_rect.width)x$($observed.native_client_rect.height)"
+  }
+  Write-Host "LOGICAL_SIZE_REQUEST ${Width}x${Height} client_target=${clientWidth}x${clientHeight} scale=$scale observed=$($observed.native_client_rect.width)x$($observed.native_client_rect.height)"
+}
+
+function Invoke-ClientCapture {
+  param([Parameter(Mandatory = $true)] [string] $Name)
+  Add-Type -AssemblyName System.Drawing
+  $facts = Get-NativeWindowFacts ([IntPtr]$proc.MainWindowHandle)
+  $width = $facts.native_client_rect.width
+  $height = $facts.native_client_rect.height
+  if ($width -le 0 -or $height -le 0) { throw "native client size is invalid: ${width}x${height}" }
+  $path = Join-Path $OutputDir "$Name.png"
+  Remove-Item -Force -ErrorAction SilentlyContinue $path
+  $bitmap = [System.Drawing.Bitmap]::new($width, $height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+  $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+  try {
+    $origin = $facts.client_origin_screen
+    $graphics.CopyFromScreen([int]$origin.x, [int]$origin.y, 0, 0, $bitmap.Size, [System.Drawing.CopyPixelOperation]::SourceCopy)
+    $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+  } finally {
+    $graphics.Dispose()
+    $bitmap.Dispose()
+  }
+  if (-not (Test-Path -LiteralPath $path)) { throw "client screenshot failed: $Name" }
+  return $path
+}
+
+function Validate-DisplayEvidence {
+  param([Parameter(Mandatory = $true)] [string] $State, [Parameter(Mandatory = $true)] [string] $Suffix, [Parameter(Mandatory = $true)] [string] $ClientPath)
+  $displayPath = Join-Path $OutputDir "display-$State-$Suffix.json"
+  if (-not (Test-Path -LiteralPath $displayPath)) { throw "display facts missing: $displayPath" }
+  $facts = Get-Content -Raw -LiteralPath $displayPath | ConvertFrom-Json
+  $native = Get-NativeWindowFacts ([IntPtr]$proc.MainWindowHandle)
+  foreach ($property in $native.Keys) { $facts | Add-Member -MemberType NoteProperty -Name $property -Value $native[$property] -Force }
+  $captureFacts = Get-ImageFacts $ClientPath
+  $facts | Add-Member -MemberType NoteProperty -Name client_capture -Value ([ordered]@{ width = $captureFacts.width; height = $captureFacts.height; sha256 = $captureFacts.sha256 }) -Force
+  $json = $facts | ConvertTo-Json -Depth 30
+  $json | Set-Content -LiteralPath $displayPath -Encoding utf8
+  $contractPath = Join-Path $PSScriptRoot 'windows-ui-dpi-contract.mjs'
+  $contractResult = $json | node $contractPath --validate
+  if ($LASTEXITCODE -ne 0 -or -not $contractResult) { throw "display contract failed: $displayPath $contractResult" }
+  Write-Host "DISPLAY_EVIDENCE_PASS $displayPath client=$($captureFacts.width)x$($captureFacts.height) dpi=$($native.dpi_for_window) awareness=$($native.dpi_awareness)"
 }
 
 $cdp = Join-Path $OutputDir 'webview2-cdp'
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $cdp
 New-Item -ItemType Directory -Force $cdp | Out-Null
 $env:CLIPGAUGE_QA_WEBVIEW2_CDP = '1'
+$env:CLIPGAUGE_QUALIFICATION_VAULT_SERVICE = $qualificationService
 $env:WEBVIEW2_USER_DATA_FOLDER = $cdp
-$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
+$env:CLIPGAUGE_QA_WEBVIEW2_PORT = "$qaPort"
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$qaPort"
 $chocoRoot = if ($env:ChocolateyInstall) { $env:ChocolateyInstall } else { 'C:\ProgramData\chocolatey' }
 $realFfmpeg = Get-ChildItem -Path (Join-Path $chocoRoot 'lib\ffmpeg') -Filter 'ffmpeg.exe' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
 $realFfmpegPath = if ($realFfmpeg) { $realFfmpeg.FullName } else { (Get-Command ffmpeg -ErrorAction Stop).Source }
@@ -153,19 +296,37 @@ while ((Get-Date) -lt $deadline) {
 $proc.Refresh()
 if ($proc.MainWindowHandle -eq [IntPtr]::Zero) { throw 'installed ClipGauge window handle unavailable' }
 
+function Restart-QualificationApp {
+  if ($script:proc -and -not $script:proc.HasExited) { Stop-Process -Id $script:proc.Id -Force }
+  Start-Sleep -Seconds 2
+  $script:proc = Start-Process -FilePath $AppPath -PassThru
+  $deadline = (Get-Date).AddSeconds(30)
+  while ((Get-Date) -lt $deadline) {
+    $script:proc.Refresh()
+    if ($script:proc.MainWindowHandle -ne [IntPtr]::Zero) { break }
+    Start-Sleep -Milliseconds 500
+  }
+  $script:proc.Refresh()
+  if ($script:proc.MainWindowHandle -eq [IntPtr]::Zero) { throw 'restarted ClipGauge window handle unavailable' }
+  Write-Host "QUALIFICATION_APP_RESTARTED pid=$($script:proc.Id)"
+}
+
 function Invoke-State {
   param([Parameter(Mandatory = $true)] [string] $State, [Parameter(Mandatory = $true)] [int] $Width, [Parameter(Mandatory = $true)] [int] $Height, [Parameter(Mandatory = $true)] [string] $Suffix)
-  Size-Window $Width $Height
-  $args = @('.github/windows-ui-qualification.mjs', '--state', $State, '--suffix', $Suffix, '--output', $OutputDir, '--hwnd', "$($proc.MainWindowHandle.ToInt64())", '--pid', "$($proc.Id)", '--sentinel', $Sentinel, '--target-width', "$Width", '--target-height', "$Height", '--port', '9222')
+  Set-LogicalWindowSize $Width $Height
+  $args = @('.github/windows-ui-qualification.mjs', '--state', $State, '--suffix', $Suffix, '--output', $OutputDir, '--hwnd', "$($proc.MainWindowHandle.ToInt64())", '--pid', "$($proc.Id)", '--sentinel', $Sentinel, '--target-width', "$Width", '--target-height', "$Height", '--port', "$qaPort")
   & node @args
   if ($LASTEXITCODE -ne 0) { throw "semantic state qualification failed: $State $Suffix" }
   $capture = Join-Path $OutputDir "$State-$Suffix.png"
-  if ($State -ne 'credential-removal-confirmation') {
-    $capture = Invoke-WindowCapture "$State-$Suffix"
-  }
-  Validate-Image $capture $Width $Height
+  $cdpCapture = Join-Path $OutputDir "$State-$Suffix-cdp.png"
+  if (Test-Path -LiteralPath $capture) { Move-Item -LiteralPath $capture -Destination $cdpCapture -Force }
+  $clientCapture = Invoke-ClientCapture "$State-$Suffix"
+  Validate-DisplayEvidence $State $Suffix $clientCapture
+  $fullCapture = Invoke-WindowCapture "$State-$Suffix-full"
+  $fullFacts = Get-ImageFacts $fullCapture
+  if (-not $fullFacts.nonuniform) { throw "full-window screenshot is blank or near-uniform: $fullCapture" }
   if ($State -eq 'credential-removal-confirmation') {
-    Validate-NativeDialogEvidence $State $Suffix $Width $Height $capture
+    Validate-NativeDialogEvidence $State $Suffix $Width $Height $clientCapture
   }
 }
 
@@ -175,8 +336,12 @@ try {
   Invoke-State 'providers' 1366 768 '1366x768'
   Invoke-State 'openrouter-saved' 1366 768 '1366x768'
   Invoke-State 'openrouter-connected' 1366 768 '1366x768'
+  Restart-QualificationApp
+  Invoke-State 'openrouter-connected' 1366 768 '1366x768-restart'
   Invoke-State 'gemini-saved-unverified' 1366 768 '1366x768'
   Invoke-State 'credential-removal-confirmation' 1366 768 '1366x768'
+  Restart-QualificationApp
+  Invoke-State 'openrouter-remove' 1366 768 '1366x768-remove-restart'
   Invoke-State 'setup' 1920 1080 '1920x1080'
   Invoke-State 'local-ai' 1920 1080 '1920x1080'
   Invoke-State 'providers' 1920 1080 '1920x1080'
@@ -196,13 +361,29 @@ try {
   Invoke-State 'help' 1920 1200 '1920x1200'
   Invoke-State 'display-diagnostics' 1920 1200 '1920x1200'
 
+  $additionalViewports = @(
+    @(1280, 720, '1280x720'),
+    @(1440, 900, '1440x900'),
+    @(1536, 864, '1536x864'),
+    @(1600, 900, '1600x900'),
+    @(2560, 1440, '2560x1440'),
+    @(3840, 2160, '3840x2160')
+  )
+  foreach ($viewport in $additionalViewports) {
+    Invoke-State 'setup' $viewport[0] $viewport[1] $viewport[2]
+    Invoke-State 'local-ai' $viewport[0] $viewport[1] $viewport[2]
+    Invoke-State 'providers' $viewport[0] $viewport[1] $viewport[2]
+    Invoke-State 'create-hostile' $viewport[0] $viewport[1] $viewport[2]
+    Invoke-State 'help' $viewport[0] $viewport[1] $viewport[2]
+  }
+
   $pairs = @(
-    @('providers-1366x768.png', 'local-ai-1366x768.png'),
-    @('providers-1920x1080.png', 'local-ai-1920x1080.png'),
-    @('openrouter-saved-1366x768.png', 'openrouter-connected-1366x768.png'),
-    @('openrouter-saved-1920x1080.png', 'openrouter-connected-1920x1080.png'),
-    @('providers-1920x1200.png', 'local-ai-1920x1200.png'),
-    @('openrouter-saved-1920x1200.png', 'openrouter-connected-1920x1200.png')
+    @('providers-1366x768-cdp.png', 'local-ai-1366x768-cdp.png'),
+    @('providers-1920x1080-cdp.png', 'local-ai-1920x1080-cdp.png'),
+    @('openrouter-saved-1366x768-cdp.png', 'openrouter-connected-1366x768-cdp.png'),
+    @('openrouter-saved-1920x1080-cdp.png', 'openrouter-connected-1920x1080-cdp.png'),
+    @('providers-1920x1200-cdp.png', 'local-ai-1920x1200-cdp.png'),
+    @('openrouter-saved-1920x1200-cdp.png', 'openrouter-connected-1920x1200-cdp.png')
   )
   foreach ($pair in $pairs) {
     if ((Hash-File (Join-Path $OutputDir $pair[0])) -eq (Hash-File (Join-Path $OutputDir $pair[1]))) { throw "screenshots unexpectedly identical: $($pair -join ' == ')" }
@@ -214,6 +395,11 @@ try {
 } finally {
   if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
   Remove-Item Env:CLIPGAUGE_QA_WEBVIEW2_CDP -ErrorAction SilentlyContinue
+  Remove-Item Env:CLIPGAUGE_QA_WEBVIEW2_PORT -ErrorAction SilentlyContinue
+  Remove-QualificationCredential 'provider_auth_preset-openrouter'
+  Remove-QualificationCredential 'gemini_api_key'
+  Remove-HostileSessions
+  Remove-Item Env:CLIPGAUGE_QUALIFICATION_VAULT_SERVICE -ErrorAction SilentlyContinue
   Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
   Remove-Item Env:WEBVIEW2_USER_DATA_FOLDER -ErrorAction SilentlyContinue
 }

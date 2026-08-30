@@ -32,6 +32,7 @@ from .detect import (
     merge_cuts,
 )
 from .tracks import FaceTrack, build_face_tracks, crop_face, track_coverage_ratio
+from ..models import registry, specs
 
 ASD_FPS = 25
 DETECT_STRIDE = 2
@@ -174,10 +175,12 @@ class AsdModel:
     def __init__(self, frontend_path: str, backend_path: str):
         import onnxruntime as ort
 
+        verified_frontend = registry.require_verified_model(specs.LR_ASD_FRONTEND, frontend_path)
+        verified_backend = registry.require_verified_model(specs.LR_ASD_BACKEND, backend_path)
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
-        self.frontend = ort.InferenceSession(frontend_path, opts, providers=["CPUExecutionProvider"])
-        self.backend = ort.InferenceSession(backend_path, opts, providers=["CPUExecutionProvider"])
+        self.frontend = ort.InferenceSession(str(verified_frontend), opts, providers=["CPUExecutionProvider"])
+        self.backend = ort.InferenceSession(str(verified_backend), opts, providers=["CPUExecutionProvider"])
 
     def score_track(self, crops: list[np.ndarray], mfcc: np.ndarray | None, track_start: int) -> list[float]:
         frames = len(crops)

@@ -1,6 +1,6 @@
 [project]
 name = "clipgauge-pipeline"
-version = "0.5.3"
+version = "0.5.4"
 description = "ClipGauge — local AI video clipper"
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.12,<3.13"
@@ -36,3 +36,4 @@ packages = ["clipgauge_pipeline"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: tests that exercise longer media or render paths"]
