@@ -1,8 +1,66 @@
+#[cfg(feature = "qualification-vault")]
+use std::env;
+#[cfg(any(not(feature = "qualification-vault"), test))]
 use std::fs;
 use std::path::Path;
 
-const SERVICE: &str = "io.github.pavithranra.clipgauge";
+pub const SERVICE: &str = "io.github.pavithranra.clipgauge";
+#[cfg(feature = "qualification-vault")]
+const QUALIFICATION_ENV: &str = "CLIPGAUGE_QUALIFICATION_VAULT_SERVICE";
+#[cfg(feature = "qualification-vault")]
+const QUALIFICATION_PREFIX: &str = "io.github.pavithranra.clipgauge.qualification.";
+#[cfg(any(not(feature = "qualification-vault"), test))]
 const MIGRATION_MARKER: &str = "secret-migration-v1.done";
+
+pub fn namespace_kind() -> &'static str {
+    #[cfg(feature = "qualification-vault")]
+    {
+        "qualification"
+    }
+
+    #[cfg(not(feature = "qualification-vault"))]
+    {
+        "production"
+    }
+}
+
+fn qualification_service_name(requested: Option<&str>) -> Result<String, String> {
+    #[cfg(feature = "qualification-vault")]
+    {
+        let value =
+            requested.ok_or_else(|| format!("qualification vault requires {QUALIFICATION_ENV}"))?;
+        let run_id = value.strip_prefix(QUALIFICATION_PREFIX).unwrap_or_default();
+        let valid = (8..=80).contains(&run_id.len())
+            && run_id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-');
+        if !valid {
+            return Err("qualification vault service must be run-scoped".to_string());
+        }
+        if value == SERVICE {
+            return Err("qualification vault service must be run-scoped".to_string());
+        }
+        Ok(value.to_string())
+    }
+
+    #[cfg(not(feature = "qualification-vault"))]
+    {
+        let _ = requested;
+        Ok(SERVICE.to_string())
+    }
+}
+
+fn active_service() -> Result<String, String> {
+    #[cfg(feature = "qualification-vault")]
+    {
+        qualification_service_name(env::var(QUALIFICATION_ENV).ok().as_deref())
+    }
+
+    #[cfg(not(feature = "qualification-vault"))]
+    {
+        qualification_service_name(None)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum SecretName {
@@ -40,7 +98,8 @@ pub struct OsSecretBackend;
 
 impl SecretBackend for OsSecretBackend {
     fn get(&self, name: SecretName) -> Result<Option<String>, String> {
-        let entry = keyring::Entry::new(SERVICE, &name.account())
+        let service = active_service()?;
+        let entry = keyring::Entry::new(&service, &name.account())
             .map_err(|error| format!("credential store unavailable: {error}"))?;
         match entry.get_password() {
             Ok(value) if !value.is_empty() => Ok(Some(value)),
@@ -54,7 +113,8 @@ impl SecretBackend for OsSecretBackend {
         if value.trim().is_empty() {
             return Err("secret cannot be empty".to_string());
         }
-        let entry = keyring::Entry::new(SERVICE, &name.account())
+        let service = active_service()?;
+        let entry = keyring::Entry::new(&service, &name.account())
             .map_err(|error| format!("credential store unavailable: {error}"))?;
         entry
             .set_password(value)
@@ -62,7 +122,8 @@ impl SecretBackend for OsSecretBackend {
     }
 
     fn delete(&mut self, name: SecretName) -> Result<(), String> {
-        let entry = keyring::Entry::new(SERVICE, &name.account())
+        let service = active_service()?;
+        let entry = keyring::Entry::new(&service, &name.account())
             .map_err(|error| format!("credential store unavailable: {error}"))?;
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
@@ -124,6 +185,7 @@ pub fn apply_provider_operation_env(
     }
 }
 
+#[cfg(any(not(feature = "qualification-vault"), test))]
 fn migrate_legacy_with_backend<B: SecretBackend>(
     home: &Path,
     backend: &mut B,
@@ -160,30 +222,89 @@ fn migrate_legacy_with_backend<B: SecretBackend>(
 }
 
 pub fn migrate_legacy(home: &Path) -> Result<(), String> {
-    let mut backend = OsSecretBackend;
-    migrate_legacy_with_backend(home, &mut backend)
+    #[cfg(feature = "qualification-vault")]
+    {
+        let _ = home;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "qualification-vault"))]
+    {
+        let mut backend = OsSecretBackend;
+        migrate_legacy_with_backend(home, &mut backend)
+    }
 }
 
 pub fn migrate_instagram_file(home: &Path) -> Result<(), String> {
-    let path = home.join("instagram.json");
-    if !path.exists() {
-        return Ok(());
+    #[cfg(feature = "qualification-vault")]
+    {
+        let _ = home;
+        Ok(())
     }
-    let value = fs::read_to_string(&path)
-        .map_err(|error| format!("could not read Instagram connection: {error}"))?;
-    let parsed: serde_json::Value = serde_json::from_str(&value)
-        .map_err(|error| format!("Instagram connection is malformed: {error}"))?;
-    let compact = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
-    set(SecretName::InstagramConnection, &compact)?;
-    fs::remove_file(path)
-        .map_err(|error| format!("could not remove migrated Instagram connection: {error}"))
+
+    #[cfg(not(feature = "qualification-vault"))]
+    {
+        let path = home.join("instagram.json");
+        if !path.exists() {
+            return Ok(());
+        }
+        let value = fs::read_to_string(&path)
+            .map_err(|error| format!("could not read Instagram connection: {error}"))?;
+        let parsed: serde_json::Value = serde_json::from_str(&value)
+            .map_err(|error| format!("Instagram connection is malformed: {error}"))?;
+        let compact = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
+        set(SecretName::InstagramConnection, &compact)?;
+        fs::remove_file(path)
+            .map_err(|error| format!("could not remove migrated Instagram connection: {error}"))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-    use super::{SecretBackend, SecretName};
+    use super::{
+        namespace_kind, qualification_service_name, OsSecretBackend, SecretBackend, SecretName,
+        SERVICE,
+    };
+
+    #[test]
+    fn production_namespace_is_stable() {
+        assert_eq!(SERVICE, "io.github.pavithranra.clipgauge");
+        #[cfg(not(feature = "qualification-vault"))]
+        {
+            assert_eq!(qualification_service_name(None).unwrap(), SERVICE);
+            assert_eq!(namespace_kind(), "production");
+        }
+        #[cfg(feature = "qualification-vault")]
+        {
+            assert!(qualification_service_name(None).is_err());
+            assert_eq!(namespace_kind(), "qualification");
+        }
+    }
+
+    #[cfg(feature = "qualification-vault")]
+    #[test]
+    fn qualification_namespace_requires_a_run_scoped_service() {
+        assert!(qualification_service_name(None).is_err());
+        assert!(qualification_service_name(Some(SERVICE)).is_err());
+        assert!(qualification_service_name(Some(
+            "io.github.pavithranra.clipgauge.qualification.run-1234"
+        ))
+        .is_ok());
+        assert!(
+            qualification_service_name(Some("io.github.pavithranra.clipgauge.qualification."))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn secret_errors_do_not_include_values() {
+        let mut backend = OsSecretBackend;
+        let secret = "synthetic-secret-never-log";
+        let error = backend.set(SecretName::GeminiApiKey, " ").unwrap_err();
+        assert!(!error.contains(secret));
+    }
 
     struct MemoryBackend(HashMap<String, String>);
 
@@ -236,6 +357,93 @@ mod tests {
             !SecretName::ProviderAuth("custom:profile/with spaces".to_string())
                 .account()
                 .contains('/')
+        );
+    }
+
+    struct ScopedMemoryBackend {
+        service: String,
+        values: Rc<RefCell<HashMap<(String, String), String>>>,
+    }
+
+    impl ScopedMemoryBackend {
+        fn new(service: &str, values: Rc<RefCell<HashMap<(String, String), String>>>) -> Self {
+            Self {
+                service: service.to_string(),
+                values,
+            }
+        }
+    }
+
+    impl SecretBackend for ScopedMemoryBackend {
+        fn get(&self, name: SecretName) -> Result<Option<String>, String> {
+            Ok(self
+                .values
+                .borrow()
+                .get(&(self.service.clone(), name.account()))
+                .cloned())
+        }
+
+        fn set(&mut self, name: SecretName, value: &str) -> Result<(), String> {
+            self.values
+                .borrow_mut()
+                .insert((self.service.clone(), name.account()), value.to_string());
+            Ok(())
+        }
+
+        fn delete(&mut self, name: SecretName) -> Result<(), String> {
+            self.values
+                .borrow_mut()
+                .remove(&(self.service.clone(), name.account()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn qualification_credentials_are_isolated_from_production_credentials() {
+        let profile = "preset-openrouter";
+        let values = Rc::new(RefCell::new(HashMap::new()));
+        let mut production = ScopedMemoryBackend::new(SERVICE, Rc::clone(&values));
+        let mut qualification = ScopedMemoryBackend::new(
+            "io.github.pavithranra.clipgauge.qualification.run-1234",
+            Rc::clone(&values),
+        );
+        production
+            .set(
+                SecretName::ProviderAuth(profile.to_string()),
+                "production-value",
+            )
+            .unwrap();
+        qualification
+            .set(
+                SecretName::ProviderAuth(profile.to_string()),
+                "qualification-value",
+            )
+            .unwrap();
+
+        assert_eq!(
+            production
+                .get(SecretName::ProviderAuth(profile.to_string()))
+                .unwrap()
+                .as_deref(),
+            Some("production-value")
+        );
+        assert_eq!(
+            qualification
+                .get(SecretName::ProviderAuth(profile.to_string()))
+                .unwrap()
+                .as_deref(),
+            Some("qualification-value")
+        );
+
+        qualification
+            .delete(SecretName::ProviderAuth(profile.to_string()))
+            .unwrap();
+        assert_eq!(
+            production
+                .get(SecretName::ProviderAuth(profile.to_string()))
+                .unwrap()
+                .as_deref(),
+            Some("production-value")
         );
     }
 

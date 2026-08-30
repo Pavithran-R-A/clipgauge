@@ -24,3 +24,18 @@ export function selectedLocalModel(inventory: unknown): string | undefined {
   const selected = (localAI as { selected_model_id?: unknown }).selected_model_id
   return typeof selected === 'string' && selected.startsWith('clipgauge-local/') ? selected : undefined
 }
+
+export function resolveSelectedLocalModel(inventory: unknown, preferred?: string | null): string | undefined {
+  if (!inventory || typeof inventory !== 'object') return undefined
+  const value = inventory as { models?: unknown }
+  const models = Array.isArray(value.models) ? value.models : []
+  const modelIds = models
+    .filter((model): model is { asset_id?: unknown } => Boolean(model && typeof model === 'object'))
+    .map((model) => model.asset_id)
+    .filter((id): id is string => typeof id === 'string' && id.startsWith('clipgauge-local/'))
+  const isAvailable = (id: string | undefined) => Boolean(id && (!modelIds.length || modelIds.includes(id)))
+  if (isAvailable(preferred ?? undefined)) return preferred ?? undefined
+  const persisted = selectedLocalModel(inventory)
+  if (isAvailable(persisted)) return persisted
+  return modelIds[0]
+}

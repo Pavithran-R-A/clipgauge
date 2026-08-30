@@ -41,6 +41,23 @@ def model_path(spec: ModelSpec) -> Path:
     return config.models_dir() / spec.name / spec.filename
 
 
+def require_verified_model(spec: ModelSpec, candidate: str | Path) -> Path:
+    """Return a model path only when identity and bytes match the registry."""
+    expected = model_path(spec).resolve()
+    path = Path(candidate).expanduser().resolve()
+    if path != expected:
+        raise runtime.RuntimeIntegrityError(
+            f"model path is outside the approved registry path for {spec.name}"
+        )
+    if not path.is_file():
+        raise runtime.RuntimeIntegrityError(f"managed model is missing: {spec.name}")
+    if spec.size_bytes > 0 and path.stat().st_size != spec.size_bytes:
+        raise runtime.RuntimeIntegrityError(f"managed model size mismatch: {spec.name}")
+    if not spec.sha256 or runtime.sha256_file(path).lower() != spec.sha256.lower():
+        raise runtime.RuntimeIntegrityError(f"managed model hash mismatch: {spec.name}")
+    return path
+
+
 def is_present(spec: ModelSpec) -> bool:
     return model_path(spec).exists()
 

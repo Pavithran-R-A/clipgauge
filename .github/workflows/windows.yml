@@ -70,7 +70,7 @@ jobs:
           npm ci
           npm run build
           npm test
-          npx tauri build --bundles nsis
+          npx tauri build --bundles nsis --features qualification-vault
 
       - name: Install required creator assets for truthful Setup Ready state
         working-directory: pipeline

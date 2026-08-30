@@ -1,9 +1,12 @@
 [package]
 name = "clipgauge-app"
-version = "0.5.3"
+version = "0.5.4"
 description = "ClipGauge — local AI video clipper"
 license = "AGPL-3.0-or-later"
 edition = "2021"
+
+[features]
+qualification-vault = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

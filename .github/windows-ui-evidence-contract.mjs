@@ -1,5 +1,21 @@
 import { readFileSync } from 'node:fs'
 
+export function isSetupReadyLabel(value) {
+  return value === 'Ready' || value === 'Ready · System'
+}
+
+export function isSetupReuseLabel(value) {
+  return value === 'Reused for future videos' || value === 'System component reused'
+}
+
+export function isLocalAiActionLabel(value) {
+  return value === 'Install ClipGauge Local' || value === 'Use ClipGauge Local'
+}
+
+export function isLocalAiHeading(value) {
+  return value === 'Run scoring locally' || value === 'ClipGauge Local is ready'
+}
+
 function requireImageFacts(facts, label) {
   if (!facts || typeof facts !== 'object') throw new Error(`${label} image facts are required`)
   if (!Number.isInteger(facts.width) || facts.width <= 0) throw new Error(`${label} image width is required`)
@@ -23,6 +39,6 @@ export function finalizeEvidence(provisional, ownerFacts, dialogFacts) {
 }
 
 if (process.argv[2] === '--finalize') {
-  const input = JSON.parse(readFileSync(0, 'utf8'))
+  const input = JSON.parse(readFileSync(0, 'utf8').replace(/^\uFEFF/, ''))
   process.stdout.write(`${JSON.stringify(finalizeEvidence(input.provisional, input.ownerFacts, input.dialogFacts))}\n`)
 }

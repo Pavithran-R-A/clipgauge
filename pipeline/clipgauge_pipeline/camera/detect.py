@@ -15,6 +15,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ..models import registry, specs
+
 MODEL_W = 320
 MODEL_H = 240
 DEFAULT_CONFIDENCE = 0.65
@@ -66,7 +68,8 @@ class FaceDetector:
     def __init__(self, model_path: str):
         import onnxruntime as ort
 
-        self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+        verified_path = registry.require_verified_model(specs.ULTRAFACE, model_path)
+        self.session = ort.InferenceSession(str(verified_path), providers=["CPUExecutionProvider"])
 
     def detect(self, rgb: np.ndarray, confidence: float = DEFAULT_CONFIDENCE) -> list[FaceBox]:
         """rgb: (MODEL_H, MODEL_W, 3) uint8. Returns normalized (0..1) boxes."""

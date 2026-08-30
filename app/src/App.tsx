@@ -15,7 +15,7 @@ import SetupCenter from './components/SetupCenter'
 import Studio from './components/Studio'
 import SupportPage from './components/SupportPage'
 import { sourceKind, type CreatorRunState } from './creatorState'
-import { selectedLocalModel } from './setupState'
+import { resolveSelectedLocalModel } from './setupState'
 import './styles.css'
 
 type View = 'boot' | 'onboarding' | 'shell' | 'review' | 'loop'
@@ -47,6 +47,7 @@ export default function App() {
   const [runError, setRunError] = useState<string | null>(null)
   const [runNotice, setRunNotice] = useState<string | null>(null)
   const [selectedProvider, setSelectedProvider] = useState('clipgauge-local')
+  const [selectedLocalModelId, setSelectedLocalModelId] = useState<string | null>(null)
   const unlistenRef = useRef<(() => void) | null>(null)
   const activeJobRef = useRef<string | null>(null)
   activeJobRef.current = activeJob
@@ -138,7 +139,7 @@ export default function App() {
     setResults(null)
     setActiveJob(null)
     try {
-      const resolvedModel = model ?? (provider === 'clipgauge-local' ? selectedLocalModel(await api.setupInventory()) : undefined)
+      const resolvedModel = model ?? (provider === 'clipgauge-local' ? resolveSelectedLocalModel(await api.setupInventory()) : undefined)
       const preflight = await api.preflight(provider, resolvedModel, endpoint, auth, secretHeader, sourceKind(source) === 'youtube' ? source : undefined)
       const blocked = preflight.checks.filter((check) => check.state === 'blocked')
       const warnings = preflight.checks.filter((check) => check.state === 'warning')
@@ -179,9 +180,9 @@ export default function App() {
   }
 
   let content
-  if (section === 'create') content = <Studio jobs={jobs} running={running} runState={runState} cancelling={cancelling} startedAt={runStartedAt} stages={stages} error={runError} notice={runNotice} onRun={startRun} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { setCancelling(false); setRunError(String(error)) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onOpenJob={openJob} onResume={(id) => { setRunning(true); setRunState('RUNNING'); setCancelling(false); setRunError(null); setRunNotice(null); setStages({}); setActiveJob(id); void api.resumeJob(id) }} />
+  if (section === 'create') content = <Studio jobs={jobs} running={running} runState={runState} cancelling={cancelling} startedAt={runStartedAt} stages={stages} error={runError} notice={runNotice} onRun={startRun} localModelId={selectedLocalModelId ?? undefined} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { setCancelling(false); setRunError(String(error)) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onOpenJob={openJob} onResume={(id) => { setRunning(true); setRunState('RUNNING'); setCancelling(false); setRunError(null); setRunNotice(null); setStages({}); setActiveJob(id); void api.resumeJob(id) }} />
   else if (section === 'sessions') content = <Sessions jobs={jobs} onBack={() => setSection('create')} onOpenJob={openJob} onResume={(id) => { setSection('create'); setRunning(true); setRunState('RUNNING'); setActiveJob(id); void api.resumeJob(id) }} />
-  else if (section === 'setup') content = <SetupCenter onBack={() => setSection('create')} onUseLocal={() => { setSelectedProvider('clipgauge-local'); setSection('create') }} />
+  else if (section === 'setup') content = <SetupCenter onBack={() => setSection('create')} onUseLocal={(modelId) => { if (modelId) setSelectedLocalModelId(modelId); setSelectedProvider('clipgauge-local'); setSection('create') }} />
   else if (section === 'providers') content = <ProviderCenter selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onBack={() => setSection('create')} onOpenSetup={() => setSection('setup')} />
   else if (section === 'integrations') content = <Integrations onBack={() => setSection('create')} onOpenLoop={() => setView('loop')} />
   else if (section === 'privacy') content = <PrivacyPanel provider={selectedProvider} onBack={() => setSection('create')} />

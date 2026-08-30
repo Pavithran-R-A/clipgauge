@@ -468,14 +468,20 @@ jobs:
           cat > RELEASE_NOTES.md <<EOF
           ## ClipGauge ${RELEASE_TAG}
 
-          ClipGauge ${RELEASE_TAG} adds universal AI-provider support while preserving the local-first desktop pipeline.
+          ClipGauge ${RELEASE_TAG} is a qualified repair release for the local-first desktop pipeline.
 
-          - Ollama and LM Studio are first-class local options; custom OpenAI-compatible endpoints are supported.
-          - Curated cloud presets are capability-aware and require explicit user selection; no automatic cross-provider failover is enabled.
+          - The Windows installer lifecycle now removes application resources during uninstall while preserving user-created ClipGauge data.
+          - Managed model and checkpoint loading now enforces approved identities, exact sizes, SHA-256 hashes, and repository/configuration restrictions.
+          - The qualification vault is isolated from production credentials during testing.
+          - Windows audio and import reliability improved through ASR CPU fallback and deterministic audio-analysis fallback behavior.
+          - Native creator and editor lifecycle qualification covered rendering, playback, editing, export, reopening, cancellation, and process cleanup.
+          - Windows DPI and high-scaling qualification covered the supported screen sizes, dialogs, long names, and progress or error states.
+          - Outstanding upstream Python advisories are documented individually in the v0.5.4 VEX; qualified ClipGauge paths are either not affected or mitigated.
+          - Public YouTube support remains best-effort. Local-file import is the reliable supported fallback; no login or bot restriction bypass is claimed.
           - Linux amd64 Debian and Windows x64 NSIS artifacts are unsigned.
           - Native macOS ARM and Intel builds are qualification results; no signing or notarization is claimed.
           - The exact-tag publication is gated by a real managed-model E2E using the production-default captioned 1080x1920 render path; its summary is attached as `MODEL_E2E_SUMMARY.json`.
-          - The CycloneDX SBOM is generated from the ${RELEASE_TAG} tag and validated against its peeled source commit.
+          - The CycloneDX SBOM, checksums, and provenance are generated from the immutable ${RELEASE_TAG} tag.
           - \`SHA256SUMS\`, \`RELEASE_PROVENANCE.md\`, and \`ATTESTATION_STATUS.md\` describe the exact attached assets and distinguish checksums, metadata, GitHub attestations, and platform signing.
           - AGPL-3.0-or-later licensing and upstream publikclip attribution remain preserved.
           EOF

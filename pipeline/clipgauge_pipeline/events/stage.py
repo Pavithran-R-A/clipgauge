@@ -58,10 +58,10 @@ class EventsStage(Stage):
 
         import json
 
-        import librosa
         import numpy as np
         import torch
 
+        from ..audio.io import load_mono, resample
         from ..vendor.laughter import model as laugh_model
         from ..vendor.laughter import segmenter as laugh_seg
         from ..vendor.panns import models as panns_models
@@ -71,7 +71,7 @@ class EventsStage(Stage):
         bench: dict[str, float] = {}
         events: list[dict] = []
 
-        y16k, _ = librosa.load(str(audio16), sr=16000, mono=True)
+        y16k, _ = load_mono(audio16, 16000)
         duration = len(y16k) / 16000.0
 
         # --- Channel 1 (optional): jrgillick laughter specialist ----------
@@ -82,7 +82,7 @@ class EventsStage(Stage):
             ctx.emit(-1, "Detecting laughter (specialist)…")
             t0 = time.monotonic()
             ckpt = registry.ensure(specs.LAUGHTER, lambda f, m: ctx.emit(f * 0.05, m))
-            y8k = librosa.resample(y16k, orig_sr=16000, target_sr=8000)
+            y8k = resample(y16k, 16000, 8000)
             lmodel = laugh_model.load_model(str(ckpt), device)
             laughs = laugh_seg.segment(
                 lmodel, y8k, duration, device,
@@ -109,7 +109,7 @@ class EventsStage(Stage):
         wav32 = ctx.job_dir / "audio32k.wav"
         if not wav32.exists():
             _extract_wav(media, wav32, panns_models.SAMPLE_RATE)
-        y32k, _ = librosa.load(str(wav32), sr=panns_models.SAMPLE_RATE, mono=True)
+        y32k, _ = load_mono(wav32, panns_models.SAMPLE_RATE)
         pmodel = panns_models.load_model(str(ckpt), device)
         probs_by_type, fps = panns_channel.framewise_probs(
             pmodel, y32k, device,
@@ -144,7 +144,7 @@ class EventsStage(Stage):
         curves = dsp.energy_curves(y16k)
         bench["curves_sec"] = round(time.monotonic() - t0, 1)
 
-        # --- Arousal (SER with DSP fallback) ------------------------------
+        # --- Arousal (DSP fallback; remote SER disabled) ------------------
         ctx.emit(0.9, "Estimating arousal…")
         t0 = time.monotonic()
         from . import ser

@@ -1,6 +1,30 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { finalizeEvidence } from './windows-ui-evidence-contract.mjs'
+import { finalizeEvidence, isLocalAiActionLabel, isLocalAiHeading, isSetupReadyLabel, isSetupReuseLabel } from './windows-ui-evidence-contract.mjs'
+
+test('accepts ready setup labels for managed and system video tools', () => {
+  assert.equal(isSetupReadyLabel('Ready'), true)
+  assert.equal(isSetupReadyLabel('Ready · System'), true)
+  assert.equal(isSetupReadyLabel('Core setup needed'), false)
+})
+
+test('accepts reuse labels for managed and system video tools', () => {
+  assert.equal(isSetupReuseLabel('Reused for future videos'), true)
+  assert.equal(isSetupReuseLabel('System component reused'), true)
+  assert.equal(isSetupReuseLabel('Download required'), false)
+})
+
+test('accepts local AI install and ready actions', () => {
+  assert.equal(isLocalAiActionLabel('Install ClipGauge Local'), true)
+  assert.equal(isLocalAiActionLabel('Use ClipGauge Local'), true)
+  assert.equal(isLocalAiActionLabel('Retry component'), false)
+})
+
+test('accepts local AI setup and ready headings', () => {
+  assert.equal(isLocalAiHeading('Run scoring locally'), true)
+  assert.equal(isLocalAiHeading('ClipGauge Local is ready'), true)
+  assert.equal(isLocalAiHeading('Local AI unavailable'), false)
+})
 
 test('finalizes semantic metadata with PowerShell-measured image facts', () => {
   const provisional = {

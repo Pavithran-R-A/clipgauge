@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import time
 import zipfile
@@ -18,6 +20,50 @@ SILERO_ARCHIVE = config.models_dir() / "torch" / "hub" / f"silero-vad-{SILERO_RE
 SILERO_HUB_ROOT = config.models_dir() / "torch" / "hub" / "snakers4_silero-vad_master"
 TORCH_CHECKPOINT = "wav2vec2_fairseq_base_ls960_asr_ls960.pth"
 ASR_GROUP = "core:asr"
+
+_UNSAFE_METADATA_KEYS = {
+    "auto_map",
+    "code",
+    "code_repository",
+    "remote_code",
+    "repo_id",
+    "repository",
+    "trust_remote_code",
+    "url",
+}
+
+
+def validate_local_model_metadata(file_path: Path) -> None:
+    """Reject metadata that can redirect model or code loading."""
+    try:
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise runtime.RuntimeIntegrityError(f"model metadata is invalid: {file_path.name}") from exc
+    if not isinstance(payload, dict):
+        raise runtime.RuntimeIntegrityError(f"model metadata must be an object: {file_path.name}")
+
+    def walk(value: object, path: tuple[str, ...] = ()) -> None:
+        if isinstance(value, dict):
+            # Tokenizer vocabularies are user-visible token maps. A token
+            # named "code" is data, not an instruction to load code.
+            if path and path[-1] in {"vocab", "merges"}:
+                return
+            for key, child in value.items():
+                normalized = re.sub(r"[^a-z0-9_]", "", str(key).lower())
+                if normalized in _UNSAFE_METADATA_KEYS or normalized.endswith("_url"):
+                    raise runtime.RuntimeIntegrityError(
+                        f"model metadata contains remote loading metadata: {file_path.name}"
+                    )
+                walk(child, path + (normalized,))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                walk(child, path + (str(index),))
+        elif isinstance(value, str) and value.lower().startswith(("http://", "https://")):
+            raise runtime.RuntimeIntegrityError(
+                f"model metadata contains remote loading metadata: {file_path.name}"
+            )
+
+    walk(payload)
 
 
 def _asset(
@@ -331,4 +377,11 @@ def ready(manager: downloads.DownloadManager) -> bool:
         (SILERO_HUB_ROOT / item).is_file()
         for item in silero_asset().expected_paths
     )
-    return all(bool(row.get("installed")) for row in rows) and archive_installed and punkt_ready and silero_ready
+    if not all(bool(row.get("installed")) for row in rows) or not archive_installed or not punkt_ready or not silero_ready:
+        return False
+    try:
+        for filename in ("config.json", "preprocessor_config.json", "tokenizer.json"):
+            validate_local_model_metadata(ASR_ROOT / filename)
+    except runtime.RuntimeIntegrityError:
+        return False
+    return True

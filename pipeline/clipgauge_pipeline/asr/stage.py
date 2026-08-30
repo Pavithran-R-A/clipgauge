@@ -35,6 +35,41 @@ def _point_caches_at_home() -> None:
     managed.apply_local_env()
 
 
+def _transcribe_with_fallback(
+    model,
+    *,
+    audio,
+    device: str,
+    compute_type: str,
+    load_cpu_model,
+    emit,
+):
+    """Retry transcription on CPU when accelerator execution fails."""
+    try:
+        return model.transcribe(audio, batch_size=BATCH_SIZE), model, device, compute_type
+    except Exception as exc:  # noqa: BLE001 - accelerator failures vary by runtime
+        if device == "cpu":
+            raise StageError(
+                "Speech transcription could not complete. Retry the job or repair the speech runtime.",
+                code="ASR_TRANSCRIPTION_FAILED",
+                retryable=True,
+            ) from exc
+
+        emit("GPU speech execution was unavailable; using CPU fallback (int8)…")
+        del model
+        gc.collect()
+        try:
+            cpu_model = load_cpu_model()
+            result = cpu_model.transcribe(audio, batch_size=BATCH_SIZE)
+        except Exception as fallback_exc:  # noqa: BLE001 - final typed boundary
+            raise StageError(
+                "Speech transcription could not complete. Retry with CPU acceleration or repair the speech runtime.",
+                code="ASR_TRANSCRIPTION_FAILED",
+                retryable=True,
+            ) from fallback_exc
+        return result, cpu_model, "cpu", "int8"
+
+
 class AsrStage(Stage):
     name = "asr"
     schema_version = 1
@@ -95,7 +130,20 @@ class AsrStage(Stage):
         duration = float(len(audio)) / 16000.0
 
         ctx.emit(-1, "Transcribing…")
-        result = model.transcribe(audio, batch_size=BATCH_SIZE)
+        result, model, device, compute_type = _transcribe_with_fallback(
+            model,
+            audio=audio,
+            device=device,
+            compute_type=compute_type,
+            load_cpu_model=lambda: whisperx.load_model(
+                str(managed.asr_model_path()),
+                "cpu",
+                compute_type="int8",
+                vad_method="silero",
+                local_files_only=True,
+            ),
+            emit=lambda message: ctx.emit(-1, message),
+        )
         language = result.get("language", "en")
         transcribe_secs = time.monotonic() - t0
 
@@ -115,6 +163,7 @@ class AsrStage(Stage):
         try:
             align_model, align_meta = whisperx.load_align_model(
                 language_code=language, device=device,
+                model_name="WAV2VEC2_ASR_BASE_960H",
                 model_dir=str(managed.alignment_model_dir()), model_cache_only=True,
             )
             aligned = whisperx.align(
@@ -129,6 +178,7 @@ class AsrStage(Stage):
                 try:
                     align_model, align_meta = whisperx.load_align_model(
                         language_code=language, device=device,
+                        model_name="WAV2VEC2_ASR_BASE_960H",
                         model_dir=str(managed.alignment_model_dir()), model_cache_only=True,
                     )
                     aligned = whisperx.align(
