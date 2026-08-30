@@ -6,6 +6,10 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+# macOS Intel qualification intentionally omits the locked Torch stack because
+# compatible wheels are unavailable. Linux and Windows run this full suite.
+pytest.importorskip("torch", reason="Torch-backed security boundary tests require the managed ML stack")
+
 from clipgauge_pipeline.camera.asd import AsdModel
 from clipgauge_pipeline.camera.detect import FaceDetector
 from clipgauge_pipeline.diarize import campplus
