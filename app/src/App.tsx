@@ -130,8 +130,9 @@ export default function App() {
   }, [refreshJobs])
 
   const startRun = useCallback(async (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) => {
-    setRunning(false)
-    setRunState('IDLE')
+    setRunning(true)
+    setRunState('RUNNING')
+    setRunStartedAt(Date.now())
     setCancelling(false)
     setRunError(null)
     setRunNotice(null)
@@ -144,6 +145,8 @@ export default function App() {
       const blocked = preflight.checks.filter((check) => check.state === 'blocked')
       const warnings = preflight.checks.filter((check) => check.state === 'warning')
       if (preflight.state === 'blocked' || blocked.length) {
+        setRunning(false)
+        setRunStartedAt(null)
         setRunState('FAILED')
         const first = blocked[0]
         setRunError(`${first?.message ?? 'This run needs a setup step first.'}${first?.remediation ? ` ${first.remediation}` : ''}`)

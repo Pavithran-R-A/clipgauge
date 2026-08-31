@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
     igStatus: vi.fn(),
     igSync: vi.fn(),
     jobResults: vi.fn(),
+    setupInventory: vi.fn(),
+    preflight: vi.fn(),
     runJob: vi.fn(),
     resumeJob: vi.fn(),
     cancelJob: vi.fn()
@@ -29,10 +31,11 @@ vi.mock('./components/Onboarding', () => ({ default: () => <div data-testid="onb
 vi.mock('./components/Loop', () => ({ default: () => <div data-testid="loop" /> }))
 vi.mock('./components/Review', () => ({ default: ({ results }: { results: { job_id: string } }) => <div data-testid="review">{results.job_id}</div> }))
 vi.mock('./components/Studio', () => ({
-  default: ({ error, notice, onCancel }: { error: string | null; notice: string | null; onCancel: () => void }) => (
+  default: ({ error, notice, running, onRun, onCancel }: { error: string | null; notice: string | null; running: boolean; onRun: (...args: string[]) => void; onCancel: () => void }) => (
     <>
       <div data-testid="studio-error">{error}</div>
       <div data-testid="studio-notice">{notice}</div>
+      <button data-testid="create-job" disabled={running} onClick={() => onRun('C:\\Videos\\source.mp4', 'clipgauge-local', 'classic')}>create</button>
       <button data-testid="cancel-job" onClick={onCancel}>cancel</button>
     </>
   )
@@ -61,6 +64,8 @@ beforeEach(() => {
   mocks.api.igStatus.mockResolvedValue({ connected: false })
   mocks.api.igSync.mockResolvedValue({})
   mocks.api.jobResults.mockResolvedValue({ job_id: '20260818-155237-c6b118' })
+  mocks.api.setupInventory.mockResolvedValue({})
+  mocks.api.preflight.mockResolvedValue({ state: 'blocked', checks: [{ state: 'blocked', message: 'setup required' }] })
   mocks.api.cancelJob.mockResolvedValue(undefined)
   vi.clearAllMocks()
 })
@@ -84,6 +89,19 @@ describe('application navigation handoffs', () => {
 })
 
 describe('structured pipeline terminal events', () => {
+  it('prevents a second creator launch while preflight is pending', async () => {
+    let releasePreflight: (value: { state: string; checks: never[] }) => void = () => undefined
+    mocks.api.preflight.mockImplementation(() => new Promise((resolve) => { releasePreflight = resolve }))
+    render(<App />)
+
+    const create = await screen.findByTestId('create-job')
+    await userEvent.click(create)
+    expect(create).toBeDisabled()
+    await userEvent.click(create)
+    expect(mocks.api.preflight).toHaveBeenCalledTimes(1)
+    releasePreflight({ state: 'blocked', checks: [] })
+  })
+
   it('renders a typed actionable failure with its diagnostic identifier', async () => {
     render(<App />)
     await waitFor(() => expect(mocks.pipelineHandler).toBeDefined())
