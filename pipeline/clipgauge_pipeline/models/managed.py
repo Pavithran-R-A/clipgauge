@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import shutil
 import time
@@ -20,6 +21,14 @@ SILERO_ARCHIVE = config.models_dir() / "torch" / "hub" / f"silero-vad-{SILERO_RE
 SILERO_HUB_ROOT = config.models_dir() / "torch" / "hub" / "snakers4_silero-vad_master"
 TORCH_CHECKPOINT = "wav2vec2_fairseq_base_ls960_asr_ls960.pth"
 ASR_GROUP = "core:asr"
+CUDA_RUNTIME_DIR = config.runtimes_dir() / "cuda" / "12.4"
+CUDA_RUNTIME_ARCHIVE = config.home_dir() / "downloads" / "cudart-llama-bin-win-cuda-12.4-x64.zip"
+CUDA_RUNTIME_FILES = {
+    "cublas64_12.dll": "e40202fe4223c1cd2d2dce7beec59e1ed61c7801bd827309183be9b50e358f4c",
+    "cublasLt64_12.dll": "2a896460bef60ed57ef32b0875812f355a6984e671d638bb632f5e8c1d7a831f",
+    "cudart64_12.dll": "d28e42265da7462162a54da6b7a99ea4fa2caf8139d862bb500db875d0b32dfc",
+}
+_CUDA_DLL_HANDLES: list[object] = []
 
 _UNSAFE_METADATA_KEYS = {
     "auto_map",
@@ -164,6 +173,75 @@ def asr_assets() -> list[downloads.ManagedAsset]:
     ]
 
 
+def cuda_runtime_asset() -> downloads.ManagedAsset | None:
+    """Return the pinned Windows CUDA redistributable for CTranslate2."""
+    if platform.system().lower() != "windows" or platform.machine().lower() not in {"amd64", "x86_64"}:
+        return None
+    return _asset(
+        "runtime:cuda:windows-x86_64:12.4",
+        "CUDA 12.4 speech runtime",
+        "CTranslate2 CUDA speech execution",
+        CUDA_RUNTIME_ARCHIVE,
+        "https://github.com/ggml-org/llama.cpp/releases/download/b10545/cudart-llama-bin-win-cuda-12.4-x64.zip",
+        391_443_627,
+        "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
+        license="CUDA runtime redistribution; see NVIDIA and llama.cpp notices",
+        source="https://github.com/ggml-org/llama.cpp/releases/tag/b10545",
+        source_revision="b10545",
+        archive_type="zip",
+        expected_paths=tuple(CUDA_RUNTIME_FILES),
+    )
+
+
+def cuda_runtime_ready() -> bool:
+    """Verify extracted CUDA libraries before any CUDA model import."""
+    asset = cuda_runtime_asset()
+    if asset is None:
+        return True
+    try:
+        if not CUDA_RUNTIME_ARCHIVE.is_file() or runtime.sha256_file(CUDA_RUNTIME_ARCHIVE).lower() != asset.sha256.lower():
+            return False
+        return all(
+            (CUDA_RUNTIME_DIR / filename).is_file()
+            and runtime.sha256_file(CUDA_RUNTIME_DIR / filename).lower() == digest
+            for filename, digest in CUDA_RUNTIME_FILES.items()
+        )
+    except OSError:
+        return False
+
+
+def _ensure_cuda_runtime() -> bool:
+    """Extract only the three approved CUDA DLLs after archive verification."""
+    if cuda_runtime_ready():
+        return True
+    asset = cuda_runtime_asset()
+    if asset is None or not CUDA_RUNTIME_ARCHIVE.is_file():
+        return False
+    try:
+        if runtime.sha256_file(CUDA_RUNTIME_ARCHIVE).lower() != asset.sha256.lower():
+            return False
+        runtime.extract_zip_verified(
+            CUDA_RUNTIME_ARCHIVE,
+            CUDA_RUNTIME_DIR,
+            expected_members=set(CUDA_RUNTIME_FILES),
+        )
+    except runtime.RuntimeIntegrityError:
+        return False
+    return cuda_runtime_ready()
+
+
+def activate_cuda_runtime() -> Path:
+    """Expose verified CUDA DLLs to this process only."""
+    if not cuda_runtime_ready():
+        raise runtime.RuntimeIntegrityError("managed CUDA runtime is missing or unverified")
+    if os.name == "nt":
+        _CUDA_DLL_HANDLES.append(os.add_dll_directory(str(CUDA_RUNTIME_DIR)))
+    path = os.environ.get("PATH", "").split(os.pathsep)
+    if str(CUDA_RUNTIME_DIR) not in path:
+        os.environ["PATH"] = str(CUDA_RUNTIME_DIR) + os.pathsep + os.environ.get("PATH", "")
+    return CUDA_RUNTIME_DIR
+
+
 def silero_asset() -> downloads.ManagedAsset:
     return _asset(
         "model:vad:silero-vad",
@@ -211,7 +289,11 @@ def punkt_asset() -> downloads.ManagedAsset:
 
 
 def all_assets() -> list[downloads.ManagedAsset]:
-    return [*asr_assets(), silero_asset(), alignment_asset(), punkt_asset()]
+    assets = [*asr_assets(), silero_asset(), alignment_asset(), punkt_asset()]
+    cuda_asset = cuda_runtime_asset()
+    if cuda_asset is not None:
+        assets.append(cuda_asset)
+    return assets
 
 
 def migrate_existing_caches(manager: downloads.DownloadManager) -> dict[str, str]:
@@ -361,6 +443,8 @@ def prepare_assets(manager: downloads.DownloadManager, *, require_consent: bool,
     punkt_archive = config.data_dir() / "nltk" / "punkt_tab.zip"
     _safe_extract_punkt(punkt_archive)
     _ensure_silero_hub_cache()
+    if cuda_runtime_asset() is not None and not _ensure_cuda_runtime():
+        raise runtime.RuntimeIntegrityError("CUDA speech runtime failed extraction or verification")
     return paths
 
 
@@ -372,12 +456,35 @@ def ready(manager: downloads.DownloadManager) -> bool:
     archive_installed = next((bool(row.get("installed")) for row in rows if row.get("asset_id") == silero_asset().asset_id), False)
     if archive_installed:
         _ensure_silero_hub_cache()
+    cuda_asset = cuda_runtime_asset()
+    cuda_ready = _ensure_cuda_runtime() if cuda_asset is not None else True
+    cuda_required = False
+    try:
+        from .. import hardware
+
+        capabilities = hardware.snapshot(config.home_dir())
+        cuda_required = bool(
+            (capabilities.get("nvidia") or {}).get("verified")
+            and (capabilities.get("cuda_ctranslate2") or {}).get("verified")
+        )
+    except Exception:  # noqa: BLE001 - setup readiness must retain CPU fallback
+        cuda_required = False
+    required_rows = [
+        row for row in rows
+        if row.get("asset_id") != (cuda_asset.asset_id if cuda_asset else None)
+    ]
     punkt_ready = (config.nltk_data_dir() / "tokenizers" / "punkt_tab" / "english").is_dir()
     silero_ready = all(
         (SILERO_HUB_ROOT / item).is_file()
         for item in silero_asset().expected_paths
     )
-    if not all(bool(row.get("installed")) for row in rows) or not archive_installed or not punkt_ready or not silero_ready:
+    if (
+        not all(bool(row.get("installed")) for row in required_rows)
+        or not archive_installed
+        or not punkt_ready
+        or not silero_ready
+        or (cuda_required and not cuda_ready)
+    ):
         return False
     try:
         for filename in ("config.json", "preprocessor_config.json", "tokenizer.json"):

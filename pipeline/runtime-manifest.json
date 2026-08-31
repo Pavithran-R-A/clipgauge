@@ -93,6 +93,17 @@
           "archive_type": "zip",
           "binary": "llama-server.exe"
         },
+        "windows-x86_64-cuda": {
+          "platform": "windows",
+          "architecture": "x86_64",
+          "backend": "cuda",
+          "cuda_version": "12.4",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10545/llama-b10545-bin-win-cuda-12.4-x64.zip",
+          "sha256": "7caaceb18f9b3af89ff06482f6142c68d2fe384e1f55a352a129fdeb41529121",
+          "size": 250962586,
+          "archive_type": "zip",
+          "binary": "llama-server.exe"
+        },
         "macos-arm64": {
           "platform": "macos",
           "architecture": "arm64",

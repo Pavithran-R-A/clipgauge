@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from clipgauge_pipeline import local_runtime
+from clipgauge_pipeline import cli
 from clipgauge_pipeline.edits import render_clip as edit_render
 from clipgauge_pipeline.render import renderer
 from clipgauge_pipeline.scoring import stage as scoring_stage
@@ -18,6 +19,65 @@ def test_windows_nvidia_prefers_verified_vulkan_local_runtime():
         available_keys={"windows-x86_64", "windows-x86_64-vulkan"},
     )
     assert key == "windows-x86_64-vulkan"
+
+
+def test_windows_verified_cuda_runtime_wins_over_vulkan():
+    key = local_runtime.select_runtime_asset_key(
+        platform_key="windows-x86_64",
+        nvidia_available=True,
+        vulkan_available=True,
+        cuda_available=True,
+        available_keys={
+            "windows-x86_64",
+            "windows-x86_64-vulkan",
+            "windows-x86_64-cuda",
+        },
+    )
+    assert key == "windows-x86_64-cuda"
+
+
+def test_windows_vulkan_remains_fallback_without_cuda_runtime():
+    key = local_runtime.select_runtime_asset_key(
+        platform_key="windows-x86_64",
+        nvidia_available=True,
+        vulkan_available=True,
+        cuda_available=False,
+        available_keys={
+            "windows-x86_64",
+            "windows-x86_64-vulkan",
+            "windows-x86_64-cuda",
+        },
+    )
+    assert key == "windows-x86_64-vulkan"
+
+
+def test_runtime_download_identity_includes_selected_backend(tmp_path, monkeypatch):
+    manifest = {
+        "runtimes": {
+            "llama-server": {
+                "version": "b10545",
+                "license": "MIT",
+                "provenance": "https://example.invalid/llama",
+            }
+        }
+    }
+    manager = local_runtime.LocalRuntime(root=tmp_path, manifest=manifest)
+    monkeypatch.setattr(manager, "runtime_asset_key", lambda: "windows-x86_64-cuda")
+    monkeypatch.setattr(
+        manager,
+        "runtime_asset",
+        lambda: {
+            "archive_type": "zip",
+            "url": "https://example.invalid/cuda.zip",
+            "size": 12,
+            "sha256": "a" * 64,
+        },
+    )
+
+    asset = cli._setup_runtime_asset(manager)
+
+    assert asset.asset_id == "runtime:llama-server:windows-x86_64-cuda"
+    assert asset.destination.endswith("llama-server-b10545-windows-x86_64-cuda.zip")
 
 
 def test_windows_without_verified_gpu_keeps_cpu_runtime_fallback():
@@ -88,6 +148,13 @@ def test_local_scoring_actual_model_calls_stay_bounded(monkeypatch, tmp_path, ca
                 "punchline_index": -1, "shock": 2, "curiosity_gap": 6,
                 "value": 7, "self_contained": True, "bait_phrases": [],
                 "summary": "A complete local scoring fixture.",
+                "hook_strength": 7, "hook_reason": "claim",
+                "standalone_comprehension": 7, "setup_strength": 7,
+                "escalation_strength": 7, "payoff_strength": 7,
+                "payoff_location": "middle", "ending_completeness": 7,
+                "story_shape": "hook_setup_payoff", "information_density": 7,
+                "reaction_strength": 7, "recommended_start_offset": 0.4,
+                "recommended_end_offset": 5.0,
             }
 
     client = Client()
@@ -118,3 +185,9 @@ def test_local_scoring_actual_model_calls_stay_bounded(monkeypatch, tmp_path, ca
     assert client.calls <= scoring_stage.LOCAL_T1_CANDIDATE_LIMIT
     assert result["performance"]["finalist_limit"] == scoring_stage.LOCAL_FINALIST_LIMIT
     assert result["performance"]["music_llm_calls"] == 0
+    assert all("boundary_refinement" in item for item in result["clips"])
+    assert any(
+        item["boundary_refinement"]["head_adjustment"] != 0
+        or item["boundary_refinement"]["tail_adjustment"] != 0
+        for item in result["clips"]
+    )

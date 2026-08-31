@@ -141,13 +141,13 @@ def _apply_profile(settings: config.Settings, profile: providers_mod.ProviderPro
 def _setup_runtime_asset(manager: local_runtime.LocalRuntime) -> downloads.ManagedAsset:
     spec = manager.runtime_asset()
     version = str(manager.manifest["runtimes"]["llama-server"]["version"])
-    platform_key = manager._platform_key()
+    runtime_key = manager.runtime_asset_key()
     archive_type = str(spec["archive_type"])
     return downloads.ManagedAsset(
-        asset_id=f"runtime:llama-server:{platform_key}",
+        asset_id=f"runtime:llama-server:{runtime_key}",
         display_name=f"ClipGauge Local runtime · llama.cpp {version}",
         purpose="Owned loopback local inference runtime",
-        destination=f"downloads/llama-server-{version}-{platform_key}.{archive_type.replace('.', '-')}",
+        destination=f"downloads/llama-server-{version}-{runtime_key}.{archive_type.replace('.', '-')}",
         url=str(spec["url"]),
         size_bytes=int(spec["size"]),
         sha256=str(spec["sha256"]),

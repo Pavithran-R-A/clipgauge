@@ -66,16 +66,19 @@ def select_runtime_asset_key(
     platform_key: str,
     nvidia_available: bool,
     vulkan_available: bool,
+    cuda_available: bool = False,
     available_keys: set[str],
 ) -> str:
-    """Choose the fastest verified managed runtime without losing CPU fallback.
+    """Choose CUDA first, then Vulkan, with CPU fallback.
 
-    The official llama.cpp Vulkan Windows build is self-contained and works with
-    current NVIDIA drivers without shipping a second CUDA runtime.  A verified
-    NVIDIA device is sufficient evidence to prefer it even when the optional
-    ``vulkaninfo`` command-line utility is not installed; llama-server's bounded
-    startup health check remains the final runtime verification boundary.
+    CUDA requires both verified CTranslate2 CUDA support and the managed CUDA
+    runtime. Vulkan remains the Windows GPU fallback. A verified NVIDIA device
+    is sufficient to prefer either GPU backend; llama-server health checks remain
+    the final runtime verification boundary.
     """
+    cuda_key = f"{platform_key}-cuda"
+    if platform_key == "windows-x86_64" and cuda_key in available_keys and cuda_available and nvidia_available:
+        return cuda_key
     gpu_key = f"{platform_key}-vulkan"
     if (
         platform_key == "windows-x86_64"
@@ -169,17 +172,25 @@ class LocalRuntime:
             raise LocalRuntimeError("ClipGauge Local is not available for this platform yet.")
         nvidia_available = False
         vulkan_available = False
+        cuda_available = False
         if platform_key == "windows-x86_64":
             try:
                 capabilities = hardware.snapshot(self.root)
                 nvidia_available = bool((capabilities.get("nvidia") or {}).get("verified"))
                 vulkan_available = bool((capabilities.get("vulkan") or {}).get("verified"))
-            except Exception:  # noqa: BLE001 — capability probing must never remove CPU fallback
+                if self.root == config.home_dir().resolve():
+                    from .models import managed
+
+                    cuda_available = managed.cuda_runtime_ready() and bool(
+                        (capabilities.get("cuda_ctranslate2") or {}).get("verified")
+                    )
+            except Exception:  # noqa: BLE001 - capability probing must never remove CPU fallback
                 pass
         selected = select_runtime_asset_key(
             platform_key=platform_key,
             nvidia_available=nvidia_available,
             vulkan_available=vulkan_available,
+            cuda_available=cuda_available,
             available_keys=set(assets),
         )
         self._runtime_asset_key_cache = selected
@@ -193,6 +204,16 @@ class LocalRuntime:
 
     def runtime_backend(self) -> str:
         return str(self.runtime_asset().get("backend", "cpu"))
+
+    def runtime_library_dir(self) -> Path | None:
+        """Return verified local CUDA libraries for the child runtime."""
+        if self.runtime_backend() != "cuda":
+            return None
+        if self.root != config.home_dir().resolve():
+            return None
+        from .models import managed
+
+        return managed.CUDA_RUNTIME_DIR if managed.cuda_runtime_ready() else None
 
     def _runtime_destination(self) -> Path:
         version = str(self.manifest["runtimes"]["llama-server"]["version"])
@@ -370,6 +391,11 @@ class LocalRuntime:
             "stderr": stderr_handle or subprocess.DEVNULL,
             "creationflags": creationflags,
         }
+        library_dir = self.runtime_library_dir()
+        if library_dir is not None:
+            child_env = os.environ.copy()
+            child_env["PATH"] = str(library_dir) + os.pathsep + child_env.get("PATH", "")
+            popen_kwargs["env"] = child_env
         if os.name != "nt":
             popen_kwargs["start_new_session"] = True
         try:

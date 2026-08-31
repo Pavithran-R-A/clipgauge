@@ -178,7 +178,6 @@ class ScoreStage(Stage):
             start, end = cand["start"], cand["end"]
             ctx.emit(i / max(1, len(prepared)) * 0.6, f"Scoring moment {i + 1}/{len(prepared)}…")
             window_events = _events_in(timeline, start, end)
-            quality = short_quality.assess(flat, window_events, end - start)
             near_laughs = [e for e in _events_in(timeline, start, end, pad=3.0) if e["type"] == "laugh"]
             context = {
                 "duration": end - start,
@@ -193,6 +192,7 @@ class ScoreStage(Stage):
                 ctx.emit(-1, f"moment {i + 1} scoring failed, skipping: {err}")
                 continue
 
+            quality = short_quality.assess(flat, window_events, end - start, llm=t1)
             arousal_pct = _window_pct(arousal, arousal_grid, start, end)
             heatmap_pct = (
                 _window_pct(heat_values, 1.0, start, end) if heat_values is not None else None
@@ -234,6 +234,24 @@ class ScoreStage(Stage):
 
         scored.sort(key=_text_rank, reverse=True)
         finalists = scored[: int(budget["finalist_limit"])]
+
+        for entry in finalists:
+            original_start, original_end = entry["start"], entry["end"]
+            refined_start, refined_end = short_quality.refine_boundaries(
+                segments,
+                original_start,
+                original_end,
+                entry.get("t1_raw"),
+            )
+            entry["start"], entry["end"] = refined_start, refined_end
+            entry["boundary_refinement"] = {
+                "original_start": original_start,
+                "original_end": original_end,
+                "refined_start": refined_start,
+                "refined_end": refined_end,
+                "head_adjustment": round(refined_start - original_start, 3),
+                "tail_adjustment": round(refined_end - original_end, 3),
+            }
 
         # T2 visual pass + music brief on finalists only.  Current local models
         # are text-only and intentionally skip extra music-model generations so

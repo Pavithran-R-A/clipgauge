@@ -43,10 +43,33 @@ T1_SCHEMA: dict[str, Any] = {
             "description": "engagement-bait phrases present (like/subscribe/comment below); NEGATIVE signal",
         },
         "summary": {"type": "string", "description": "one sentence: what happens in this moment"},
+        "hook_strength": {"type": "integer", "minimum": 0, "maximum": 10},
+        "hook_reason": {
+            "type": "string",
+            "enum": ["question", "claim", "conflict", "specific_reveal", "reaction", "none"],
+        },
+        "standalone_comprehension": {"type": "integer", "minimum": 0, "maximum": 10},
+        "setup_strength": {"type": "integer", "minimum": 0, "maximum": 10},
+        "escalation_strength": {"type": "integer", "minimum": 0, "maximum": 10},
+        "payoff_strength": {"type": "integer", "minimum": 0, "maximum": 10},
+        "payoff_location": {"type": "string", "enum": ["early", "middle", "late", "none"]},
+        "ending_completeness": {"type": "integer", "minimum": 0, "maximum": 10},
+        "story_shape": {
+            "type": "string",
+            "enum": ["hook_setup_payoff", "question_answer", "conflict_reaction", "reveal", "open_ended", "none"],
+        },
+        "information_density": {"type": "integer", "minimum": 0, "maximum": 10},
+        "reaction_strength": {"type": "integer", "minimum": 0, "maximum": 10},
+        "recommended_start_offset": {"type": "number", "minimum": 0, "maximum": 10},
+        "recommended_end_offset": {"type": "number", "minimum": 0, "maximum": 120},
     },
     "required": [
         "hook", "hook_type", "funniness", "punchline_index", "shock",
         "curiosity_gap", "value", "self_contained", "bait_phrases", "summary",
+        "hook_strength", "hook_reason", "standalone_comprehension", "setup_strength",
+        "escalation_strength", "payoff_strength", "payoff_location", "ending_completeness",
+        "story_shape", "information_density", "reaction_strength",
+        "recommended_start_offset", "recommended_end_offset",
     ],
 }
 
@@ -79,7 +102,10 @@ def t1_prompt(transcript_text: str, context: dict) -> str:
         "dimension should be rare. hook rates ONLY the first ~3 seconds. "
         "shock is about content (surprising/taboo), independent of hook. "
         "punchline_index is the 0-based index (counting every word in order) "
-        "of the word where the biggest laugh lands, or -1."
+        "of the word where the biggest laugh lands, or -1.\n"
+        "Also return the bounded short-form fields. Use only facts visible in "
+        "the transcript and listed events. Offsets are seconds relative to this "
+        "candidate. Choose payoff_location=none when no payoff exists."
     )
 
 

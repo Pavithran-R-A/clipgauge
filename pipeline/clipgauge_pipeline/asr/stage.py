@@ -92,12 +92,22 @@ class AsrStage(Stage):
             )
         ctx.emit(-1, "Loading verified speech model…")
         import torch  # deferred: heavy import
-        import whisperx
 
         capabilities = hardware.snapshot(config.home_dir())
         device, compute_type = hardware.select_asr_accelerator(capabilities)
         acceleration = hardware.asr_readiness(capabilities)
         fallback_reason = None
+        if device == "cuda":
+            try:
+                managed.activate_cuda_runtime()
+            except Exception as exc:  # noqa: BLE001 - readiness should have caught this
+                raise StageError(
+                    "The verified CUDA speech runtime is unavailable. Repair Speech recognition in Setup Center.",
+                    code="ASR_CUDA_RUNTIME_NOT_READY",
+                    retryable=True,
+                ) from exc
+        import whisperx
+
         os.environ["CLIPGAUGE_ACCELERATOR"] = f"{device}/{compute_type}"
         ctx.emit(-1, f"Using {device.upper()} speech acceleration ({compute_type})…")
         t0 = time.monotonic()
