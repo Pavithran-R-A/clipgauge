@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
+import { chooseExportDestination } from '../exportDestination'
 import { traceMedia } from '../mediaDiagnostics'
 import type { Clip, JobResults, RenderOutput } from '../types'
 import ClipEditor from './ClipEditor'
@@ -84,11 +85,13 @@ export default function Review({ results, onBack, onRestyle }: Props) {
 
   async function doExport(out: RenderOutput, clip: Clip) {
     if (!out.path || !artifactAvailable) return
-    const dest = await api.exportClip(
-      results.job_id,
-      out.clip,
-      `${results.ingest?.title ?? 'clip'} ${fmtTime(clip.start)}`
-    )
+    const suggestedTitle = `${results.ingest?.title ?? 'clip'} ${fmtTime(clip.start)}`
+    const dest = await chooseExportDestination({
+      jobId: results.job_id,
+      clip: out.clip,
+      suggestedTitle,
+    })
+    if (!dest) return
     setExported((prev) => ({ ...prev, [out.clip]: dest }))
   }
 
@@ -300,16 +303,14 @@ export default function Review({ results, onBack, onRestyle }: Props) {
                   <div className="ledger-row">
                     <span className="ledger-factor mono">{Math.round(pair.clip.ledger.score)}</span>
                     <div>
-                                              <span className="ledger-rule">Overall score</span>
-
+                      <span className="ledger-rule">Overall score</span>
                       <span className="ledger-reason">Highest platform composite: {pair.clip.best_platform}</span>
                     </div>
                   </div>
                   <div className="ledger-row">
                     <span className="ledger-factor mono">{Math.round(pair.clip.ledger.composition.curve_score)}</span>
                     <div>
-                                              <span className="ledger-rule">Signal mix</span>
-
+                      <span className="ledger-rule">Signal mix</span>
                       <span className="ledger-reason">
                         arousal {Math.round(pair.clip.ledger.composition.arousal_pct * 100)}% ·{' '}
                         {pair.clip.ledger.composition.heatmap_pct === null
@@ -322,8 +323,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
                   <div className="ledger-row">
                     <span className="ledger-factor mono">v{pair.clip.ledger.provenance.scoring_config_version}</span>
                     <div>
-                                              <span className="ledger-rule">Scoring source</span>
-
+                      <span className="ledger-rule">Scoring source</span>
                       <span className="ledger-reason">
                         {pair.clip.ledger.provenance.model} · {pair.clip.ledger.provenance.llm_mode} ·{' '}
                         {pair.clip.ledger.provenance.arousal_source}
@@ -355,8 +355,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
                 <p className="audit-label">MUSIC DIRECTION</p>
                 <div className="music-card">
                   <p className="music-main">
-                                      <span className="signal-accent">{pair.clip.music.genre}</span>
- ·{' '}
+                    <span className="signal-accent">{pair.clip.music.genre}</span> ·{' '}
                     {pair.clip.music.mood} · <span className="mono">{pair.clip.music.bpm_range} bpm</span>
                   </p>
                   <p className="music-theme">{pair.clip.music.theme}</p>
