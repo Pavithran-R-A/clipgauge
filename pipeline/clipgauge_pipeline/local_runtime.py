@@ -53,11 +53,37 @@ def _stderr_tail(root: Path, path: Path | None, limit: int = 3_000) -> str | Non
     except OSError:
         return None
 
-from . import config, runtime
+
+from . import config, hardware, runtime
 
 
 class LocalRuntimeError(RuntimeError):
     """The managed local runtime cannot be started or verified."""
+
+
+def select_runtime_asset_key(
+    *,
+    platform_key: str,
+    nvidia_available: bool,
+    vulkan_available: bool,
+    available_keys: set[str],
+) -> str:
+    """Choose the fastest verified managed runtime without losing CPU fallback.
+
+    The official llama.cpp Vulkan Windows build is self-contained and works with
+    current NVIDIA drivers without shipping a second CUDA runtime.  A verified
+    NVIDIA device is sufficient evidence to prefer it even when the optional
+    ``vulkaninfo`` command-line utility is not installed; llama-server's bounded
+    startup health check remains the final runtime verification boundary.
+    """
+    gpu_key = f"{platform_key}-vulkan"
+    if (
+        platform_key == "windows-x86_64"
+        and gpu_key in available_keys
+        and (nvidia_available or vulkan_available)
+    ):
+        return gpu_key
+    return platform_key
 
 
 @dataclass(frozen=True)
@@ -118,6 +144,7 @@ class LocalRuntime:
         self.root.mkdir(parents=True, exist_ok=True)
         self.manifest = manifest or self._load_manifest()
         self.handle: LocalServerHandle | None = None
+        self._runtime_asset_key_cache: str | None = None
 
     def _load_manifest(self) -> dict[str, Any]:
         path = Path(__file__).parents[1] / "runtime-manifest.json"
@@ -133,15 +160,54 @@ class LocalRuntime:
             return "macos-arm64" if machine in {"arm64", "aarch64"} else "macos-x86_64"
         return "linux-x86_64" if machine in {"x86_64", "amd64"} else "linux-arm64"
 
+    def runtime_asset_key(self) -> str:
+        if self._runtime_asset_key_cache is not None:
+            return self._runtime_asset_key_cache
+        platform_key = self._platform_key()
+        assets = self.manifest.get("runtimes", {}).get("llama-server", {}).get("assets", {})
+        if platform_key not in assets:
+            raise LocalRuntimeError("ClipGauge Local is not available for this platform yet.")
+        nvidia_available = False
+        vulkan_available = False
+        if platform_key == "windows-x86_64":
+            try:
+                capabilities = hardware.snapshot(self.root)
+                nvidia_available = bool((capabilities.get("nvidia") or {}).get("verified"))
+                vulkan_available = bool((capabilities.get("vulkan") or {}).get("verified"))
+            except Exception:  # noqa: BLE001 — capability probing must never remove CPU fallback
+                pass
+        selected = select_runtime_asset_key(
+            platform_key=platform_key,
+            nvidia_available=nvidia_available,
+            vulkan_available=vulkan_available,
+            available_keys=set(assets),
+        )
+        self._runtime_asset_key_cache = selected
+        return selected
+
     def runtime_asset(self) -> dict[str, Any]:
         try:
-            return self.manifest["runtimes"]["llama-server"]["assets"][self._platform_key()]
+            return self.manifest["runtimes"]["llama-server"]["assets"][self.runtime_asset_key()]
         except KeyError as exc:
             raise LocalRuntimeError("ClipGauge Local is not available for this platform yet.") from exc
 
+    def runtime_backend(self) -> str:
+        return str(self.runtime_asset().get("backend", "cpu"))
+
+    def _runtime_destination(self) -> Path:
+        version = str(self.manifest["runtimes"]["llama-server"]["version"])
+        base = self.root / "runtimes" / "llama-server" / version
+        key = self.runtime_asset_key()
+        # Preserve the existing CPU path for compatibility. GPU variants live in
+        # their own directory so an old CPU executable can never masquerade as
+        # an accelerated installation.
+        if key == self._platform_key():
+            return base
+        return base / key
+
     def binary_path(self) -> Path:
         asset = self.runtime_asset()
-        destination = self.root / "runtimes" / "llama-server" / self.manifest["runtimes"]["llama-server"]["version"]
+        destination = self._runtime_destination()
         binary = Path(asset["binary"])
         path = (destination / binary).resolve()
         if path != self.root and self.root not in path.parents:
@@ -178,7 +244,7 @@ class LocalRuntime:
         asset = self.runtime_asset()
         if runtime.sha256_file(archive).lower() != str(asset["sha256"]).lower():
             raise LocalRuntimeError("The llama.cpp runtime archive failed SHA-256 verification.")
-        destination = self.root / "runtimes" / "llama-server" / self.manifest["runtimes"]["llama-server"]["version"]
+        destination = self._runtime_destination()
         runtime.extract_archive_verified(archive, destination, archive_type=str(asset["archive_type"]))
         binary = self.binary_path()
         if not binary.is_file():
@@ -210,7 +276,7 @@ class LocalRuntime:
             raise LocalRuntimeError(
                 "The selected ClipGauge Local model failed verification. Delete it and retry the verified download."
             ) from exc
-        return [
+        command = [
             str(binary),
             "--model",
             str(model),
@@ -226,6 +292,9 @@ class LocalRuntime:
             "--reasoning",
             "off",
         ]
+        if self.runtime_backend() in {"vulkan", "cuda", "metal"}:
+            command.extend(["--n-gpu-layers", "999"])
+        return command
 
     def start(self, model_id: str, endpoint: str | None = None) -> str:
         if self.handle and self.handle.process.poll() is None:
@@ -234,6 +303,7 @@ class LocalRuntime:
         port = self._port(endpoint)
         command = self.command(model_id, port)
         model = self.model_path(model_id)
+        backend = self.runtime_backend()
         started_at = time.monotonic()
         stderr_path = self.root / "diagnostics" / "local-runtime.stderr.log" if _qa_trace_enabled() else None
         if stderr_path:
@@ -244,10 +314,13 @@ class LocalRuntime:
             self.root,
             "runtime_start",
             runtime_version=self.manifest["runtimes"]["llama-server"]["version"],
+            runtime_asset_key=self.runtime_asset_key(),
+            backend=backend,
             model_id=model_id,
             model_size_bytes=model.stat().st_size,
             context_size=4096,
             parallel=1,
+            gpu_layers=999 if backend in {"vulkan", "cuda", "metal"} else 0,
             reasoning="off",
             cpu_threads_configured=None,
             endpoint_kind="loopback",
@@ -294,6 +367,7 @@ class LocalRuntime:
                         health_status=response.status_code,
                         ready_seconds=round(time.monotonic() - started_at, 3),
                         process_pid=process.pid,
+                        backend=backend,
                         slots_status=slots_status,
                         slots_keys=slots_keys,
                     )
