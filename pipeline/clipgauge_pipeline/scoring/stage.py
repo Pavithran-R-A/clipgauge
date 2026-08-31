@@ -1,10 +1,10 @@
-"""Scoring stage: T1 rubric per candidate → cross-validation → rank → T2
-frames on the finalists → per-platform composites + music briefs, all with
-full provenance (decision #3).
+"""Scoring stage: deterministic pre-ranking → bounded T1 rubric scoring →
+cross-validation → finalists → optional visual pass and music guidance.
 
-Cost shape: ~35 T1 text calls + ~12 T2 vision calls + ~12 music calls per
-video on Gemini Flash. In Ollama mode T2 is skipped (recorded as a missing
-signal) and scores are labeled local-estimate."""
+Cloud providers keep the richer historical path.  The local provider has a
+strict expensive-work budget so a long source cannot accidentally turn dozens
+of candidate windows into an hour of sequential local-model generations.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +22,19 @@ from . import providers as providers_mod
 from . import rubric
 
 SELECT_COUNT = 12
+LOCAL_T1_CANDIDATE_LIMIT = 10
+LOCAL_FINALIST_LIMIT = 6
+
+
+def scoring_budget(*, local: bool, candidate_count: int) -> dict[str, int | bool]:
+    """Return the deterministic expensive-work ceiling for one scoring run."""
+    count = max(0, int(candidate_count))
+    return {
+        "candidate_count": count,
+        "t1_limit": min(count, LOCAL_T1_CANDIDATE_LIMIT) if local else count,
+        "finalist_limit": LOCAL_FINALIST_LIMIT if local else SELECT_COUNT,
+        "music_llm": not local,
+    }
 
 
 def _transcript_slice(segments: list[dict], start: float, end: float) -> tuple[str, str]:
@@ -63,6 +76,28 @@ def _window_pct(values: np.ndarray, grid_sec: float, start: float, end: float) -
     return float(np.mean(values <= window_mean))
 
 
+def _local_prerank(item: tuple[dict, str, str]) -> tuple[float, float, float]:
+    """Cheap deterministic ordering before any local-model call.
+
+    Candidate generation already combines signal curves.  Reuse those signals
+    rather than asking the LLM to rediscover whether all 30-40 windows deserve
+    an expensive semantic pass.
+    """
+    cand = item[0]
+    channels = cand.get("channel_scores") or {}
+    if isinstance(channels, dict):
+        channel_values = [float(value) for value in channels.values() if isinstance(value, (int, float))]
+    elif isinstance(channels, list):
+        channel_values = [float(value) for value in channels if isinstance(value, (int, float))]
+    else:
+        channel_values = []
+    return (
+        float(cand.get("curve_score", 0.0)),
+        max(channel_values, default=0.0),
+        sum(channel_values),
+    )
+
+
 class ScoreStage(Stage):
     name = "score"
     schema_version = 2
@@ -83,6 +118,7 @@ class ScoreStage(Stage):
         except (llm_mod.LlmError, ValueError) as err:
             raise StageError(str(err)) from err
         llm_mode = profile.kind
+        is_local = bool(profile.capabilities.local)
 
         segments = diarize["segments"]
         timeline = events["timeline"]
@@ -107,13 +143,26 @@ class ScoreStage(Stage):
         cv_constants = scoring_config["constants"]
 
         candidates = cands["candidates"]
+        budget = scoring_budget(local=is_local, candidate_count=len(candidates))
+
+        # Slice transcripts first so short/non-speech windows do not consume the
+        # local model-call budget.  Cloud mode retains the original candidate
+        # order and full semantic pass; local mode cheaply pre-ranks viable
+        # windows and sends only the best bounded subset to the model.
+        prepared: list[tuple[dict, str, str]] = []
+        for cand in candidates:
+            labeled, flat = _transcript_slice(segments, cand["start"], cand["end"])
+            if len(flat.split()) >= 20:
+                prepared.append((cand, labeled, flat))
+        if is_local:
+            prepared.sort(key=_local_prerank, reverse=True)
+            prepared = prepared[: int(budget["t1_limit"])]
+
         scored: list[dict] = []
-        for i, cand in enumerate(candidates):
+        t1_calls = 0
+        for i, (cand, labeled, _flat) in enumerate(prepared):
             start, end = cand["start"], cand["end"]
-            ctx.emit(i / max(1, len(candidates)) * 0.6, f"Scoring moment {i + 1}/{len(candidates)}…")
-            labeled, flat = _transcript_slice(segments, start, end)
-            if len(flat.split()) < 20:
-                continue
+            ctx.emit(i / max(1, len(prepared)) * 0.6, f"Scoring moment {i + 1}/{len(prepared)}…")
             window_events = _events_in(timeline, start, end)
             near_laughs = [e for e in _events_in(timeline, start, end, pad=3.0) if e["type"] == "laugh"]
             context = {
@@ -121,6 +170,7 @@ class ScoreStage(Stage):
                 "events_desc": _events_desc(window_events),
             }
             try:
+                t1_calls += 1
                 t1 = client.generate_json(rubric.t1_prompt(labeled, context), rubric.T1_SCHEMA)
             except llm_mod.LlmError:
                 raise
@@ -158,7 +208,7 @@ class ScoreStage(Stage):
         if not scored:
             raise StageError("No candidate produced a scoreable transcript.")
 
-        # Rank by best pre-visual platform score, take the finalists.
+        # Rank by best pre-visual platform score, take the provider-appropriate finalists.
         def _text_rank(entry: dict) -> float:
             scores, _ = rubric.composite(
                 entry["subscores"], entry["curve_score"], entry["heatmap_pct"], None,
@@ -167,10 +217,13 @@ class ScoreStage(Stage):
             return max(scores.values())
 
         scored.sort(key=_text_rank, reverse=True)
-        finalists = scored[:SELECT_COUNT]
+        finalists = scored[: int(budget["finalist_limit"])]
 
-        # T2 visual pass + music brief on finalists only.
+        # T2 visual pass + music brief on finalists only.  Current local models
+        # are text-only and intentionally skip extra music-model generations so
+        # non-essential metadata cannot dominate wall time.
         supports_vision = client.profile.capabilities.vision is True
+        music_llm_calls = 0
         for j, entry in enumerate(finalists):
             ctx.emit(0.6 + j / max(1, len(finalists)) * 0.35, f"Visual pass {j + 1}/{len(finalists)}…")
             visual = None
@@ -230,32 +283,35 @@ class ScoreStage(Stage):
                 "adjustments": entry["adjustments"],
                 "signals_fired": fired,
                 "signals_missing": missing,
-                                    "provenance": {
-                        "llm_mode": llm_mode,
-                        "provider_profile_id": profile.id,
-                        "provider_kind": profile.kind,
-                        "model": client.model,
-                        "endpoint_identity": profile.endpoint_identity,
-                        "capabilities": profile.capabilities.to_dict(),
-                        "structured_level": structured_level,
-                        "degraded_signals": degraded_signals,
-                        "scoring_config_version": scoring_config["version"],
-                        "arousal_source": arousal_source,
-                        "visual_pass": supports_vision,
-                    },
-
+                "provenance": {
+                    "llm_mode": llm_mode,
+                    "provider_profile_id": profile.id,
+                    "provider_kind": profile.kind,
+                    "model": client.model,
+                    "endpoint_identity": profile.endpoint_identity,
+                    "capabilities": profile.capabilities.to_dict(),
+                    "structured_level": structured_level,
+                    "degraded_signals": degraded_signals,
+                    "scoring_config_version": scoring_config["version"],
+                    "arousal_source": arousal_source,
+                    "visual_pass": supports_vision,
+                },
             }
 
             prior_mood = music_brief.mood_prior(window_events, entry["arousal_pct"])
-            try:
-                entry["music"] = client.generate_json(
-                    music_brief.music_prompt(
-                        entry["summary"], entry["transcript"], prior_mood, _events_desc(window_events)
-                    ),
-                    music_brief.MUSIC_SCHEMA,
-                )
-                entry["music"]["mood_prior"] = prior_mood
-            except Exception:  # noqa: BLE001 — a clip without a music brief still ships
+            if bool(budget["music_llm"]):
+                try:
+                    music_llm_calls += 1
+                    entry["music"] = client.generate_json(
+                        music_brief.music_prompt(
+                            entry["summary"], entry["transcript"], prior_mood, _events_desc(window_events)
+                        ),
+                        music_brief.MUSIC_SCHEMA,
+                    )
+                    entry["music"]["mood_prior"] = prior_mood
+                except Exception:  # noqa: BLE001 — a clip without a music brief still ships
+                    entry["music"] = None
+            else:
                 entry["music"] = None
 
         finalists.sort(key=lambda e: e["score"], reverse=True)
@@ -273,4 +329,12 @@ class ScoreStage(Stage):
             "t2_ran": supports_vision,
             "scoring_config_version": scoring_config["version"],
             "scoring_constants": cv_constants,
+            "performance": {
+                "candidate_count": len(candidates),
+                "viable_candidate_count": len(prepared) if not is_local else min(len(prepared), int(budget["t1_limit"])),
+                "candidate_llm_limit": int(budget["t1_limit"]),
+                "t1_calls": t1_calls,
+                "finalist_limit": int(budget["finalist_limit"]),
+                "music_llm_calls": music_llm_calls,
+            },
         }
