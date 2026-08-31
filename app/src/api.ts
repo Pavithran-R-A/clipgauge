@@ -47,7 +47,8 @@ export const api = {
   startSetup: (args: string[]) => invoke<string>('start_setup', { args }),
   cancelSetup: (operationId: string) => invoke<void>('cancel_setup', { operationId }),
   saveClipEdits: (jobId: string, input: SaveClipEditsInput) => invoke<void>('save_clip_edits', { jobId, input }),
-  exportClip: (jobId: string, clip: number, title?: string) => invoke<string>('export_clip', { jobId, clip, title }),
+  exportClip: (jobId: string, clip: number, title?: string, destination?: string) =>
+    invoke<string>('export_clip', { jobId, clip, title, destination }),
   requestPlaybackUrl: (jobId: string, artifactType: 'render' | 'source', clip?: number) =>
     invoke<string>('request_playback_url', { jobId, artifactType, clip }),
   recordMediaEvent: (input: Record<string, unknown>) => invoke<void>('record_media_event', { input }),
