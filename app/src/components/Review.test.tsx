@@ -14,6 +14,14 @@ vi.mock('../api', () => ({
   }
 }))
 
+const { chooseExportDestinationMock } = vi.hoisted(() => ({
+  chooseExportDestinationMock: vi.fn(),
+}))
+
+vi.mock('../exportDestination', () => ({
+  chooseExportDestination: chooseExportDestinationMock,
+}))
+
 vi.mock('./ClipEditor', () => ({
   default: () => <div data-testid="clip-editor" />
 }))
@@ -89,7 +97,8 @@ describe('Review media trust states', () => {
     expect(await waitFor(() => screen.getByTestId('review-video'))).toBeInTheDocument()
   })
 
-  it('exports by job and clip identity, never a source pathname', async () => {
+  it('opens Save As, then exports by job and clip identity', async () => {
+    chooseExportDestinationMock.mockResolvedValue('C:/Users/tester/Videos/fixture.mp4')
     render(
       <Review
         results={results({ path: '/managed/jobs/20260818-155237-c6b118/clips/clip_00.mp4', artifact_status: 'available' })}
@@ -98,6 +107,25 @@ describe('Review media trust states', () => {
       />
     )
     fireEvent.click(screen.getByRole('button', { name: 'EXPORT MP4' }))
-    expect(api.exportClip).toHaveBeenCalledWith('20260818-155237-c6b118', 0, 'fixture 0:00')
+    await waitFor(() => expect(chooseExportDestinationMock).toHaveBeenCalledWith({
+      jobId: '20260818-155237-c6b118',
+      clip: 0,
+      suggestedTitle: 'fixture 0:00',
+    }))
+    expect(api.exportClip).not.toHaveBeenCalled()
+  })
+
+  it('does not export when Save As is cancelled', async () => {
+    chooseExportDestinationMock.mockResolvedValue(null)
+    render(
+      <Review
+        results={results({ path: '/managed/jobs/20260818-155237-c6b118/clips/clip_00.mp4', artifact_status: 'available' })}
+        onBack={vi.fn()}
+        onRestyle={vi.fn()}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'EXPORT MP4' }))
+    await waitFor(() => expect(chooseExportDestinationMock).toHaveBeenCalled())
+    expect(api.exportClip).not.toHaveBeenCalled()
   })
 })

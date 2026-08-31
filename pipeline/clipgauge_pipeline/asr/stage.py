@@ -96,6 +96,8 @@ class AsrStage(Stage):
 
         capabilities = hardware.snapshot(config.home_dir())
         device, compute_type = hardware.select_asr_accelerator(capabilities)
+        acceleration = hardware.asr_readiness(capabilities)
+        fallback_reason = None
         os.environ["CLIPGAUGE_ACCELERATOR"] = f"{device}/{compute_type}"
         ctx.emit(-1, f"Using {device.upper()} speech acceleration ({compute_type})…")
         t0 = time.monotonic()
@@ -106,7 +108,15 @@ class AsrStage(Stage):
             )
         except Exception as exc:  # noqa: BLE001 - provide a reliable CPU fallback
             if device != "cpu":
+                fallback_reason = "CUDA speech model load failed."
                 device, compute_type = "cpu", "int8"
+                acceleration = {
+                    **acceleration,
+                    "state": "GPU PRESENT — RUNTIME DEGRADED",
+                    "device": device,
+                    "compute_type": compute_type,
+                    "reason": fallback_reason,
+                }
                 os.environ["CLIPGAUGE_ACCELERATOR"] = "cpu/int8"
                 ctx.emit(-1, "GPU speech acceleration was unavailable; using CPU fallback (int8)…")
                 try:
@@ -144,6 +154,15 @@ class AsrStage(Stage):
             ),
             emit=lambda message: ctx.emit(-1, message),
         )
+        if device == "cpu" and acceleration["device"] != "cpu":
+            fallback_reason = fallback_reason or "CUDA speech execution failed during transcription."
+            acceleration = {
+                **acceleration,
+                "state": "GPU PRESENT — RUNTIME DEGRADED",
+                "device": "cpu",
+                "compute_type": compute_type,
+                "reason": fallback_reason,
+            }
         language = result.get("language", "en")
         transcribe_secs = time.monotonic() - t0
 
@@ -172,7 +191,15 @@ class AsrStage(Stage):
             )
         except Exception as exc:  # noqa: BLE001 - alignment can fall back to CPU
             if device != "cpu":
+                fallback_reason = "CUDA word alignment failed."
                 device, compute_type = "cpu", "int8"
+                acceleration = {
+                    **acceleration,
+                    "state": "GPU PRESENT — RUNTIME DEGRADED",
+                    "device": device,
+                    "compute_type": compute_type,
+                    "reason": fallback_reason,
+                }
                 os.environ["CLIPGAUGE_ACCELERATOR"] = "cpu/int8"
                 ctx.emit(-1, "Word alignment fell back to CPU…")
                 try:
@@ -237,6 +264,8 @@ class AsrStage(Stage):
             "compute_type": compute_type,
             "device": device,
             "accelerator": f"{device}/{compute_type}",
+            "acceleration_state": acceleration["state"],
+            "acceleration_reason": fallback_reason or acceleration["reason"],
             "segments": segments,
             "word_count": word_count,
             "benchmark": {

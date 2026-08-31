@@ -1707,15 +1707,20 @@ async fn request_playback_url(
 }
 
 #[tauri::command]
-async fn export_clip(job_id: String, clip: u32, title: Option<String>) -> Result<String, String> {
+async fn export_clip(
+    job_id: String,
+    clip: u32,
+    title: Option<String>,
+    destination: Option<String>,
+) -> Result<String, String> {
     spawn_blocking_result(move || {
-        artifact::export_clip(
-            &home_dir(),
-            &dirs_home().join("Downloads"),
-            &job_id,
-            clip,
-            title,
-        )
+        let home = home_dir();
+        match destination {
+            Some(path) => artifact::export_clip_to(&home, &job_id, clip, Path::new(&path)),
+            None => {
+                artifact::export_clip(&home, &dirs_home().join("Downloads"), &job_id, clip, title)
+            }
+        }
     })
     .await
 }

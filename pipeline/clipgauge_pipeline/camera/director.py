@@ -61,6 +61,31 @@ class Trajectory:
     meta: dict = field(default_factory=dict)
 
 
+def composition_box(subjects: list[dict], padding: float = 0.12) -> tuple[float, float, float, float] | None:
+    """Return a padded normalized union box for group-aware framing."""
+    if not subjects:
+        return None
+    left = min(float(item["x"]) for item in subjects)
+    top = min(float(item["y"]) for item in subjects)
+    right = max(float(item["x"]) + float(item["w"]) for item in subjects)
+    bottom = max(float(item["y"]) + float(item["h"]) for item in subjects)
+    width, height = right - left, bottom - top
+    left = max(0.0, left - width * padding)
+    top = max(0.0, top - height * padding)
+    right = min(1.0, right + width * padding)
+    bottom = min(1.0, bottom + height * padding)
+    return tuple(round(value, 4) for value in (left, top, right - left, bottom - top))
+
+
+def shot_purpose(*, face_count: int, speaking_count: int) -> str:
+    """Choose a framing purpose before applying crop geometry."""
+    if face_count == 0:
+        return "environment"
+    if speaking_count > 1 or face_count > 1:
+        return "group"
+    return "speaker"
+
+
 def active_speaker_timeline(analysis: AsdAnalysis, fps: int = ASD_FPS) -> list[int | None]:
     """Per-frame winning track index via the hysteresis switch machine."""
     n = analysis.frame_count
@@ -347,5 +372,10 @@ def build_trajectory(
             "speakers_canonical": {str(k): [round(v[0], 3), round(v[1], 3)] for k, v in canon.items()},
             "switch_cuts": len(switch_cuts),
             "shot_cuts": len(shot_cuts),
+            "framing_purpose": shot_purpose(
+                face_count=len(analysis.tracks),
+                speaking_count=len({turn.get("speaker") for turn in turns if turn.get("end", 0) > clip_start and turn.get("start", 0) < clip_end}),
+            ),
+            "faceless_fallback": not any(target is not None for target in targets),
         },
     )

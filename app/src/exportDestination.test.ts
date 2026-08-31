@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const saveMock = vi.fn()
-const exportClipMock = vi.fn()
+const { saveMock, exportClipMock } = vi.hoisted(() => ({
+  saveMock: vi.fn(),
+  exportClipMock: vi.fn(),
+}))
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   save: saveMock,

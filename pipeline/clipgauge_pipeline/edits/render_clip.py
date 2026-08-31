@@ -206,6 +206,14 @@ def _camera_filter_chain(
     return command_text, chain
 
 
+def video_encoder_args() -> list[str]:
+    """Use the same verified encoder policy as initial renders."""
+    return renderer.select_video_encoder(
+        nvenc_available=renderer.nvenc_available(),
+        videotoolbox_available=renderer.videotoolbox_available(),
+    )
+
+
 def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
     """The per-clip render path. Returns the updated output entry."""
     ingest = _load_stage(job_dir, "ingest")
@@ -285,7 +293,14 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
     ass_path = out_dir / f"clip_{clip_idx:02d}.ass"
     queue._atomic_write_text(
         ass_path,
-        ass_mod.build_ass(cap_words, clip_events_out, preset_name=preset, emoji_ok=emoji_ok),
+        ass_mod.build_ass(
+            cap_words,
+            clip_events_out,
+            preset_name=preset,
+            emoji_ok=emoji_ok,
+            output_width=renderer.output_dimensions()[0],
+            output_height=renderer.output_dimensions()[1],
+        ),
     )
 
     # --- build the graph ----------------------------------------------------
@@ -321,14 +336,11 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
         vlabel = "vf"
     graph.append(f"[ac]loudnorm=I={settings.lufs_target}:TP={settings.true_peak_db}:LRA=11[af]")
 
-    if renderer.videotoolbox_available():
-        vcodec = ["-c:v", "h264_videotoolbox", "-b:v", renderer.VT_BITRATE, "-allow_sw", "1"]
-    else:
-        vcodec = ["-c:v", "libx264", "-preset", "medium", "-crf", str(renderer.X264_CRF)]
+    vcodec = video_encoder_args()
 
     out_path = out_dir / f"clip_{clip_idx:02d}.mp4"
     args = [
-        ffmpeg_bin.ffmpeg(), "-y", "-v", "error",
+        ffmpeg_bin.ffmpeg(), "-nostdin", "-y", "-v", "error",
         "-ss", f"{span_a:.3f}", "-t", f"{span_b - span_a:.3f}", "-i", str(_job_path(job_dir, ingest["media_path"])),
         *ov_inputs,
         "-filter_complex", ";".join(graph),
@@ -339,7 +351,7 @@ def render_clip_edit(job_dir: Path, clip_idx: int, emit) -> dict:
         "-movflags", "+faststart", "-map_metadata", "-1",
         str(out_path),
     ]
-    proc = subprocess.run(args, capture_output=True, text=True, timeout=1800)
+    proc, _used_encoder = renderer.run_ffmpeg_with_encoder_fallback(args, vcodec, 1800)
     cmd_path.unlink(missing_ok=True)
     if proc.returncode != 0:
         raise RuntimeError(f"Clip render failed: {(proc.stderr or '')[-800:]}")

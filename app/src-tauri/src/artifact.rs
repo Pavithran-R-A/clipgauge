@@ -179,15 +179,17 @@ fn validate_explicit_destination(destination: &Path) -> Result<(), String> {
     if !parent_metadata.is_dir() {
         return Err("export destination parent is not a directory".into());
     }
-    if destination.exists() {
-        let metadata = fs::symlink_metadata(destination)
-            .map_err(|_| "could not inspect existing export destination".to_string())?;
-        if metadata.file_type().is_symlink() {
-            return Err("export destination may not be a symlink".into());
+    match fs::symlink_metadata(destination) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err("export destination may not be a symlink".into());
+            }
+            if !metadata.is_file() {
+                return Err("export destination is not a regular file".into());
+            }
         }
-        if !metadata.is_file() {
-            return Err("export destination is not a regular file".into());
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("could not inspect existing export destination".into()),
     }
     Ok(())
 }
@@ -200,7 +202,7 @@ pub fn export_clip_to(
 ) -> Result<String, String> {
     let source = render_artifact(home, job_id, clip)?;
     validate_explicit_destination(destination)?;
-    if destination.exists() {
+    if fs::symlink_metadata(destination).is_ok() {
         let existing = fs::canonicalize(destination)
             .map_err(|_| "could not resolve existing export destination".to_string())?;
         if existing == source {
@@ -363,13 +365,7 @@ mod tests {
         let exports = home.join("chosen");
         fs::create_dir_all(&exports).unwrap();
         let destination = exports.join("picked-by-user.mp4");
-        let exported = export_clip_to(
-            &home,
-            "20260818-155237-c6b118",
-            0,
-            &destination,
-        )
-        .unwrap();
+        let exported = export_clip_to(&home, "20260818-155237-c6b118", 0, &destination).unwrap();
         assert_eq!(exported, destination.to_string_lossy());
         assert_eq!(fs::read(destination).unwrap(), b"video");
     }
@@ -393,6 +389,21 @@ mod tests {
             &exports.join("wrong.txt"),
         )
         .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_export_rejects_dangling_destination_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let home = fixture();
+        let exports = home.join("chosen");
+        fs::create_dir_all(&exports).unwrap();
+        let destination = exports.join("picked.mp4");
+        symlink(exports.join("missing.mp4"), &destination).unwrap();
+
+        let error = export_clip_to(&home, "20260818-155237-c6b118", 0, &destination).unwrap_err();
+        assert!(error.contains("may not be a symlink"));
     }
 
     #[test]

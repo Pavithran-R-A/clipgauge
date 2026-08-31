@@ -296,6 +296,44 @@ class LocalRuntime:
             command.extend(["--n-gpu-layers", "999"])
         return command
 
+    def probe_inference(self, endpoint: str, model_id: str, *, backend: str) -> dict[str, Any]:
+        """Verify one bounded local inference without recording its content."""
+        started_at = time.monotonic()
+        try:
+            response = httpx.post(
+                endpoint.rstrip("/") + "/chat/completions",
+                json={
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": "Reply with exactly OK."}],
+                    "max_tokens": 1,
+                    "temperature": 0,
+                    "stream": False,
+                },
+                timeout=15.0,
+                follow_redirects=False,
+            )
+            payload = response.json()
+            usage = payload.get("usage") if isinstance(payload, dict) else None
+            generated_tokens = usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0
+            ok = response.status_code == 200 and isinstance(payload, dict) and bool(payload.get("choices"))
+            result = {
+                "ok": ok,
+                "backend": backend,
+                "generated_tokens": int(generated_tokens or 0),
+                "duration_sec": round(time.monotonic() - started_at, 3),
+            }
+            if not ok:
+                result["reason"] = "Local inference returned an invalid response."
+            return result
+        except (httpx.HTTPError, ValueError, TypeError, KeyError):
+            return {
+                "ok": False,
+                "backend": backend,
+                "generated_tokens": 0,
+                "duration_sec": round(time.monotonic() - started_at, 3),
+                "reason": "Local inference verification failed.",
+            }
+
     def start(self, model_id: str, endpoint: str | None = None) -> str:
         if self.handle and self.handle.process.poll() is None:
             _qa_trace(self.root, "runtime_reused", model_id=model_id, endpoint_kind="loopback")
@@ -361,6 +399,20 @@ class LocalRuntime:
                     except (httpx.HTTPError, ValueError, TypeError, KeyError):
                         slots_keys = []
                         slots_status = None
+                    inference = self.probe_inference(api, model_id, backend=backend)
+                    _qa_trace(
+                        self.root,
+                        "inference_probe",
+                        ok=inference["ok"],
+                        backend=backend,
+                        generated_tokens=inference["generated_tokens"],
+                        duration_sec=inference["duration_sec"],
+                    )
+                    if not inference["ok"]:
+                        self.stop_process(process)
+                        raise LocalRuntimeError(
+                            "ClipGauge Local runtime started, but its bounded inference check failed."
+                        )
                     _qa_trace(
                         self.root,
                         "ready",
@@ -370,6 +422,9 @@ class LocalRuntime:
                         backend=backend,
                         slots_status=slots_status,
                         slots_keys=slots_keys,
+                        inference_verified=True,
+                        inference_duration_sec=inference["duration_sec"],
+                        generated_tokens=inference["generated_tokens"],
                     )
                     self.handle = LocalServerHandle(process=process, endpoint=api, model_id=model_id)
                     return api

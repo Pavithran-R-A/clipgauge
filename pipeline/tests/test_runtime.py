@@ -201,7 +201,19 @@ def test_local_runtime_allows_slow_verified_model_startup(monkeypatch, tmp_path)
     model = tmp_path / "models" / "clipgauge-local" / "Qwen3-1.7B-Q8_0.gguf"
     model.parent.mkdir(parents=True)
     model.write_bytes(b"verified-model")
-    manifest = {"runtimes": {"llama-server": {"version": "test-runtime"}}}
+    manifest = {
+        "runtimes": {
+            "llama-server": {
+                "version": "test-runtime",
+                "assets": {
+                    "windows-x86_64": {
+                        "backend": "cpu",
+                        "binary": "llama-server.exe",
+                    }
+                },
+            }
+        }
+    }
     instance = local_runtime.LocalRuntime(root=tmp_path, manifest=manifest)
     monkeypatch.setattr(instance, "command", lambda _model_id, _port: ["llama-server"])
     monkeypatch.setattr(instance, "_port", lambda _endpoint=None: 18089)
@@ -229,6 +241,25 @@ def test_local_runtime_allows_slow_verified_model_startup(monkeypatch, tmp_path)
     with pytest.raises(local_runtime.LocalRuntimeError, match="120 seconds"):
         instance.start("clipgauge-local/qwen3-1.7b-q8_0")
     assert len(health_calls) == 1
+
+
+def test_local_runtime_inference_probe_reports_only_safe_metrics(monkeypatch, tmp_path):
+    instance = local_runtime.LocalRuntime(root=tmp_path, manifest={})
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "OK"}}], "usage": {"completion_tokens": 1}}
+
+    monkeypatch.setattr(local_runtime.httpx, "post", lambda *args, **kwargs: Response())
+    result = instance.probe_inference("http://127.0.0.1:18089/v1", "qwen", backend="vulkan")
+
+    assert result["ok"] is True
+    assert result["backend"] == "vulkan"
+    assert result["generated_tokens"] == 1
+    assert "content" not in result
 
 
 def test_valid_staged_archive_installation(tmp_path):

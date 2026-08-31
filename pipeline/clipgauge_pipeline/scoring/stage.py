@@ -20,6 +20,7 @@ from . import frames as frames_mod
 from . import llm as llm_mod
 from . import providers as providers_mod
 from . import rubric
+from . import short_quality
 
 SELECT_COUNT = 12
 LOCAL_T1_CANDIDATE_LIMIT = 10
@@ -98,6 +99,19 @@ def _local_prerank(item: tuple[dict, str, str]) -> tuple[float, float, float]:
     )
 
 
+def shortlist_local_candidates(
+    candidates: list[dict], segments: list[dict], limit: int = LOCAL_T1_CANDIDATE_LIMIT
+) -> list[tuple[dict, str, str]]:
+    """Prepare and deterministically cap expensive local scoring work."""
+    prepared: list[tuple[dict, str, str]] = []
+    for candidate in candidates:
+        labeled, flat = _transcript_slice(segments, candidate["start"], candidate["end"])
+        if len(flat.split()) >= 20:
+            prepared.append((candidate, labeled, flat))
+    prepared.sort(key=_local_prerank, reverse=True)
+    return prepared[: max(0, int(limit))]
+
+
 class ScoreStage(Stage):
     name = "score"
     schema_version = 2
@@ -149,21 +163,22 @@ class ScoreStage(Stage):
         # local model-call budget.  Cloud mode retains the original candidate
         # order and full semantic pass; local mode cheaply pre-ranks viable
         # windows and sends only the best bounded subset to the model.
-        prepared: list[tuple[dict, str, str]] = []
-        for cand in candidates:
-            labeled, flat = _transcript_slice(segments, cand["start"], cand["end"])
-            if len(flat.split()) >= 20:
-                prepared.append((cand, labeled, flat))
         if is_local:
-            prepared.sort(key=_local_prerank, reverse=True)
-            prepared = prepared[: int(budget["t1_limit"])]
+            prepared = shortlist_local_candidates(candidates, segments, int(budget["t1_limit"]))
+        else:
+            prepared = []
+            for cand in candidates:
+                labeled, flat = _transcript_slice(segments, cand["start"], cand["end"])
+                if len(flat.split()) >= 20:
+                    prepared.append((cand, labeled, flat))
 
         scored: list[dict] = []
         t1_calls = 0
-        for i, (cand, labeled, _flat) in enumerate(prepared):
+        for i, (cand, labeled, flat) in enumerate(prepared):
             start, end = cand["start"], cand["end"]
             ctx.emit(i / max(1, len(prepared)) * 0.6, f"Scoring moment {i + 1}/{len(prepared)}…")
             window_events = _events_in(timeline, start, end)
+            quality = short_quality.assess(flat, window_events, end - start)
             near_laughs = [e for e in _events_in(timeline, start, end, pad=3.0) if e["type"] == "laugh"]
             context = {
                 "duration": end - start,
@@ -202,6 +217,7 @@ class ScoreStage(Stage):
                     "heatmap_pct": round(heatmap_pct, 3) if heatmap_pct is not None else None,
                     "summary": t1.get("summary", ""),
                     "transcript": labeled,
+                    "short_quality": quality,
                 }
             )
 
@@ -214,7 +230,7 @@ class ScoreStage(Stage):
                 entry["subscores"], entry["curve_score"], entry["heatmap_pct"], None,
                 constants=cv_constants,
             )
-            return max(scores.values())
+            return max(scores.values()) * 0.85 + float(entry.get("short_quality", {}).get("score", 0.0)) * 0.15
 
         scored.sort(key=_text_rank, reverse=True)
         finalists = scored[: int(budget["finalist_limit"])]
@@ -224,6 +240,7 @@ class ScoreStage(Stage):
         # non-essential metadata cannot dominate wall time.
         supports_vision = client.profile.capabilities.vision is True
         music_llm_calls = 0
+        t2_calls = 0
         for j, entry in enumerate(finalists):
             ctx.emit(0.6 + j / max(1, len(finalists)) * 0.35, f"Visual pass {j + 1}/{len(finalists)}…")
             visual = None
@@ -240,6 +257,7 @@ class ScoreStage(Stage):
                             rubric.T2_SCHEMA,
                             images=imgs,
                         )
+                        t2_calls += 1
                     except Exception:  # noqa: BLE001 — visual is optional evidence
                         visual = None
             entry["t2"] = visual
@@ -334,6 +352,7 @@ class ScoreStage(Stage):
                 "viable_candidate_count": len(prepared) if not is_local else min(len(prepared), int(budget["t1_limit"])),
                 "candidate_llm_limit": int(budget["t1_limit"]),
                 "t1_calls": t1_calls,
+                "t2_calls": t2_calls,
                 "finalist_limit": int(budget["finalist_limit"]),
                 "music_llm_calls": music_llm_calls,
             },

@@ -54,6 +54,22 @@ def test_chunking_rules():
     assert len(chunks) == 3  # punctuation break + pause break
 
 
+def test_caption_layout_scales_and_wraps_long_unicode_text():
+    layout = ass_mod.caption_layout(540, 960, ass_mod.PRESETS["classic"])
+    wrapped = ass_mod.wrap_caption("बहुतलंबाUnicodeCaptionWord with readable words", layout["max_chars"])
+    document = ass_mod.build_ass(
+        [ass_mod.Word("hello", 0.0, 0.4)],
+        [],
+        output_width=540,
+        output_height=960,
+    )
+
+    assert layout["font_size"] < ass_mod.PRESETS["classic"].size
+    assert "PlayResX: 540" in document and "PlayResY: 960" in document
+    assert wrapped.count(r"\N") <= 1
+    assert wrapped
+
+
 def test_emphasis_or_combination():
     words = [
         ass_mod.Word("million", 0.0, 0.5),   # power word
@@ -111,10 +127,56 @@ def test_render_is_non_interactive(monkeypatch, tmp_path):
         src_h=720,
     )
 
-    render_calls = [(args, kwargs) for args, kwargs in calls if "-nostdin" in args]
+    render_calls = [(args, kwargs) for args, kwargs in calls if "-ss" in args]
     assert len(render_calls) == 1
     args, kwargs = render_calls[0]
+    assert "-nostdin" in args
     assert kwargs["stdin"] is subprocess.DEVNULL
+
+
+def test_encoder_probe_uses_the_selected_encoder_quality_contract(monkeypatch):
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(renderer.subprocess, "run", fake_run)
+
+    assert renderer._encoder_probe("h264_nvenc")
+    assert calls[0][calls[0].index("-c:v") + 1] == "h264_nvenc"
+    assert "-preset" in calls[0]
+    assert "-cq" in calls[0]
+
+
+def test_render_retries_hardware_initialization_with_software(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=1, stderr="h264_nvenc: Cannot load libcuda", stdout="")
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(renderer, "nvenc_available", lambda: True)
+    monkeypatch.setattr(renderer, "videotoolbox_available", lambda: False)
+    monkeypatch.setattr(renderer.subprocess, "run", fake_run)
+    used = renderer.render_clip(
+        "source.mp4",
+        tmp_path / "out.mp4",
+        0.0,
+        1.0,
+        {"fps": 25, "frames": [[100.0, 0.0, 404.0, 720.0]]},
+        None,
+        None,
+        src_w=1280,
+        src_h=720,
+    )
+
+    assert len(calls) == 2
+    assert "h264_nvenc" in calls[0]
+    assert "libx264" in calls[1]
+    assert used == "libx264"
 
 
 @pytest.mark.slow

@@ -65,8 +65,7 @@ def _encoder_probe(codec: str) -> bool:
                 "-an",
                 "-pix_fmt",
                 "yuv420p",
-                "-c:v",
-                codec,
+                *_encoder_args(codec),
                 "-f",
                 "null",
                 "-",
@@ -78,6 +77,14 @@ def _encoder_probe(codec: str) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return proc.returncode == 0
+
+
+def _encoder_args(codec: str) -> list[str]:
+    if codec == "h264_nvenc":
+        return ["-c:v", codec, "-preset", "p5", "-cq", str(NVENC_CQ), "-b:v", "0"]
+    if codec == "h264_videotoolbox":
+        return ["-c:v", codec, "-b:v", VT_BITRATE, "-allow_sw", "1"]
+    return ["-c:v", codec]
 
 
 def nvenc_available() -> bool:
@@ -99,18 +106,9 @@ def videotoolbox_available() -> bool:
 def select_video_encoder(*, nvenc_available: bool, videotoolbox_available: bool) -> list[str]:
     """Return encoder arguments in acceleration preference order."""
     if nvenc_available:
-        return [
-            "-c:v",
-            "h264_nvenc",
-            "-preset",
-            "p5",
-            "-cq",
-            str(NVENC_CQ),
-            "-b:v",
-            "0",
-        ]
+        return _encoder_args("h264_nvenc")
     if videotoolbox_available:
-        return ["-c:v", "h264_videotoolbox", "-b:v", VT_BITRATE, "-allow_sw", "1"]
+        return _encoder_args("h264_videotoolbox")
     return ["-c:v", "libx264", "-preset", x264_preset(), "-crf", str(X264_CRF)]
 
 
@@ -121,6 +119,36 @@ def selected_video_encoder() -> str:
     if videotoolbox_available():
         return "h264_videotoolbox"
     return "libx264"
+
+
+def run_ffmpeg_with_encoder_fallback(
+    args: list[str], encoder_args: list[str], timeout: float
+) -> tuple[object, str]:
+    """Retry only hardware initialization failures with libx264."""
+    proc = subprocess.run(
+        args,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    codec = encoder_args[1] if len(encoder_args) > 1 else "libx264"
+    stderr = (proc.stderr or "").lower()
+    hardware_failure = codec in {"h264_nvenc", "h264_videotoolbox"} and any(
+        marker in stderr for marker in ("encoder", "nvenc", "videotoolbox", "cuda", "device")
+    )
+    if proc.returncode == 0 or not hardware_failure:
+        return proc, codec
+    start = args.index(encoder_args[0])
+    fallback = select_video_encoder(nvenc_available=False, videotoolbox_available=False)
+    fallback_args = args[:start] + fallback + args[start + len(encoder_args):]
+    return subprocess.run(
+        fallback_args,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    ), fallback[1]
 
 
 def crop_boxes(frames: list[list[float]], src_w: int, src_h: int) -> list[tuple[int, int, int, int]]:
@@ -222,7 +250,7 @@ def render_clip(
     src_w: int = 1920,
     src_h: int = 1080,
     timeout: float = 1800.0,
-) -> None:
+) -> str:
     duration = clip_end - clip_start
     boxes = crop_boxes(trajectory["frames"], src_w, src_h)
     if not boxes:
@@ -270,16 +298,11 @@ def render_clip(
         "-map_metadata", "-1",  # metadata scrub (openshorts ffmpeg_utils)
         str(out_path),
     ]
-    proc = subprocess.run(
-        args,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    proc, used_encoder = run_ffmpeg_with_encoder_fallback(args, vcodec, timeout)
     cmd_path.unlink(missing_ok=True)
     if proc.returncode != 0:
         raise RuntimeError(f"Render failed: {(proc.stderr or '')[-800:]}")
+    return used_encoder
 
 
 def verify_output(out_path: Path, expected_duration: float) -> dict:
