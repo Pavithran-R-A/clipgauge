@@ -209,7 +209,11 @@ def test_local_runtime_allows_slow_verified_model_startup(monkeypatch, tmp_path)
                     "windows-x86_64": {
                         "backend": "cpu",
                         "binary": "llama-server.exe",
-                    }
+                    },
+                    "macos-arm64": {"backend": "cpu", "binary": "llama-server"},
+                    "macos-x86_64": {"backend": "cpu", "binary": "llama-server"},
+                    "linux-x86_64": {"backend": "cpu", "binary": "llama-server"},
+                    "linux-arm64": {"backend": "cpu", "binary": "llama-server"},
                 },
             }
         }

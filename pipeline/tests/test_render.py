@@ -149,6 +149,13 @@ def test_encoder_probe_uses_the_selected_encoder_quality_contract(monkeypatch):
     assert "-cq" in calls[0]
 
 
+def test_macos_never_selects_nvenc(monkeypatch):
+    monkeypatch.setattr(renderer.platform, "system", lambda: "Darwin")
+    renderer._nvenc_checked = None
+
+    assert renderer.nvenc_available() is False
+
+
 def test_render_retries_hardware_initialization_with_software(monkeypatch, tmp_path):
     calls = []
 

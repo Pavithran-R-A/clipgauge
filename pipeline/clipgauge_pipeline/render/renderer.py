@@ -19,6 +19,7 @@ VideoToolbox on Apple systems second, then libx264 as the portable fallback.
 from __future__ import annotations
 
 import os
+import platform
 import subprocess
 from pathlib import Path
 
@@ -90,6 +91,8 @@ def _encoder_args(codec: str) -> list[str]:
 def nvenc_available() -> bool:
     """Probe once: encode 0.2 s of black through h264_nvenc."""
     global _nvenc_checked
+    if platform.system() == "Darwin":
+        return False
     if _nvenc_checked is None:
         _nvenc_checked = _encoder_probe("h264_nvenc")
     return _nvenc_checked
