@@ -12,9 +12,8 @@ Deduping to change-points matters: a 45 s clip at 25 fps is 1125 frames and
 writing every parameter every frame slows the filter measurably (openshorts'
 own comment). Even dimensions everywhere — x264/NVENC reject odd ones.
 
-Encoder tiers follow openshorts ffmpeg_utils.py: try hardware
-(h264_videotoolbox on macOS), fall back to libx264, mapping quality between
-CRF and the hardware encoder's bitrate model.
+Encoder tiers are verified by an actual tiny encode: NVIDIA NVENC first,
+VideoToolbox on Apple systems second, then libx264 as the portable fallback.
 """
 
 from __future__ import annotations
@@ -28,6 +27,7 @@ from . import ffmpeg_bin
 OUT_W = 1080
 OUT_H = 1920
 X264_CRF = 19
+NVENC_CQ = 19
 VT_BITRATE = "10M"
 X264_PRESETS = frozenset({"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"})
 OUTPUT_SIZES = {"1080x1920": (1080, 1920), "540x960": (540, 960)}
@@ -44,22 +44,83 @@ def x264_preset() -> str:
     requested = os.environ.get("CLIPGAUGE_RENDER_X264_PRESET", "medium").strip().lower()
     return requested if requested in X264_PRESETS else "medium"
 
+
+_nvenc_checked: bool | None = None
 _vt_checked: bool | None = None
+
+
+def _encoder_probe(codec: str) -> bool:
+    """Verify an encoder with a real tiny encode instead of trusting a name list."""
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg_bin.ffmpeg(),
+                "-nostdin",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=black:s=320x240:d=0.2",
+                "-an",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:v",
+                codec,
+                "-f",
+                "null",
+                "-",
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def nvenc_available() -> bool:
+    """Probe once: encode 0.2 s of black through h264_nvenc."""
+    global _nvenc_checked
+    if _nvenc_checked is None:
+        _nvenc_checked = _encoder_probe("h264_nvenc")
+    return _nvenc_checked
 
 
 def videotoolbox_available() -> bool:
     """Probe once: encode 0.2 s of black through h264_videotoolbox."""
     global _vt_checked
     if _vt_checked is None:
-        proc = subprocess.run(
-            [
-                ffmpeg_bin.ffmpeg(), "-v", "error", "-f", "lavfi", "-i", "color=black:s=320x240:d=0.2",
-                "-c:v", "h264_videotoolbox", "-f", "null", "-",
-            ],
-            capture_output=True, timeout=60,
-        )
-        _vt_checked = proc.returncode == 0
+        _vt_checked = _encoder_probe("h264_videotoolbox")
     return _vt_checked
+
+
+def select_video_encoder(*, nvenc_available: bool, videotoolbox_available: bool) -> list[str]:
+    """Return encoder arguments in acceleration preference order."""
+    if nvenc_available:
+        return [
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p5",
+            "-cq",
+            str(NVENC_CQ),
+            "-b:v",
+            "0",
+        ]
+    if videotoolbox_available:
+        return ["-c:v", "h264_videotoolbox", "-b:v", VT_BITRATE, "-allow_sw", "1"]
+    return ["-c:v", "libx264", "-preset", x264_preset(), "-crf", str(X264_CRF)]
+
+
+def selected_video_encoder() -> str:
+    """Return the verified encoder name used by production renders."""
+    if nvenc_available():
+        return "h264_nvenc"
+    if videotoolbox_available():
+        return "h264_videotoolbox"
+    return "libx264"
 
 
 def crop_boxes(frames: list[list[float]], src_w: int, src_h: int) -> list[tuple[int, int, int, int]]:
@@ -191,10 +252,10 @@ def render_clip(
             sub += f":fontsdir={_q(fonts_dir)}"
         vf_parts.append(sub)
 
-    if videotoolbox_available():
-        vcodec = ["-c:v", "h264_videotoolbox", "-b:v", VT_BITRATE, "-allow_sw", "1"]
-    else:
-        vcodec = ["-c:v", "libx264", "-preset", x264_preset(), "-crf", str(X264_CRF)]
+    vcodec = select_video_encoder(
+        nvenc_available=nvenc_available(),
+        videotoolbox_available=videotoolbox_available(),
+    )
 
     args = [
         ffmpeg_bin.ffmpeg(), "-nostdin", "-y", "-v", "error",
