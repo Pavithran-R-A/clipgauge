@@ -480,7 +480,7 @@ jobs:
           - Public YouTube support remains best-effort. Local-file import is the reliable supported fallback; no login or bot restriction bypass is claimed.
           - Linux amd64 Debian and Windows x64 NSIS artifacts are unsigned.
           - Native macOS ARM and Intel builds are qualification results; no signing or notarization is claimed.
-          - The exact-tag publication is gated by a real managed-model E2E using the production-default captioned 1080x1920 render path; its summary is attached as `MODEL_E2E_SUMMARY.json`.
+          - The exact-tag publication is gated by a real managed-model E2E using the production-default captioned 1080x1920 render path; its summary is attached as \`MODEL_E2E_SUMMARY.json\`.
           - The CycloneDX SBOM, checksums, and provenance are generated from the immutable ${RELEASE_TAG} tag.
           - \`SHA256SUMS\`, \`RELEASE_PROVENANCE.md\`, and \`ATTESTATION_STATUS.md\` describe the exact attached assets and distinguish checksums, metadata, GitHub attestations, and platform signing.
           - AGPL-3.0-or-later licensing and upstream publikclip attribution remain preserved.
