@@ -338,13 +338,16 @@ def test_ytdlp_enables_verified_managed_node_for_youtube(monkeypatch):
             return {"ok": True}
 
     managed_node = Path(r"C:\clipgauge\runtimes\youtube\node.exe")
+    managed_plugin = Path(r"C:\clipgauge\runtimes\youtube\bgutil\1.3.2\plugin")
     monkeypatch.setattr(ytdlp, "_provider_supervisor", StubSupervisor())
     monkeypatch.setattr(youtube_compat, "node_path", lambda: managed_node)
+    monkeypatch.setattr(youtube_compat, "plugin_dir", lambda: managed_plugin)
 
     args = ytdlp._youtube_provider_args("https://www.youtube.com/watch?v=aqz-KE-bpKQ")
 
     assert "--js-runtimes" in args
     assert args[args.index("--js-runtimes") + 1] == f"node:{managed_node}"
+    assert args[args.index("--plugin-dirs") + 1] == str(managed_plugin.parent)
 
 
 def test_spawn_exception_is_classified_and_leaves_no_handle(provider_ready, monkeypatch):

@@ -102,7 +102,7 @@ def _youtube_provider_args(url: str, compatibility_method: str = "mweb") -> list
             retryable=True,
         )
     provider_args = [
-        "--plugin-dirs", str(youtube_compat.plugin_dir()),
+        "--plugin-dirs", str(youtube_compat.plugin_dir().parent),
         "--js-runtimes", f"node:{youtube_compat.node_path()}",
         "--extractor-args", f"youtubepot-bgutilhttp:base_url={endpoint}",
     ]
