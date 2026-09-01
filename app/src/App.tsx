@@ -129,7 +129,7 @@ export default function App() {
     return () => { disposed = true; unlistenRef.current?.() }
   }, [refreshJobs])
 
-  const startRun = useCallback(async (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) => {
+  const startRun = useCallback(async (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, browserSession?: string) => {
     setRunning(true)
     setRunState('RUNNING')
     setRunStartedAt(Date.now())
@@ -156,7 +156,7 @@ export default function App() {
       setRunning(true)
       setRunState('RUNNING')
       setRunStartedAt(Date.now())
-      await api.runJob(source, provider, captions, resolvedModel, endpoint, auth, secretHeader)
+      await api.runJob(source, provider, captions, resolvedModel, endpoint, auth, secretHeader, browserSession)
     } catch (error) {
       setRunning(false)
       setRunState('FAILED')

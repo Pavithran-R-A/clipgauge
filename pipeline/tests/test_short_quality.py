@@ -75,3 +75,25 @@ def test_structured_t1_fields_are_combined_with_source_evidence():
     assert quality["llm_structured"] is True
     assert quality["story_shape"] == 92.0
     assert quality["payoff"] > 70.0
+
+
+def test_recommendation_score_penalizes_weak_story_over_platform_lead():
+    weak = {"score": 88.0, "hook": 0.0, "story_shape": 24.0, "ending_completeness": 20.0}
+    strong = {"score": 68.0, "hook": 75.0, "story_shape": 84.0, "ending_completeness": 92.0}
+
+    weak_score = short_quality.recommendation_score(40.0, weak)
+    strong_score = short_quality.recommendation_score(35.0, strong)
+
+    assert strong_score > weak_score
+
+
+def test_recommendation_score_is_distinct_from_platform_score():
+    quality = {"score": 80.0, "hook": 70.0, "story_shape": 86.0, "ending_completeness": 90.0}
+
+    assert short_quality.recommendation_score(40.0, quality) != 40.0
+
+
+def test_fragment_endings_are_penalized_but_cliffhangers_remain_valid():
+    for fragment in ("These.", "So.", "Here."):
+        assert short_quality.assess(fragment, [], 1.0)["complete_ending"] is False
+    assert short_quality.assess("Wait.", [], 1.0)["complete_ending"] is True

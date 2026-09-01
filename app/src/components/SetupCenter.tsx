@@ -75,10 +75,10 @@ function groupState(rows: ManagedAssetRow[]): { label: string; tone: 'ready' | '
 
 function youtubeStatusCopy(status: YouTubeReadiness | null): string {
   if (!status) return 'Checking YouTube tools…'
-  if (status.state === 'PUBLIC_DOWNLOAD_VERIFIED') return 'Public YouTube download tested successfully.'
+  if (status.state === 'PUBLIC_DOWNLOAD_VERIFIED') return 'Live public download verified.'
   if (status.state === 'DEPENDENCIES_READY' || status.state === 'READY') {
     const wpc = status.wpc?.available ? ' Optional browser-assisted compatibility is available only after explicit approval.' : ' Optional browser-assisted compatibility is not installed; ClipGauge will not install or launch a browser automatically.'
-    return `YouTube tools ready; public download availability depends on YouTube. Local-file import always remains available.${wpc}`
+    return `YouTube tools installed; live public download is not verified. Local-file import always remains available.${wpc}`
   }
   return status.reason
 }

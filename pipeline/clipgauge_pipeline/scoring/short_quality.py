@@ -12,6 +12,7 @@ _REACTION = {"wow", "what", "no", "oh", "laugh", "laughed", "shocked", "insane"}
 _HOOK_MARKERS = {"why", "how", "what", "never", "nobody", "imagine", "watch", "look"}
 _PRONOUNS = {"he", "she", "they", "it", "that", "this"}
 _PUNCTUATION = (".", "!", "?")
+_INCOMPLETE_TERMINALS = {"and", "because", "but", "here", "or", "so", "these", "then", "to", "with"}
 _STORY_SCORES = {
     "hook_setup_payoff": 92.0,
     "question_answer": 86.0,
@@ -28,6 +29,18 @@ def _words(text: str) -> list[str]:
 
 def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, float(value)))
+
+
+def recommendation_score(platform_score: float, quality: dict[str, Any]) -> float:
+    """Combine platform fit with a transparent short-form quality floor."""
+    score = 0.65 * _clamp(platform_score) + 0.35 * _clamp(quality.get("score", 0.0))
+    if float(quality.get("hook", 0.0)) < 20.0:
+        score -= 20.0
+    if float(quality.get("story_shape", 0.0)) <= _STORY_SCORES["none"]:
+        score -= 18.0
+    if float(quality.get("ending_completeness", 0.0)) < 45.0:
+        score -= 16.0
+    return round(_clamp(score), 1)
 
 
 def _llm_score(fields: dict[str, Any], name: str, fallback: float) -> float:
@@ -71,7 +84,11 @@ def _deterministic(text: str, events: list[dict[str, Any]], duration: float) -> 
     has_reaction = bool(set(last) & _REACTION) or any(
         event.get("type") in {"laugh", "gasp", "scream", "reaction"} for event in events
     )
-    complete_ending = bool(last and str(text).rstrip().endswith(_PUNCTUATION))
+    complete_ending = bool(
+        last
+        and str(text).rstrip().endswith(_PUNCTUATION)
+        and last[-1] not in _INCOMPLETE_TERMINALS
+    )
     filler_ratio = sum(token in _FILLER for token in tokens) / max(1, len(tokens))
     density = min(100.0, len(tokens) / max(1.0, duration) * 5.0)
     payoff = 76.0 if has_reaction else 62.0 if has_reveal else 28.0
@@ -146,6 +163,7 @@ def assess(
         "payoff": round(_clamp(payoff), 1),
         "payoff_location": str(fields.get("payoff_location", "none")),
         "ending_completeness": round(_clamp(ending), 1),
+        "complete_ending": bool(evidence["complete_ending"]),
         "information_density": round(evidence["information_density"], 1),
         "reaction_strength": round(_clamp(reaction), 1),
         "filler_ratio": round(evidence["filler_ratio"], 3),

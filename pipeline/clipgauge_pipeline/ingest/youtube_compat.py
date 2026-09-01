@@ -178,6 +178,10 @@ def plugin_dir() -> Path:
     return plugin_home()
 
 
+def _provider_plugin_ready() -> bool:
+    return (plugin_dir() / "yt_dlp_plugins" / "extractor" / "getpot_bgutil_http.py").is_file()
+
+
 def _extract_assets(manager: downloads.DownloadManager, archives: list[Path]) -> None:
     node_archive, provider_archive = archives
     node_destination = _root() / "node" / NODE_SPECS[platform_key()].root_name
@@ -193,7 +197,7 @@ def _extract_assets(manager: downloads.DownloadManager, archives: list[Path]) ->
 
 
 def _server_ready() -> bool:
-    return (server_home() / "build" / "main.js").is_file() and plugin_dir().is_dir() and node_path().is_file()
+    return (server_home() / "build" / "main.js").is_file() and _provider_plugin_ready() and node_path().is_file()
 
 
 def _yt_dlp_ready() -> bool:
@@ -318,20 +322,17 @@ def readiness() -> dict[str, Any]:
         checks.append({"name": "provider-build", "ready": False, "message": "The PO-token provider build or plugin is incomplete."})
         return {"state": "BUILD_REQUIRED", "ready": False, "dependency_state": "BUILD_REQUIRED", "public_download_verified": False, "wpc": wpc_status, "reason": "Build the installed PO-token provider before using YouTube.", "actions": ["Repair", "Retry"], "checks": checks}
 
-    result = ProviderSupervisor().self_test()
-    plugin_ok = bool(result.get("plugin_discoverable"))
-    server_ok = bool(result.get("server_installed"))
-    health_ok = bool((result.get("health") or {}).get("healthy"))
-    checks.extend([
-        {"name": "plugin", "ready": plugin_ok, "message": "The YouTube plugin is discoverable." if plugin_ok else "The YouTube plugin is not discoverable."},
-        {"name": "loopback-health", "ready": health_ok, "message": "The local PO-token provider is healthy." if health_ok else "The local PO-token provider is not healthy."},
-    ])
-    if not server_ok or not plugin_ok:
+    plugin_ok = _provider_plugin_ready()
+    checks.append({"name": "plugin", "ready": plugin_ok, "message": "The YouTube plugin is discoverable." if plugin_ok else "The YouTube plugin is not discoverable."})
+    if not plugin_ok:
         return {"state": "REPAIR_REQUIRED", "ready": False, "dependency_state": "REPAIR_REQUIRED", "public_download_verified": False, "wpc": wpc_status, "reason": "Repair the installed YouTube support components, then test again.", "actions": ["Repair", "Retry"], "checks": checks}
-    if not health_ok:
-        return {"state": "UNHEALTHY", "ready": False, "dependency_state": "UNHEALTHY", "public_download_verified": False, "wpc": wpc_status, "reason": "The local YouTube support check failed. Start a test to retry safely.", "actions": ["Test", "Retry"], "checks": checks}
+    checks.append({
+        "name": "provider-lifecycle",
+        "ready": True,
+        "message": "The managed provider starts when a YouTube operation begins.",
+    })
     public_verified = bool(public_status.get("verified"))
-    return {"state": "PUBLIC_DOWNLOAD_VERIFIED" if public_verified else "DEPENDENCIES_READY", "ready": True, "dependency_state": "DEPENDENCIES_READY", "public_download_verified": public_verified, "public_compatibility": public_status, "wpc": wpc_status, "reason": "YouTube download was tested successfully." if public_verified else "YouTube tools are ready. A public download has not been verified on this installation.", "actions": ["Test"], "checks": checks}
+    return {"state": "PUBLIC_DOWNLOAD_VERIFIED" if public_verified else "DEPENDENCIES_READY", "ready": True, "dependency_state": "DEPENDENCIES_READY", "provider_state": "DORMANT", "public_download_verified": public_verified, "public_compatibility": public_status, "wpc": wpc_status, "reason": "YouTube download was tested successfully." if public_verified else "YouTube tools are ready. A public download has not been verified on this installation.", "actions": ["Test"], "checks": checks}
 
 
 def _merge_live_health_checks(status: dict[str, Any], result: dict[str, Any]) -> list[dict[str, Any]]:

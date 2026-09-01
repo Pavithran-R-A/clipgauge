@@ -53,33 +53,15 @@ class IngestStage(Stage):
         browser_session = ctx.settings.provider_metadata.get("cookies_from_browser")
         if browser_session is not None and not isinstance(browser_session, str):
             browser_session = None
-        compatibility_method = "bgutil"
+        compatibility_method = "mweb"
         if job.source_type == "url":
             try:
-                try:
-                    meta = ytdlp.fetch_meta(job.source, prog, cookies_from_browser=browser_session, compatibility_method="bgutil")
-                except ytdlp.YtDlpError as primary_meta_error:
-                    if primary_meta_error.code != "YTDLP_ATTESTATION_REQUIRED":
-                        raise
-                    compatibility_method = "mweb"
-                    meta = ytdlp.fetch_meta(job.source, prog, cookies_from_browser=browser_session, compatibility_method="mweb")
+                meta = ytdlp.fetch_meta(job.source, prog, cookies_from_browser=browser_session, compatibility_method="mweb")
                 heatmap = meta.heatmap
                 title = meta.title
                 media_path = ctx.job_dir / "media.mp4"
                 if not media_path.exists():
-                    try:
-                        ytdlp.download(job.source, media_path, prog, cookies_from_browser=browser_session, compatibility_method="bgutil")
-                    except ytdlp.YtDlpError as primary_download_error:
-                        if primary_download_error.code != "YTDLP_ATTESTATION_REQUIRED":
-                            raise
-                        compatibility_method = "mweb"
-                        try:
-                            ytdlp.download(job.source, media_path, prog, cookies_from_browser=browser_session, compatibility_method="mweb")
-                        except ytdlp.YtDlpError as fallback_error:
-                            fallback_details = getattr(fallback_error, "details", {})
-                            if isinstance(fallback_details, dict):
-                                fallback_details["primary_failure"] = getattr(primary_download_error, "details", {})
-                            raise
+                    ytdlp.download(job.source, media_path, prog, cookies_from_browser=browser_session, compatibility_method="mweb")
             except ytdlp.YtDlpError as err:
                 if getattr(err, "code", None) == "YTDLP_ATTESTATION_REQUIRED" and not browser_session:
                     from . import youtube_compat

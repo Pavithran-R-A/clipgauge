@@ -10,6 +10,12 @@ from pathlib import Path
 from ..jobs.queue import Stage, StageContext, StageError, _atomic_write_text
 
 
+def captions_allowed_for_clip(clip: dict, captions_ok: bool) -> bool:
+    """Avoid caption collisions when T2 confirms source-burned text."""
+    visual = clip.get("t2")
+    return bool(captions_ok and not (isinstance(visual, dict) and visual.get("on_screen_text") is True))
+
+
 class RenderStage(Stage):
     name = "render"
     schema_version = 1
@@ -109,11 +115,12 @@ class RenderStage(Stage):
             )
 
             out_path = out_dir / f"clip_{i:02d}.mp4"
+            clip_captions_ok = captions_allowed_for_clip(clip, captions_ok)
             started_at = time.monotonic()
             try:
                 used_encoder = renderer.render_clip(
                     media, out_path, start, end, trajectory,
-                    ass_path if captions_ok else None, ass_mod.FONTS_DIR,
+                    ass_path if clip_captions_ok else None, ass_mod.FONTS_DIR,
                     lufs=ctx.settings.lufs_target,
                     true_peak=ctx.settings.true_peak_db,
                     src_w=src_w, src_h=src_h,
@@ -138,6 +145,7 @@ class RenderStage(Stage):
                     "duration": round(check["duration"], 2),
                     "words": len(words),
                     "event_tags": len(clip_events),
+                    "captions_suppressed": bool(captions_ok and not clip_captions_ok),
                 }
             )
 

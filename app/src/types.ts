@@ -99,6 +99,9 @@ export interface ProviderTestResult {
 
 export interface ClipLedger {
   score: number
+  platform_score?: number
+  short_quality_score?: number
+  recommendation_score?: number
   composition: {
     subscores: Record<string, number>
     curve_score: number
@@ -129,6 +132,9 @@ export interface Clip {
   start: number
   end: number
   score: number
+  platform_score?: number
+  short_quality_score?: number
+  recommendation_score?: number
   best_platform: string
   platform_scores: Record<string, number>
   subscores: Record<string, number>

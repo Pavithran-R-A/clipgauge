@@ -112,6 +112,31 @@ def shortlist_local_candidates(
     return prepared[: max(0, int(limit))]
 
 
+def select_diverse_finalists(entries: list[dict], limit: int = LOCAL_FINALIST_LIMIT) -> list[dict]:
+    """Select strong clips while suppressing nearby redundant moments."""
+    remaining = [dict(entry) for entry in entries]
+    selected: list[dict] = []
+    separation = 120.0
+    while remaining and len(selected) < max(0, int(limit)):
+        def utility(entry: dict) -> tuple[float, float, float]:
+            base = float(entry.get("recommendation_score", entry.get("score", 0.0)))
+            midpoint = (float(entry.get("start", 0.0)) + float(entry.get("end", 0.0))) / 2.0
+            if not selected:
+                penalty = 0.0
+            else:
+                distance = min(
+                    abs(midpoint - ((float(item.get("start", 0.0)) + float(item.get("end", 0.0))) / 2.0))
+                    for item in selected
+                )
+                penalty = max(0.0, (separation - distance) / separation * 35.0)
+            return (base - penalty, base, -float(entry.get("start", 0.0)))
+
+        winner = max(remaining, key=utility)
+        selected.append(winner)
+        remaining.remove(winner)
+    return selected
+
+
 class ScoreStage(Stage):
     name = "score"
     schema_version = 2
@@ -224,16 +249,32 @@ class ScoreStage(Stage):
         if not scored:
             raise StageError("No candidate produced a scoreable transcript.")
 
-        # Rank by best pre-visual platform score, take the provider-appropriate finalists.
-        def _text_rank(entry: dict) -> float:
-            scores, _ = rubric.composite(
-                entry["subscores"], entry["curve_score"], entry["heatmap_pct"], None,
+        def _apply_platform_scores(entry: dict, visual: dict | None = None) -> tuple[dict, list[dict]]:
+            platform_scores, adjustments = rubric.composite(
+                entry["subscores"], entry["curve_score"], entry["heatmap_pct"], visual,
                 constants=cv_constants,
             )
-            return max(scores.values()) * 0.85 + float(entry.get("short_quality", {}).get("score", 0.0)) * 0.15
+            entry["platform_scores"] = platform_scores
+            entry["platform_score"] = max(platform_scores.values())
+            entry["short_quality_score"] = float(entry["short_quality"]["score"])
+            entry["recommendation_score"] = short_quality.recommendation_score(
+                entry["platform_score"], entry["short_quality"]
+            )
+            entry["score"] = entry["platform_score"]
+            entry["best_platform"] = max(platform_scores, key=platform_scores.get)
+            return platform_scores, adjustments
 
-        scored.sort(key=_text_rank, reverse=True)
-        finalists = scored[: int(budget["finalist_limit"])]
+        # Compute recommendation scores before diversity selection.
+        for entry in scored:
+            _apply_platform_scores(entry)
+        scored.sort(
+            key=lambda entry: (
+                float(entry["recommendation_score"]),
+                -float(entry["start"]),
+            ),
+            reverse=True,
+        )
+        finalists = select_diverse_finalists(scored, int(budget["finalist_limit"]))
 
         for entry in finalists:
             original_start, original_end = entry["start"], entry["end"]
@@ -244,6 +285,16 @@ class ScoreStage(Stage):
                 entry.get("t1_raw"),
             )
             entry["start"], entry["end"] = refined_start, refined_end
+            labeled, flat = _transcript_slice(segments, refined_start, refined_end)
+            window_events = _events_in(timeline, refined_start, refined_end)
+            entry["transcript"] = labeled
+            entry["short_quality"] = short_quality.assess(
+                flat,
+                window_events,
+                refined_end - refined_start,
+                llm=entry.get("t1_raw"),
+            )
+            _apply_platform_scores(entry)
             entry["boundary_refinement"] = {
                 "original_start": original_start,
                 "original_end": original_end,
@@ -280,14 +331,8 @@ class ScoreStage(Stage):
                         visual = None
             entry["t2"] = visual
 
-            platform_scores, comp_adjustments = rubric.composite(
-                entry["subscores"], entry["curve_score"], entry["heatmap_pct"], visual,
-                constants=cv_constants,
-            )
+            platform_scores, comp_adjustments = _apply_platform_scores(entry, visual)
             entry["adjustments"].extend(comp_adjustments)
-            entry["platform_scores"] = platform_scores
-            entry["score"] = max(platform_scores.values())
-            entry["best_platform"] = max(platform_scores, key=platform_scores.get)
 
             window_events = _events_in(timeline, entry["start"], entry["end"])
             fired, missing = rubric.signals_summary(
@@ -307,7 +352,10 @@ class ScoreStage(Stage):
                 degraded_signals.append("vision_unavailable")
             entry["confidence"] = "standard" if structured_level == "native_schema" and not profile.capabilities.local else "local-estimate" if profile.capabilities.local else "degraded"
             entry["ledger"] = {
-                "score": entry["score"],
+                "score": entry["recommendation_score"],
+                "platform_score": entry["platform_score"],
+                "short_quality_score": entry["short_quality_score"],
+                "recommendation_score": entry["recommendation_score"],
                 "composition": {
                     "subscores": entry["subscores"],
                     "curve_score": entry["curve_score"],
@@ -350,7 +398,7 @@ class ScoreStage(Stage):
             else:
                 entry["music"] = None
 
-        finalists.sort(key=lambda e: e["score"], reverse=True)
+        finalists.sort(key=lambda e: (float(e.get("recommendation_score", 0.0)), -float(e.get("start", 0.0))), reverse=True)
         for entry in finalists:
             entry.pop("transcript", None)  # bulky; review UI re-slices from diarize
 

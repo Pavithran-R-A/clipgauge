@@ -11,6 +11,13 @@ import pytest
 
 from clipgauge_pipeline.captions import ass as ass_mod
 from clipgauge_pipeline.render import ffmpeg_bin, renderer
+from clipgauge_pipeline.render.stage import captions_allowed_for_clip
+
+
+def test_source_burned_text_suppresses_added_captions():
+    assert captions_allowed_for_clip({"t2": {"on_screen_text": True}}, True) is False
+    assert captions_allowed_for_clip({"t2": {"on_screen_text": False}}, True) is True
+    assert captions_allowed_for_clip({"t2": None}, False) is False
 
 
 def test_windows_ffmpeg_managed_path_uses_one_filesystem_safe_version_component(monkeypatch, tmp_path):

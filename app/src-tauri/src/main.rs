@@ -54,6 +54,20 @@ struct RunJobRequest {
     secret_header: Option<String>,
     #[serde(default)]
     captions: Option<String>,
+    #[serde(default)]
+    cookies_from_browser: Option<String>,
+}
+
+fn validate_browser_session(value: Option<&str>) -> Result<Option<String>, String> {
+    match value {
+        None => Ok(None),
+        Some(browser) if matches!(browser, "chrome" | "chromium" | "firefox") => {
+            Ok(Some(browser.to_string()))
+        }
+        Some(_) => {
+            Err("Unsupported browser session. Choose Chrome, Chromium, or Firefox.".to_string())
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -670,7 +684,9 @@ fn run_job(
         auth,
         secret_header,
         captions,
+        cookies_from_browser,
     } = request;
+    let cookies_from_browser = validate_browser_session(cookies_from_browser.as_deref())?;
     let (program, base_args) = pipeline_invocation();
     let processes = state.processes.clone();
     let key = format!("run:{}", diagnostics::diagnostic_id());
@@ -693,6 +709,10 @@ fn run_job(
         if let Some(preset) = captions {
             args.push("--captions".to_string());
             args.push(preset);
+        }
+        if let Some(browser) = cookies_from_browser {
+            args.push("--cookies-from-browser".to_string());
+            args.push(browser);
         }
         stream_pipeline(
             &app,
@@ -1813,7 +1833,7 @@ mod tests {
     use super::{
         canonical_provider_id, generate_support_bundle_at, ig_connect_args, ig_failure_message,
         is_completion_payload, migrate_legacy_data_from, selected_provider_env,
-        spawn_blocking_result, ResumeJobRequest, RunJobRequest,
+        spawn_blocking_result, validate_browser_session, ResumeJobRequest, RunJobRequest,
     };
     use serde_json::json;
 
@@ -1848,6 +1868,18 @@ mod tests {
             "preset-openrouter"
         );
         assert!(canonical_provider_id("../openrouter").is_err());
+    }
+
+    #[test]
+    fn browser_session_validation_is_explicit_and_allowlisted() {
+        assert_eq!(validate_browser_session(None).unwrap(), None);
+        assert_eq!(
+            validate_browser_session(Some("firefox"))
+                .unwrap()
+                .as_deref(),
+            Some("firefox")
+        );
+        assert!(validate_browser_session(Some("edge")).is_err());
     }
 
     #[test]

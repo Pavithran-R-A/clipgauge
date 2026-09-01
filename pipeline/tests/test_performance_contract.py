@@ -106,6 +106,24 @@ def test_cloud_scoring_keeps_the_existing_richer_budget():
     assert budget["music_llm"] is True
 
 
+def test_finalist_selection_spreads_candidates_across_long_source():
+    entries = [
+        {"start": start, "end": start + 42.0, "recommendation_score": score}
+        for start, score in [
+            (0.0, 99.0), (35.0, 98.0), (70.0, 97.0), (105.0, 96.0),
+            (140.0, 95.0), (175.0, 94.0), (360.0, 91.0), (620.0, 89.0),
+            (890.0, 87.0), (1010.0, 86.0),
+        ]
+    ]
+
+    finalists = scoring_stage.select_diverse_finalists(entries, limit=6)
+    starts = [entry["start"] for entry in finalists]
+
+    assert len(finalists) == 6
+    assert max(starts) - min(starts) >= 800.0
+    assert sum(1 for start in starts if start < 200.0) <= 3
+
+
 def test_nvenc_is_preferred_over_software_encoding_when_functional():
     args = renderer.select_video_encoder(nvenc_available=True, videotoolbox_available=False)
     assert args[:2] == ["-c:v", "h264_nvenc"]
@@ -158,6 +176,14 @@ def test_local_scoring_actual_model_calls_stay_bounded(monkeypatch, tmp_path, ca
             }
 
     client = Client()
+    selection_inputs = []
+    original_selector = scoring_stage.select_diverse_finalists
+
+    def capture_selection(entries, limit):
+        selection_inputs.append([dict(entry) for entry in entries])
+        return original_selector(entries, limit)
+
+    monkeypatch.setattr(scoring_stage, "select_diverse_finalists", capture_selection)
     monkeypatch.setattr(scoring_stage.providers_mod, "profile_from_snapshot", lambda _snapshot: profile)
     monkeypatch.setattr(scoring_stage.providers_mod, "make_adapter", lambda _profile: client)
     words = [{"word": f"word{i}", "start": i * 0.4, "end": i * 0.4 + 0.2} for i in range(25)]
@@ -185,6 +211,8 @@ def test_local_scoring_actual_model_calls_stay_bounded(monkeypatch, tmp_path, ca
     assert client.calls <= scoring_stage.LOCAL_T1_CANDIDATE_LIMIT
     assert result["performance"]["finalist_limit"] == scoring_stage.LOCAL_FINALIST_LIMIT
     assert result["performance"]["music_llm_calls"] == 0
+    assert selection_inputs
+    assert all("recommendation_score" in item for item in selection_inputs[0])
     assert all("boundary_refinement" in item for item in result["clips"])
     assert any(
         item["boundary_refinement"]["head_adjustment"] != 0
