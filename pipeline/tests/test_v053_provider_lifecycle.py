@@ -327,6 +327,26 @@ def test_ytdlp_uses_supervisor_endpoint_for_both_methods(monkeypatch):
         assert "youtubepot-bgutilhttp:base_url=http://[::1]:4416" in " ".join(args)
 
 
+def test_ytdlp_enables_verified_managed_node_for_youtube(monkeypatch):
+    from clipgauge_pipeline.ingest import ytdlp
+
+    class StubSupervisor:
+        def start(self):
+            return "http://127.0.0.1:4416"
+
+        def self_test(self):
+            return {"ok": True}
+
+    managed_node = Path(r"C:\clipgauge\runtimes\youtube\node.exe")
+    monkeypatch.setattr(ytdlp, "_provider_supervisor", StubSupervisor())
+    monkeypatch.setattr(youtube_compat, "node_path", lambda: managed_node)
+
+    args = ytdlp._youtube_provider_args("https://www.youtube.com/watch?v=aqz-KE-bpKQ")
+
+    assert "--js-runtimes" in args
+    assert args[args.index("--js-runtimes") + 1] == f"node:{managed_node}"
+
+
 def test_spawn_exception_is_classified_and_leaves_no_handle(provider_ready, monkeypatch):
     def failing_popen(*args, **kwargs):
         raise OSError("executable unavailable")
