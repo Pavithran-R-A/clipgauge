@@ -143,7 +143,9 @@ def provider_source_asset() -> downloads.ManagedAsset:
 
 
 def assets() -> list[downloads.ManagedAsset]:
-    return [node_asset(), provider_source_asset()]
+    from . import ytdlp
+
+    return [node_asset(), provider_source_asset(), ytdlp.managed_asset()]
 
 
 def _node_home() -> Path:
@@ -399,7 +401,7 @@ def install(*, event: downloads.EventFn | None = None, cancel: Callable[[], bool
     if require_consent and not manager.has_consent(PROVIDER_GROUP, group_assets):
         raise downloads.ConsentRequiredError("Consent is required before installing YouTube compatibility")
     archives = manager.download_group(group_assets, group_id=PROVIDER_GROUP, cancel=cancel) if require_consent else [manager.download(asset, cancel=cancel) for asset in group_assets]
-    _extract_assets(manager, archives)
+    _extract_assets(manager, archives[:2])
     node = node_path()
     npm = npm_path()
     server = server_home()

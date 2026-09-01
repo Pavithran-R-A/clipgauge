@@ -64,6 +64,11 @@ def test_youtube_readiness_reports_install_and_build_boundaries(monkeypatch, tmp
     assert result['ready'] is False
 
 
+def test_youtube_setup_group_includes_pinned_ytdlp_asset():
+    asset_ids = {asset.asset_id for asset in youtube_compat.assets()}
+    assert any(asset_id.startswith('runtime:yt-dlp:') for asset_id in asset_ids)
+
+
 def test_youtube_readiness_does_not_block_on_dormant_provider(monkeypatch, tmp_path):
     self_tests = []
     monkeypatch.setattr(youtube_compat.config, 'home_dir', lambda: tmp_path)
