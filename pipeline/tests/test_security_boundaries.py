@@ -55,7 +55,9 @@ def test_model_metadata_allows_tokenizer_vocab_tokens(tmp_path):
     validate_local_model_metadata(config_path)
 
 
-def test_managed_cudnn_catalog_is_pinned_and_minimal():
+def test_managed_cudnn_catalog_is_pinned_and_minimal(monkeypatch):
+    monkeypatch.setattr(managed.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(managed.platform, "machine", lambda: "AMD64")
     asset = managed.cudnn_runtime_asset()
 
     assert asset is not None
