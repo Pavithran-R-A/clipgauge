@@ -12,7 +12,7 @@ _REACTION = {"wow", "what", "no", "oh", "laugh", "laughed", "shocked", "insane"}
 _HOOK_MARKERS = {"why", "how", "what", "never", "nobody", "imagine", "watch", "look"}
 _PRONOUNS = {"he", "she", "they", "it", "that", "this"}
 _PUNCTUATION = (".", "!", "?")
-_INCOMPLETE_TERMINALS = {"and", "because", "but", "here", "or", "so", "these", "then", "to", "with"}
+_FRAGMENT_FUNCTION_WORDS = {"and", "because", "but", "here", "or", "so", "these", "then", "to", "with"}
 _STORY_SCORES = {
     "hook_setup_payoff": 92.0,
     "question_answer": 86.0,
@@ -34,12 +34,19 @@ def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
 def recommendation_score(platform_score: float, quality: dict[str, Any]) -> float:
     """Combine platform fit with a transparent short-form quality floor."""
     score = 0.65 * _clamp(platform_score) + 0.35 * _clamp(quality.get("score", 0.0))
-    if float(quality.get("hook", 0.0)) < 20.0:
+    effective_hook = float(quality.get("effective_hook_0_100", quality.get("hook", 0.0)))
+    if effective_hook < 20.0:
         score -= 20.0
     if float(quality.get("story_shape", 0.0)) <= _STORY_SCORES["none"]:
         score -= 18.0
     if float(quality.get("ending_completeness", 0.0)) < 45.0:
         score -= 16.0
+    if float(quality.get("payoff", 0.0)) <= 0.0:
+        score -= 24.0
+    if quality.get("story_consistent") is False:
+        score -= 24.0
+    if quality.get("complete_ending") is False:
+        score -= 24.0
     return round(_clamp(score), 1)
 
 
@@ -66,7 +73,13 @@ def _visual_evidence(events: list[dict[str, Any]]) -> float:
     return _clamp(evidence)
 
 
-def _deterministic(text: str, events: list[dict[str, Any]], duration: float) -> dict[str, Any]:
+def _deterministic(
+    text: str,
+    events: list[dict[str, Any]],
+    duration: float,
+    *,
+    segment_boundary: bool = False,
+) -> dict[str, Any]:
     tokens = _words(text)
     first = tokens[:8]
     last = tokens[-8:]
@@ -84,10 +97,15 @@ def _deterministic(text: str, events: list[dict[str, Any]], duration: float) -> 
     has_reaction = bool(set(last) & _REACTION) or any(
         event.get("type") in {"laugh", "gasp", "scream", "reaction"} for event in events
     )
+    terminal = last[-1] if last else ""
+    # Grammar evidence supplements, but does not replace, punctuation.
+    grammatical_fragment = terminal in _FRAGMENT_FUNCTION_WORDS or terminal in {
+        "my", "our", "his", "her", "its", "their", "your", "than"
+    }
     complete_ending = bool(
         last
-        and str(text).rstrip().endswith(_PUNCTUATION)
-        and last[-1] not in _INCOMPLETE_TERMINALS
+        and not grammatical_fragment
+        and (str(text).rstrip().endswith(_PUNCTUATION) or segment_boundary)
     )
     filler_ratio = sum(token in _FILLER for token in tokens) / max(1, len(tokens))
     density = min(100.0, len(tokens) / max(1.0, duration) * 5.0)
@@ -124,13 +142,25 @@ def assess(
     duration: float = 1.0,
     *,
     llm: dict[str, Any] | None = None,
+    segment_boundary: bool = False,
 ) -> dict[str, Any]:
     """Combine deterministic evidence with fields from the existing T1 call."""
-    evidence = _deterministic(text, events or [], duration)
+    evidence = _deterministic(text, events or [], duration, segment_boundary=segment_boundary)
     fields = llm or {}
-    hook = evidence["hook"]
+    retention_hook = evidence["hook"]
+    rubric_hook = None
+    rubric_value = fields.get("rubric_hook_0_10", fields.get("rubric_hook", fields.get("hook_strength")))
+    if isinstance(rubric_value, (int, float)):
+        rubric_hook = _clamp(float(rubric_value), 0.0, 10.0)
+    retention_value = fields.get("retention_hook_0_100")
+    if isinstance(retention_value, (int, float)):
+        retention_hook = _clamp(float(retention_value))
+    hook_disagreement = rubric_hook is not None and abs(retention_hook - rubric_hook * 10.0) >= 20.0
+    effective_hook = min(retention_hook, rubric_hook * 10.0) if rubric_hook is not None else retention_hook
+    hook = effective_hook
     if fields:
-        hook = 0.4 * hook + 0.6 * _llm_score(fields, "hook_strength", hook)
+        if rubric_hook is None:
+            hook = retention_hook
     standalone = evidence["standalone"]
     setup = evidence["setup"]
     escalation = evidence["escalation"]
@@ -142,24 +172,51 @@ def assess(
         setup = 0.35 * setup + 0.65 * _llm_score(fields, "setup_strength", setup)
         escalation = 0.35 * escalation + 0.65 * _llm_score(fields, "escalation_strength", escalation)
         payoff_llm = _llm_score(fields, "payoff_strength", payoff)
-        payoff = 0.45 * payoff + 0.55 * payoff_llm if evidence["has_reveal"] or evidence["has_reaction"] else min(50.0, payoff_llm)
+        payoff = 0.45 * payoff + 0.55 * payoff_llm if evidence["has_reveal"] or evidence["has_reaction"] else payoff_llm
         ending = 0.45 * ending + 0.55 * _llm_score(fields, "ending_completeness", ending)
         reaction = 0.4 * reaction + 0.6 * _llm_score(fields, "reaction_strength", reaction)
-    story_shape = _STORY_SCORES.get(str(fields.get("story_shape")), evidence["story_shape"])
+    story_name = str(fields.get("story_shape") or "none")
+    story_shape = _STORY_SCORES.get(story_name, evidence["story_shape"]) if fields.get("story_shape") else evidence["story_shape"]
+    requirements = {
+        "conflict_reaction": ("reaction or payoff", lambda: payoff >= 20.0 and reaction >= 20.0),
+        "question_answer": ("an answer or payoff", lambda: payoff >= 20.0),
+        "hook_setup_payoff": ("a payoff", lambda: payoff >= 20.0),
+        "reveal": ("reveal evidence", lambda: payoff >= 20.0 and (evidence["has_reveal"] or evidence["has_reaction"])),
+    }
+    story_consistent = True
+    story_consistency_reason = ""
+    if story_name in requirements:
+        requirement, check = requirements[story_name]
+        story_consistent = bool(check())
+        if not story_consistent:
+            story_consistency_reason = f"{story_name} requires {requirement}."
     score = (
         hook * 0.20 + standalone * 0.15 + setup * 0.10 + escalation * 0.10
         + payoff * 0.18 + ending * 0.10 + evidence["information_density"] * 0.08
         + evidence["visual_variety"] * 0.04 + reaction * 0.05
         - evidence["filler_ratio"] * 100.0 * 0.12
     )
+    rejection_reasons = _rejection_reasons(
+        complete_ending=bool(evidence["complete_ending"]),
+        effective_hook=effective_hook,
+        payoff=payoff,
+        story_consistent=story_consistent,
+        standalone=standalone,
+        story_name=story_name,
+    )
     return {
         "score": round(_clamp(score), 1),
         "hook": round(_clamp(hook), 1),
+        "rubric_hook_0_10": round(rubric_hook, 1) if rubric_hook is not None else None,
+        "retention_hook_0_100": round(_clamp(retention_hook), 1),
+        "effective_hook_0_100": round(_clamp(effective_hook), 1),
+        "hook_disagreement": bool(hook_disagreement),
         "hook_reason": str(fields.get("hook_reason") or evidence["hook_reason"]),
         "standalone": round(_clamp(standalone), 1),
         "setup": round(_clamp(setup), 1),
         "escalation": round(_clamp(escalation), 1),
         "story_shape": round(_clamp(story_shape), 1),
+        "story": story_name,
         "payoff": round(_clamp(payoff), 1),
         "payoff_location": str(fields.get("payoff_location", "none")),
         "ending_completeness": round(_clamp(ending), 1),
@@ -171,8 +228,35 @@ def assess(
         "visual_variety": round(evidence["visual_variety"], 1),
         "emotional_variety": round(evidence["emotional_variety"], 1),
         "loopability": round(evidence["loopability"], 1),
+        "story_consistent": story_consistent,
+        "story_consistency_reason": story_consistency_reason,
+        "eligible_to_recommend": not rejection_reasons,
+        "rejection_reasons": rejection_reasons,
         "llm_structured": bool(fields),
     }
+
+
+def _rejection_reasons(
+    *,
+    complete_ending: bool,
+    effective_hook: float,
+    payoff: float,
+    story_consistent: bool,
+    standalone: float,
+    story_name: str,
+) -> list[str]:
+    reasons: list[str] = []
+    if not complete_ending:
+        reasons.append("INCOMPLETE_ENDING")
+    if standalone < 40.0:
+        reasons.append("LOW_STANDALONE_CONTEXT")
+    if effective_hook < 15.0:
+        reasons.append("EXTREMELY_WEAK_HOOK")
+    if story_name in {"conflict_reaction", "question_answer", "hook_setup_payoff", "reveal"} and payoff <= 0.0:
+        reasons.append("MISSING_PAYOFF")
+    if not story_consistent:
+        reasons.append("STORY_INCONSISTENT")
+    return reasons
 
 
 def smart_boundaries(
@@ -197,9 +281,10 @@ def smart_boundaries(
             break
         first -= 1
     while last + 1 < len(words) and float(words[last + 1]["end"]) - end <= max_extension:
-        current = str(words[last].get("word", ""))
+        if str(words[last].get("word", "")).rstrip().endswith(_PUNCTUATION):
+            break
         last += 1
-        if current.rstrip().endswith(_PUNCTUATION):
+        if str(words[last].get("word", "")).rstrip().endswith(_PUNCTUATION):
             break
     return round(float(words[first]["start"]), 3), round(float(words[last]["end"]), 3)
 
@@ -210,7 +295,7 @@ def refine_boundaries(
     end: float,
     fields: dict[str, Any] | None = None,
     *,
-    max_extension: float = 1.5,
+    max_extension: float = 7.0,
 ) -> tuple[float, float]:
     """Apply bounded T1 offsets, then snap against aligned words."""
     words = [
@@ -240,8 +325,17 @@ def rank(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         candidates,
         key=lambda item: (
-            -float(item.get("short_quality", {}).get("score", 0.0)),
+            -float(item.get("recommendation_score", item.get("short_quality", {}).get("score", 0.0))),
             item.get("start", 0.0),
             item.get("end", 0.0),
         ),
     )
+
+
+def select_eligible_finalists(candidates: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Return only structurally valid finalists, up to the product maximum."""
+    eligible = [
+        item for item in candidates
+        if item.get("eligible_to_recommend", True) and not item.get("rejection_reasons")
+    ]
+    return rank(eligible)[: max(0, int(limit))]

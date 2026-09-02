@@ -13,7 +13,7 @@ from ..models import registry, specs
 
 class CameraStage(Stage):
     name = "camera"
-    schema_version = 1
+    schema_version = 3  # v3: render refreshed quality-filtered finalists
 
     def artifacts_ok(self, ctx: StageContext, data: dict) -> bool:
         if data.get("camera_settings") != ctx.settings.camera.__dict__:

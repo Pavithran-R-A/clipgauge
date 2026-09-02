@@ -55,6 +55,24 @@ def _transcript_slice(segments: list[dict], start: float, end: float) -> tuple[s
     return "\n".join(lines), " ".join(flat)
 
 
+def _repair_to_segment_boundary(
+    segments: list[dict],
+    start: float,
+    end: float,
+    *,
+    max_extension: float = 7.0,
+) -> tuple[float, bool]:
+    """Use one bounded ASR utterance when punctuation is unavailable."""
+    for segment in segments:
+        segment_start = float(segment.get("start", 0.0))
+        segment_end = float(segment.get("end", 0.0))
+        if segment_start <= end <= segment_end and segment_end - end <= 0.5:
+            return round(end, 3), True
+        if segment_start <= end < segment_end and segment_end - end <= max_extension:
+            return round(segment_end, 3), True
+    return round(end, 3), False
+
+
 def _events_in(timeline: list[dict], start: float, end: float, pad: float = 0.0) -> list[dict]:
     return [e for e in timeline if e["end"] >= start - pad and e["start"] <= end + pad]
 
@@ -114,7 +132,10 @@ def shortlist_local_candidates(
 
 def select_diverse_finalists(entries: list[dict], limit: int = LOCAL_FINALIST_LIMIT) -> list[dict]:
     """Select strong clips while suppressing nearby redundant moments."""
-    remaining = [dict(entry) for entry in entries]
+    remaining = [
+        dict(entry) for entry in entries
+        if entry.get("eligible_to_recommend", True)
+    ]
     selected: list[dict] = []
     separation = 120.0
     while remaining and len(selected) < max(0, int(limit)):
@@ -139,7 +160,7 @@ def select_diverse_finalists(entries: list[dict], limit: int = LOCAL_FINALIST_LI
 
 class ScoreStage(Stage):
     name = "score"
-    schema_version = 2
+    schema_version = 4  # v4: reject every scored quality-floor violation
 
     def run(self, ctx: StageContext) -> dict:
         prior = ctx.prior or {}
@@ -264,25 +285,23 @@ class ScoreStage(Stage):
             entry["best_platform"] = max(platform_scores, key=platform_scores.get)
             return platform_scores, adjustments
 
-        # Compute recommendation scores before diversity selection.
+        # Compute recommendation scores before structural repair.
         for entry in scored:
             _apply_platform_scores(entry)
-        scored.sort(
-            key=lambda entry: (
-                float(entry["recommendation_score"]),
-                -float(entry["start"]),
-            ),
-            reverse=True,
-        )
-        finalists = select_diverse_finalists(scored, int(budget["finalist_limit"]))
 
-        for entry in finalists:
+        # Repair every affordable candidate before ranking.  This keeps the
+        # scored transcript identical to the rendered transcript and allows a
+        # lower-ranked valid moment to replace a broken finalist.
+        for entry in scored:
             original_start, original_end = entry["start"], entry["end"]
             refined_start, refined_end = short_quality.refine_boundaries(
                 segments,
                 original_start,
                 original_end,
                 entry.get("t1_raw"),
+            )
+            refined_end, segment_boundary = _repair_to_segment_boundary(
+                segments, refined_start, refined_end
             )
             entry["start"], entry["end"] = refined_start, refined_end
             labeled, flat = _transcript_slice(segments, refined_start, refined_end)
@@ -293,6 +312,7 @@ class ScoreStage(Stage):
                 window_events,
                 refined_end - refined_start,
                 llm=entry.get("t1_raw"),
+                segment_boundary=segment_boundary,
             )
             _apply_platform_scores(entry)
             entry["boundary_refinement"] = {
@@ -303,6 +323,23 @@ class ScoreStage(Stage):
                 "head_adjustment": round(refined_start - original_start, 3),
                 "tail_adjustment": round(refined_end - original_end, 3),
             }
+
+        scored = short_quality.rank(scored)
+        rejected = [
+            {
+                "start": entry["start"],
+                "end": entry["end"],
+                "recommendation_score": entry["recommendation_score"],
+                "rejection_reasons": entry["short_quality"].get("rejection_reasons", []),
+            }
+            for entry in scored
+            if not entry["short_quality"].get("eligible_to_recommend", False)
+        ]
+        eligible = [
+            entry for entry in scored
+            if entry["short_quality"].get("eligible_to_recommend", False)
+        ]
+        finalists = select_diverse_finalists(eligible, int(budget["finalist_limit"]))
 
         # T2 visual pass + music brief on finalists only.  Current local models
         # are text-only and intentionally skip extra music-model generations so
@@ -356,6 +393,18 @@ class ScoreStage(Stage):
                 "platform_score": entry["platform_score"],
                 "short_quality_score": entry["short_quality_score"],
                 "recommendation_score": entry["recommendation_score"],
+                "quality": {
+                    "rubric_hook_0_10": entry["short_quality"].get("rubric_hook_0_10"),
+                    "retention_hook_0_100": entry["short_quality"].get("retention_hook_0_100"),
+                    "effective_hook_0_100": entry["short_quality"].get("effective_hook_0_100"),
+                    "hook_disagreement": entry["short_quality"].get("hook_disagreement", False),
+                    "payoff": entry["short_quality"].get("payoff"),
+                    "ending_completeness": entry["short_quality"].get("ending_completeness"),
+                    "complete_ending": entry["short_quality"].get("complete_ending", False),
+                    "story": entry["short_quality"].get("story_shape"),
+                    "story_consistent": entry["short_quality"].get("story_consistent", True),
+                    "eligible_to_recommend": entry["short_quality"].get("eligible_to_recommend", False),
+                },
                 "composition": {
                     "subscores": entry["subscores"],
                     "curve_score": entry["curve_score"],
@@ -409,6 +458,7 @@ class ScoreStage(Stage):
             "model": client.model,
             "capabilities": profile.capabilities.to_dict(),
             "clips": finalists,
+            "rejected_candidates": rejected,
             "scored_count": len(scored),
             "t2_ran": supports_vision,
             "scoring_config_version": scoring_config["version"],

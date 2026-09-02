@@ -22,9 +22,9 @@ export const api = {
     invoke<void>('run_job', {
       request: { source, llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader, captions, cookies_from_browser: browserSession },
     }),
-  resumeJob: (jobId: string, provider?: string, captions?: string, camera?: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
+  resumeJob: (jobId: string, provider?: string, captions?: string, camera?: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, allowCpuAsrFallback = false) =>
     invoke<void>('resume_job', {
-      request: { job_id: jobId, llm: provider ? legacyMode(provider) : undefined, provider, model, endpoint, auth, secret_header: secretHeader, captions, camera },
+      request: { job_id: jobId, llm: provider ? legacyMode(provider) : undefined, provider, model, endpoint, auth, secret_header: secretHeader, captions, camera, allow_cpu_asr_fallback: allowCpuAsrFallback },
     }),
   testConnection: (provider: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
     invoke<ProviderTestResult>('test_connection', { llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader }),

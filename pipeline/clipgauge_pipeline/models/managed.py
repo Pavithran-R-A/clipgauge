@@ -28,6 +28,17 @@ CUDA_RUNTIME_FILES = {
     "cublasLt64_12.dll": "2a896460bef60ed57ef32b0875812f355a6984e671d638bb632f5e8c1d7a831f",
     "cudart64_12.dll": "d28e42265da7462162a54da6b7a99ea4fa2caf8139d862bb500db875d0b32dfc",
 }
+CUDNN_RUNTIME_ARCHIVE = config.home_dir() / "downloads" / "cudnn-windows-x86_64-9.11.0.98_cuda12-archive.zip"
+CUDNN_RUNTIME_FILES = {
+    "cudnn64_9.dll": "98461c2e24270b75c6d4767ff469c244d7f7c91cb3d9c9ac76d497510d7d9c5f",
+    "cudnn_adv64_9.dll": "950b04f148fbcfacaf2fb98eee36a422e2a8faf94aedfcbcbac15d7ece938a84",
+    "cudnn_cnn64_9.dll": "da0a92803013d96bf71f872e914e2dbba543e54537d97de555aa53376d07b580",
+    "cudnn_engines_precompiled64_9.dll": "f1b2e8aa17931391ae9c7d7cc974c419b85440229b3145c8cc6662b4e5af29be",
+    "cudnn_engines_runtime_compiled64_9.dll": "f826723e3ebaa2487389636f30a8d374b81357ead8c76b220b4121f107d4e332",
+    "cudnn_graph64_9.dll": "41f57d2b475bbe5bd10095c9529bbd58711c71cca984bf13bfe813ee89d9b949",
+    "cudnn_heuristic64_9.dll": "7b9d9ceaa915093128b2d4d021c5dffac3fbc52539262c44dc2953d028bf2419",
+    "cudnn_ops64_9.dll": "f6b491ab3bc30406326423041f19f69b2c5e6de21f6afb9f1350d3d9c3d7af99",
+}
 _CUDA_DLL_HANDLES: list[object] = []
 
 _UNSAFE_METADATA_KEYS = {
@@ -210,6 +221,43 @@ def cuda_runtime_ready() -> bool:
         return False
 
 
+def cudnn_runtime_asset() -> downloads.ManagedAsset | None:
+    """Return the pinned NVIDIA cuDNN 9 redistributable for Windows."""
+    if platform.system().lower() != "windows" or platform.machine().lower() not in {"amd64", "x86_64"}:
+        return None
+    return _asset(
+        "runtime:cudnn:windows-x86_64:9.11.0.98-cuda12",
+        "NVIDIA cuDNN 9 speech runtime",
+        "CTranslate2 CUDA speech execution",
+        CUDNN_RUNTIME_ARCHIVE,
+        "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.11.0.98_cuda12-archive.zip",
+        550_483_500,
+        "947988b49209d0d22c81809f20f8e7a703e9347d519317e1468e11fd70bb195a",
+        license="NVIDIA cuDNN redistribution; see NVIDIA cuDNN license terms",
+        source="https://developer.download.nvidia.com/compute/cudnn/redist/redistrib_9.11.0.json",
+        source_revision="9.11.0.98",
+        archive_type="zip",
+        expected_paths=tuple(CUDNN_RUNTIME_FILES),
+    )
+
+
+def cudnn_runtime_ready() -> bool:
+    """Verify every managed cuDNN DLL before CUDA model loading."""
+    asset = cudnn_runtime_asset()
+    if asset is None:
+        return True
+    try:
+        if not CUDNN_RUNTIME_ARCHIVE.is_file() or runtime.sha256_file(CUDNN_RUNTIME_ARCHIVE).lower() != asset.sha256.lower():
+            return False
+        return all(
+            (CUDA_RUNTIME_DIR / filename).is_file()
+            and runtime.sha256_file(CUDA_RUNTIME_DIR / filename).lower() == digest
+            for filename, digest in CUDNN_RUNTIME_FILES.items()
+        )
+    except OSError:
+        return False
+
+
 def _ensure_cuda_runtime() -> bool:
     """Extract only the three approved CUDA DLLs after archive verification."""
     if cuda_runtime_ready():
@@ -230,10 +278,30 @@ def _ensure_cuda_runtime() -> bool:
     return cuda_runtime_ready()
 
 
+def _ensure_cudnn_runtime() -> bool:
+    """Extract only NVIDIA cuDNN DLLs after archive verification."""
+    if cudnn_runtime_ready():
+        return True
+    asset = cudnn_runtime_asset()
+    if asset is None or not CUDNN_RUNTIME_ARCHIVE.is_file():
+        return False
+    try:
+        if runtime.sha256_file(CUDNN_RUNTIME_ARCHIVE).lower() != asset.sha256.lower():
+            return False
+        runtime.extract_zip_selected_verified(
+            CUDNN_RUNTIME_ARCHIVE,
+            CUDA_RUNTIME_DIR,
+            expected_basenames=set(CUDNN_RUNTIME_FILES),
+        )
+    except runtime.RuntimeIntegrityError:
+        return False
+    return cudnn_runtime_ready()
+
+
 def activate_cuda_runtime() -> Path:
     """Expose verified CUDA DLLs to this process only."""
-    if not cuda_runtime_ready():
-        raise runtime.RuntimeIntegrityError("managed CUDA runtime is missing or unverified")
+    if not cuda_runtime_ready() or not cudnn_runtime_ready():
+        raise runtime.RuntimeIntegrityError("managed CUDA and cuDNN runtime is missing or unverified")
     if os.name == "nt":
         _CUDA_DLL_HANDLES.append(os.add_dll_directory(str(CUDA_RUNTIME_DIR)))
     path = os.environ.get("PATH", "").split(os.pathsep)
@@ -293,6 +361,9 @@ def all_assets() -> list[downloads.ManagedAsset]:
     cuda_asset = cuda_runtime_asset()
     if cuda_asset is not None:
         assets.append(cuda_asset)
+    cudnn_asset = cudnn_runtime_asset()
+    if cudnn_asset is not None:
+        assets.append(cudnn_asset)
     return assets
 
 
@@ -445,6 +516,8 @@ def prepare_assets(manager: downloads.DownloadManager, *, require_consent: bool,
     _ensure_silero_hub_cache()
     if cuda_runtime_asset() is not None and not _ensure_cuda_runtime():
         raise runtime.RuntimeIntegrityError("CUDA speech runtime failed extraction or verification")
+    if cudnn_runtime_asset() is not None and not _ensure_cudnn_runtime():
+        raise runtime.RuntimeIntegrityError("cuDNN speech runtime failed extraction or verification")
     return paths
 
 
@@ -458,6 +531,8 @@ def ready(manager: downloads.DownloadManager) -> bool:
         _ensure_silero_hub_cache()
     cuda_asset = cuda_runtime_asset()
     cuda_ready = _ensure_cuda_runtime() if cuda_asset is not None else True
+    cudnn_asset = cudnn_runtime_asset()
+    cudnn_ready = _ensure_cudnn_runtime() if cudnn_asset is not None else True
     cuda_required = False
     try:
         from .. import hardware
@@ -471,7 +546,10 @@ def ready(manager: downloads.DownloadManager) -> bool:
         cuda_required = False
     required_rows = [
         row for row in rows
-        if row.get("asset_id") != (cuda_asset.asset_id if cuda_asset else None)
+        if row.get("asset_id") not in {
+            cuda_asset.asset_id if cuda_asset else None,
+            cudnn_asset.asset_id if cudnn_asset else None,
+        }
     ]
     punkt_ready = (config.nltk_data_dir() / "tokenizers" / "punkt_tab" / "english").is_dir()
     silero_ready = all(
@@ -483,7 +561,7 @@ def ready(manager: downloads.DownloadManager) -> bool:
         or not archive_installed
         or not punkt_ready
         or not silero_ready
-        or (cuda_required and not cuda_ready)
+        or (cuda_required and (not cuda_ready or not cudnn_ready))
     ):
         return False
     try:

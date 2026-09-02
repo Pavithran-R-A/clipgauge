@@ -16,6 +16,7 @@ from clipgauge_pipeline.diarize import campplus
 from clipgauge_pipeline.events import ser
 from clipgauge_pipeline import local_runtime
 from clipgauge_pipeline.models import registry, specs
+from clipgauge_pipeline.models import managed
 from clipgauge_pipeline.models.managed import validate_local_model_metadata
 from clipgauge_pipeline.runtime import RuntimeIntegrityError
 from clipgauge_pipeline.vendor.laughter import model as laughter_model
@@ -52,6 +53,27 @@ def test_model_metadata_allows_tokenizer_vocab_tokens(tmp_path):
     config_path.write_text('{"model":{"vocab":{"code":42}}}', encoding="utf-8")
 
     validate_local_model_metadata(config_path)
+
+
+def test_managed_cudnn_catalog_is_pinned_and_minimal():
+    asset = managed.cudnn_runtime_asset()
+
+    assert asset is not None
+    assert asset.asset_id == "runtime:cudnn:windows-x86_64:9.11.0.98-cuda12"
+    assert asset.url.endswith("cudnn-windows-x86_64-9.11.0.98_cuda12-archive.zip")
+    assert asset.size_bytes == 550_483_500
+    assert len(asset.sha256) == 64
+    assert set(managed.CUDNN_RUNTIME_FILES) == {
+        "cudnn64_9.dll",
+        "cudnn_adv64_9.dll",
+        "cudnn_cnn64_9.dll",
+        "cudnn_engines_precompiled64_9.dll",
+        "cudnn_engines_runtime_compiled64_9.dll",
+        "cudnn_graph64_9.dll",
+        "cudnn_heuristic64_9.dll",
+        "cudnn_ops64_9.dll",
+    }
+    assert all(len(digest) == 64 for digest in managed.CUDNN_RUNTIME_FILES.values())
 
 
 def test_local_model_requires_hash_verification_before_runtime_start(tmp_path, monkeypatch):

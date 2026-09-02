@@ -28,6 +28,7 @@ from ..jobs.queue import Stage, StageContext, StageError
 ASR_MODEL = "large-v3-turbo"
 COMPUTE_TYPE = "int8"
 BATCH_SIZE = 8
+LONG_ASR_APPROVAL_SECONDS = 60.0
 
 
 def _point_caches_at_home() -> None:
@@ -43,6 +44,7 @@ def _transcribe_with_fallback(
     compute_type: str,
     load_cpu_model,
     emit,
+    allow_cpu_fallback: bool = True,
 ):
     """Retry transcription on CPU when accelerator execution fails."""
     try:
@@ -52,6 +54,13 @@ def _transcribe_with_fallback(
             raise StageError(
                 "Speech transcription could not complete. Retry the job or repair the speech runtime.",
                 code="ASR_TRANSCRIPTION_FAILED",
+                retryable=True,
+            ) from exc
+
+        if not allow_cpu_fallback:
+            raise StageError(
+                "GPU speech acceleration failed. Repair GPU acceleration or explicitly continue in slower CPU mode.",
+                code="ASR_GPU_FALLBACK_REQUIRES_APPROVAL",
                 retryable=True,
             ) from exc
 
@@ -72,7 +81,7 @@ def _transcribe_with_fallback(
 
 class AsrStage(Stage):
     name = "asr"
-    schema_version = 1
+    schema_version = 2
 
     def run(self, ctx: StageContext) -> dict:
         ingest = ctx.prior.get("ingest") if ctx.prior else None
@@ -95,8 +104,19 @@ class AsrStage(Stage):
 
         capabilities = hardware.snapshot(config.home_dir())
         device, compute_type = hardware.select_asr_accelerator(capabilities)
+        selected_device = device
+        selected_compute_type = compute_type
         acceleration = hardware.asr_readiness(capabilities)
+        if device == "cuda":
+            acceleration = {
+                **acceleration,
+                "state": "GPU SELECTED - INFERENCE PENDING",
+                "device": device,
+                "compute_type": compute_type,
+            }
         fallback_reason = None
+        fallback_stages: list[str] = []
+        allow_cpu_fallback = bool(getattr(ctx.settings, "allow_cpu_asr_fallback", False))
         if device == "cuda":
             try:
                 managed.activate_cuda_runtime()
@@ -108,9 +128,12 @@ class AsrStage(Stage):
                 ) from exc
         import whisperx
 
+        model_load_device = device
+        duration = float(ingest.get("probe", {}).get("duration_sec", 0.0))
+        long_job = duration >= LONG_ASR_APPROVAL_SECONDS
         os.environ["CLIPGAUGE_ACCELERATOR"] = f"{device}/{compute_type}"
         ctx.emit(-1, f"Using {device.upper()} speech acceleration ({compute_type})…")
-        t0 = time.monotonic()
+        model_started = time.monotonic()
         try:
             model = whisperx.load_model(
                 str(managed.asr_model_path()), device, compute_type=compute_type,
@@ -118,7 +141,14 @@ class AsrStage(Stage):
             )
         except Exception as exc:  # noqa: BLE001 - provide a reliable CPU fallback
             if device != "cpu":
+                if long_job and not allow_cpu_fallback:
+                    raise StageError(
+                        "GPU speech acceleration failed. Repair GPU acceleration or explicitly continue in slower CPU mode.",
+                        code="ASR_GPU_FALLBACK_REQUIRES_APPROVAL",
+                        retryable=True,
+                    ) from exc
                 fallback_reason = "CUDA speech model load failed."
+                fallback_stages.append("model_load")
                 device, compute_type = "cpu", "int8"
                 acceleration = {
                     **acceleration,
@@ -150,6 +180,9 @@ class AsrStage(Stage):
         duration = float(len(audio)) / 16000.0
 
         ctx.emit(-1, "Transcribing…")
+        model_load_device = device
+        model_load_secs = time.monotonic() - model_started
+        transcription_started = time.monotonic()
         result, model, device, compute_type = _transcribe_with_fallback(
             model,
             audio=audio,
@@ -163,8 +196,12 @@ class AsrStage(Stage):
                 local_files_only=True,
             ),
             emit=lambda message: ctx.emit(-1, message),
+            allow_cpu_fallback=allow_cpu_fallback or not long_job,
         )
+        transcription_device = device
+        transcribe_secs = time.monotonic() - transcription_started
         if device == "cpu" and acceleration["device"] != "cpu":
+            fallback_stages.append("transcription")
             fallback_reason = fallback_reason or "CUDA speech execution failed during transcription."
             acceleration = {
                 **acceleration,
@@ -174,7 +211,6 @@ class AsrStage(Stage):
                 "reason": fallback_reason,
             }
         language = result.get("language", "en")
-        transcribe_secs = time.monotonic() - t0
 
         # Free ASR weights before loading the alignment model — peak RSS on a
         # 24 GB machine matters more than reload cost.
@@ -201,7 +237,14 @@ class AsrStage(Stage):
             )
         except Exception as exc:  # noqa: BLE001 - alignment can fall back to CPU
             if device != "cpu":
+                if long_job and not allow_cpu_fallback:
+                    raise StageError(
+                        "GPU speech acceleration failed during word alignment. Repair GPU acceleration or explicitly continue in slower CPU mode.",
+                        code="ASR_GPU_FALLBACK_REQUIRES_APPROVAL",
+                        retryable=True,
+                    ) from exc
                 fallback_reason = "CUDA word alignment failed."
+                fallback_stages.append("alignment")
                 device, compute_type = "cpu", "int8"
                 acceleration = {
                     **acceleration,
@@ -235,6 +278,7 @@ class AsrStage(Stage):
                     retryable=True,
                 ) from exc
         align_secs = time.monotonic() - t1
+        alignment_device = device
         del align_model
         gc.collect()
         if hasattr(torch, "mps") and torch.backends.mps.is_available():
@@ -268,6 +312,21 @@ class AsrStage(Stage):
             )
 
         total = transcribe_secs + align_secs
+        if selected_device == "cuda" and transcription_device == "cuda" and alignment_device == "cuda":
+            acceleration = {
+                **acceleration,
+                "state": "GPU ACCELERATED",
+                "device": "cuda",
+                "compute_type": selected_compute_type,
+                "reason": "Real transcription and alignment completed on CUDA.",
+            }
+        elif selected_device == "cuda":
+            acceleration = {
+                **acceleration,
+                "state": "GPU PRESENT - RUNTIME DEGRADED",
+                "device": device,
+                "compute_type": compute_type,
+            }
         return {
             "language": language,
             "model": ASR_MODEL,
@@ -276,10 +335,17 @@ class AsrStage(Stage):
             "accelerator": f"{device}/{compute_type}",
             "acceleration_state": acceleration["state"],
             "acceleration_reason": fallback_reason or acceleration["reason"],
+            "selected_device": selected_device,
+            "selected_compute_type": selected_compute_type,
+            "model_load_device": model_load_device,
+            "transcription_device": transcription_device,
+            "alignment_device": alignment_device,
+            "fallback_stages": fallback_stages,
             "segments": segments,
             "word_count": word_count,
             "benchmark": {
                 "audio_sec": round(duration, 1),
+                "model_load_sec": round(model_load_secs, 1),
                 "transcribe_sec": round(transcribe_secs, 1),
                 "align_sec": round(align_secs, 1),
                 "realtime_factor": round(duration / total, 2) if total > 0 else None,

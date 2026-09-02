@@ -42,6 +42,8 @@ The repository bundles fonts under the SIL Open Font License 1.1 as recorded in 
 
 The managed runtime can fetch pinned yt-dlp and FFmpeg artifacts according to `pipeline/runtime-manifest.json`. yt-dlp is distributed under its upstream license; FFmpeg builds may be GPL-licensed depending on the selected build, as noted in the repository inventory. ClipGauge does not claim to redistribute or relicense third-party binaries beyond the terms that apply to each selected artifact.
 
+Windows CUDA speech uses NVIDIA cuDNN `9.11.0.98` for CUDA 12. The verified archive is pinned in `clipgauge_pipeline.models.managed` by its NVIDIA redistribution URL, 550,483,500-byte size, and SHA-256 `947988b49209d0d22c81809f20f8e7a703e9347d519317e1468e11fd70bb195a`. Only the approved cuDNN DLL set is extracted into the process-local managed runtime.
+
 Optional Gemini, Ollama, Pexels, Instagram, and source-URL integrations are user-selected services rather than bundled third-party code. Their credentials, provider terms, and network behavior are outside the ClipGauge license and are described in the application privacy activity view.
 
 ## Deliberately excluded material

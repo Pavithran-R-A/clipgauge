@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 
+import pytest
+
 from clipgauge_pipeline.asr.stage import _transcribe_with_fallback
+from clipgauge_pipeline.jobs.queue import StageError
 
 
 class _Model:
@@ -33,3 +36,20 @@ def test_transcription_retries_on_cpu_after_accelerator_failure():
     assert model is cpu_model
     assert (device, compute_type) == ("cpu", "int8")
     assert any("CPU fallback" in event for event in events)
+
+
+def test_long_accelerator_failure_requires_explicit_cpu_approval():
+    gpu_model = _Model(error=RuntimeError("CUDA execution failed"))
+
+    with pytest.raises(StageError) as caught:
+        _transcribe_with_fallback(
+            gpu_model,
+            audio=[0.0],
+            device="cuda",
+            compute_type="float16",
+            load_cpu_model=lambda: pytest.fail("CPU model must not load"),
+            emit=lambda _message: None,
+            allow_cpu_fallback=False,
+        )
+
+    assert caught.value.code == "ASR_GPU_FALLBACK_REQUIRES_APPROVAL"

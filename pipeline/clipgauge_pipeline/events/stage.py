@@ -43,7 +43,7 @@ def _extract_wav(media: Path, dst: Path, sr: int) -> None:
 
 class EventsStage(Stage):
     name = "events"
-    schema_version = 2  # v2: measured PANNs thresholds (v1 heard nothing)
+    schema_version = 3  # v3: consume refreshed ASR and diarization outputs
 
     def artifacts_ok(self, ctx: StageContext, data: dict) -> bool:
         return (ctx.job_dir / "curves.json").exists()

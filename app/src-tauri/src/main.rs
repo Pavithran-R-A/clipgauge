@@ -56,6 +56,8 @@ struct RunJobRequest {
     captions: Option<String>,
     #[serde(default)]
     cookies_from_browser: Option<String>,
+    #[serde(default)]
+    allow_cpu_asr_fallback: bool,
 }
 
 fn validate_browser_session(value: Option<&str>) -> Result<Option<String>, String> {
@@ -90,6 +92,8 @@ struct ResumeJobRequest {
     captions: Option<String>,
     #[serde(default)]
     camera: Option<String>,
+    #[serde(default)]
+    allow_cpu_asr_fallback: bool,
 }
 
 fn home_dir() -> PathBuf {
@@ -705,6 +709,7 @@ fn run_job(
         secret_header,
         captions,
         cookies_from_browser,
+        allow_cpu_asr_fallback,
     } = request;
     let cookies_from_browser = validate_browser_session(cookies_from_browser.as_deref())?;
     let (program, base_args) = pipeline_invocation();
@@ -734,6 +739,9 @@ fn run_job(
             args.push("--cookies-from-browser".to_string());
             args.push(browser);
         }
+        if allow_cpu_asr_fallback {
+            args.push("--allow-cpu-asr-fallback".to_string());
+        }
         stream_pipeline(
             &app,
             &program,
@@ -762,6 +770,7 @@ fn resume_job(
         secret_header,
         captions,
         camera,
+        allow_cpu_asr_fallback,
     } = request;
     validate_job_id(&job_id)?;
     let (program, base_args) = pipeline_invocation();
@@ -790,6 +799,9 @@ fn resume_job(
         if let Some(cam) = camera {
             args.push("--camera".to_string());
             args.push(cam);
+        }
+        if allow_cpu_asr_fallback {
+            args.push("--allow-cpu-asr-fallback".to_string());
         }
         stream_pipeline(
             &app,

@@ -29,7 +29,8 @@ const FRIENDLY_FAILURES: Record<string, string> = {
   SPEAKER_CLUSTER_FAILED: 'Speaker grouping could not complete. Retry the job or continue without speaker-aware reframing.',
   PROVIDER_UNAVAILABLE: 'The selected AI is unavailable. Open AI Providers or choose another provider.',
   YTDLP_ATTESTATION_REQUIRED: 'YouTube rejected this download during playback verification. ClipGauge itself is ready; retry later, try optional browser-assisted compatibility with explicit approval, or import the video file directly.',
-  YTDLP_LOGIN_REQUIRED: 'This video requires a signed-in YouTube session. Use a browser session only if you explicitly consent.'
+  YTDLP_LOGIN_REQUIRED: 'This video requires a signed-in YouTube session. Use a browser session only if you explicitly consent.',
+  ASR_GPU_FALLBACK_REQUIRES_APPROVAL: 'GPU speech acceleration failed. Repair GPU acceleration, or explicitly continue in slower CPU mode.'
 }
 
 export default function App() {
@@ -45,6 +46,7 @@ export default function App() {
   const [cancelling, setCancelling] = useState(false)
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null)
   const [runError, setRunError] = useState<string | null>(null)
+  const [runErrorCode, setRunErrorCode] = useState<string | null>(null)
   const [runNotice, setRunNotice] = useState<string | null>(null)
   const [selectedProvider, setSelectedProvider] = useState('clipgauge-local')
   const [selectedLocalModelId, setSelectedLocalModelId] = useState<string | null>(null)
@@ -105,6 +107,7 @@ export default function App() {
           api.jobResults(activeJobRef.current).then((result) => { setResults(result); setView('review') }).catch((error) => setRunError(String(error)))
         } else if (!payload.ok) {
           setRunState('FAILED')
+          setRunErrorCode(payload.code ?? null)
           setRunNotice(null)
           const friendly = payload.code ? FRIENDLY_FAILURES[payload.code] : undefined
           const diagnostic = payload.diagnostic_id ? ` Technical details: ${payload.diagnostic_id}.` : ''
@@ -135,6 +138,7 @@ export default function App() {
     setRunStartedAt(Date.now())
     setCancelling(false)
     setRunError(null)
+    setRunErrorCode(null)
     setRunNotice(null)
     setStages({})
     setResults(null)
@@ -161,6 +165,7 @@ export default function App() {
       setRunning(false)
       setRunState('FAILED')
       setRunError(String(error))
+      setRunErrorCode(null)
     }
   }, [])
 
@@ -171,6 +176,17 @@ export default function App() {
     if (result.render?.outputs?.length) setView('review')
   }, [])
 
+  const continueCpu = useCallback(() => {
+    if (!activeJob) return
+    setRunning(true)
+    setRunState('RUNNING')
+    setRunError(null)
+    setRunErrorCode(null)
+    setRunNotice(null)
+    setStages({})
+    void api.resumeJob(activeJob, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)
+  }, [activeJob])
+
   if (view === 'boot') return <div className="boot" />
   if (view === 'onboarding') return <Onboarding onDone={() => { void api.markOnboarded(); setSetup((current) => current ? { ...current, onboarded: true } : current); setView('shell') }} />
   if (view === 'loop') return <Loop onBack={() => { setSection('integrations'); setView('shell') }} />
@@ -178,12 +194,13 @@ export default function App() {
 
   function navigate(next: AppSection) {
     setRunError(null)
+    setRunErrorCode(null)
     setRunNotice(null)
     setSection(next)
   }
 
   let content
-  if (section === 'create') content = <Studio jobs={jobs} running={running} runState={runState} cancelling={cancelling} startedAt={runStartedAt} stages={stages} error={runError} notice={runNotice} onRun={startRun} localModelId={selectedLocalModelId ?? undefined} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { setCancelling(false); setRunError(String(error)) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onOpenJob={openJob} onResume={(id) => { setRunning(true); setRunState('RUNNING'); setCancelling(false); setRunError(null); setRunNotice(null); setStages({}); setActiveJob(id); void api.resumeJob(id) }} />
+  if (section === 'create') content = <Studio jobs={jobs} running={running} runState={runState} cancelling={cancelling} startedAt={runStartedAt} stages={stages} error={runError} errorCode={runErrorCode} notice={runNotice} onRun={startRun} localModelId={selectedLocalModelId ?? undefined} onContinueCpu={continueCpu} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { setCancelling(false); setRunError(String(error)) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onOpenJob={openJob} onResume={(id) => { setRunning(true); setRunState('RUNNING'); setCancelling(false); setRunError(null); setRunErrorCode(null); setRunNotice(null); setStages({}); setActiveJob(id); void api.resumeJob(id) }} />
   else if (section === 'sessions') content = <Sessions jobs={jobs} onBack={() => setSection('create')} onOpenJob={openJob} onResume={(id) => { setSection('create'); setRunning(true); setRunState('RUNNING'); setActiveJob(id); void api.resumeJob(id) }} />
   else if (section === 'setup') content = <SetupCenter onBack={() => setSection('create')} onUseLocal={(modelId) => { if (modelId) setSelectedLocalModelId(modelId); setSelectedProvider('clipgauge-local'); setSection('create') }} />
   else if (section === 'providers') content = <ProviderCenter selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onBack={() => setSection('create')} onOpenSetup={() => setSection('setup')} />

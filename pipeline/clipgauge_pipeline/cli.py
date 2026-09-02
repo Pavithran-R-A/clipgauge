@@ -289,6 +289,12 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
     downloads_manager = downloads.DownloadManager(event=setup_event)
     try:
+        if args.setup_cmd == "cuda-probe":
+            from .asr.probe import run_cuda_probe
+
+            result = run_cuda_probe(Path(args.audio), Path(args.evidence), align=args.align)
+            print(json.dumps(result))
+            return 0 if result.get("status") == "PASS" else 1
         runtime_asset = _setup_runtime_asset(manager)
         model_assets = [_setup_model_asset(model) for model in local_runtime.MODEL_CATALOG.values()]
         if args.setup_cmd in {"youtube-status", "youtube-test"}:
@@ -430,6 +436,10 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 from .models import managed
                 managed._safe_extract_punkt(config.nltk_data_dir() / "punkt_tab.zip")
                 managed._ensure_silero_hub_cache()
+                if managed.cuda_runtime_asset() is not None and not managed._ensure_cuda_runtime():
+                    raise RuntimeError("CUDA speech runtime failed extraction or verification")
+                if managed.cudnn_runtime_asset() is not None and not managed._ensure_cudnn_runtime():
+                    raise RuntimeError("cuDNN speech runtime failed extraction or verification")
             print(json.dumps({"ok": True, "group": args.group, "paths": [str(path) for path in paths]}))
             return 0
         if args.setup_cmd == "install-asset":
@@ -446,6 +456,12 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 managed._safe_extract_punkt(path)
             if asset.asset_id == managed.silero_asset().asset_id:
                 managed._ensure_silero_hub_cache()
+            cuda_asset = managed.cuda_runtime_asset()
+            if cuda_asset is not None and asset.asset_id == cuda_asset.asset_id:
+                managed._ensure_cuda_runtime()
+            cudnn_asset = managed.cudnn_runtime_asset()
+            if cudnn_asset is not None and asset.asset_id == cudnn_asset.asset_id:
+                managed._ensure_cudnn_runtime()
             print(json.dumps({"ok": True, "asset_id": asset.asset_id, "path": str(path)}))
             return 0
         if args.setup_cmd == "download-model":
@@ -523,6 +539,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.cookies_from_browser:
         settings.cookies_from_browser = args.cookies_from_browser
         settings.provider_metadata["cookies_from_browser"] = args.cookies_from_browser
+    if args.allow_cpu_asr_fallback:
+        settings.allow_cpu_asr_fallback = True
     try:
         job = queue.create_job(source_type, source, json.dumps(settings.to_json()))
     except Exception as err:  # noqa: BLE001 — pre-job protocol boundary
@@ -534,7 +552,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
     job = queue.get_job(args.job_id)
     if job is None:
         return _preflight_terminal(args.jsonl, args.job_id, "JOB_NOT_FOUND", "The requested job could not be found in the managed job store.")
-    if args.llm or args.provider or args.model or args.endpoint or args.captions or args.camera:
+    if args.llm or args.provider or args.model or args.endpoint or args.captions or args.camera or args.allow_cpu_asr_fallback:
         settings = config.Settings.from_json(json.loads(job.settings_json))
         if args.llm or args.provider or args.model or args.endpoint:
             try:
@@ -545,6 +563,8 @@ def cmd_resume(args: argparse.Namespace) -> int:
             settings.caption_preset = args.captions
         if args.camera:
             settings.camera.speaker_change = args.camera
+        if args.allow_cpu_asr_fallback:
+            settings.allow_cpu_asr_fallback = True
         if args.cookies_from_browser:
             settings.cookies_from_browser = args.cookies_from_browser
             settings.provider_metadata["cookies_from_browser"] = args.cookies_from_browser
@@ -820,6 +840,10 @@ def main(argv: list[str] | None = None) -> int:
     p_inventory.add_argument("--model", dest="selected_model_id", choices=sorted(local_runtime.MODEL_CATALOG), default=None)
     setup_sub.add_parser("youtube-status", help="show authoritative YouTube support readiness")
     setup_sub.add_parser("youtube-test", help="test the loopback YouTube provider safely")
+    p_cuda_probe = setup_sub.add_parser("cuda-probe", help="run a real managed CUDA speech probe")
+    p_cuda_probe.add_argument("--audio", required=True, help="local audio fixture")
+    p_cuda_probe.add_argument("--evidence", required=True, help="sanitized evidence JSON output")
+    p_cuda_probe.add_argument("--align", action="store_true", help="run CUDA word alignment")
     setup_sub.add_parser("install-runtime", help="download and install the verified llama.cpp runtime")
     setup_sub.add_parser("install-ffmpeg", help="download, install, and capability-test the managed FFmpeg engine")
     p_install_group = setup_sub.add_parser("install-group", help="download one consented managed asset group")
@@ -851,6 +875,7 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--captions", default=None, help="caption preset name")
     p_run.add_argument("--camera", choices=["cut", "pan", "locked"], default=None)
     p_run.add_argument("--cookies-from-browser", choices=sorted(__import__("clipgauge_pipeline.ingest.ytdlp", fromlist=["SUPPORTED_BROWSER_SESSIONS"]).SUPPORTED_BROWSER_SESSIONS), default=None, help="explicitly use a supported browser session for authenticated video access")
+    p_run.add_argument("--allow-cpu-asr-fallback", action="store_true", help="explicitly allow slower CPU speech fallback")
     p_run.set_defaults(fn=cmd_run)
 
     p_resume = sub.add_parser("resume", help="resume a job from its checkpoints")
@@ -864,6 +889,7 @@ def main(argv: list[str] | None = None) -> int:
     p_resume.add_argument("--captions", default=None, help="caption preset name")
     p_resume.add_argument("--camera", choices=["cut", "pan", "locked"], default=None)
     p_resume.add_argument("--cookies-from-browser", choices=sorted(__import__("clipgauge_pipeline.ingest.ytdlp", fromlist=["SUPPORTED_BROWSER_SESSIONS"]).SUPPORTED_BROWSER_SESSIONS), default=None, help="explicitly use a supported browser session for authenticated video access")
+    p_resume.add_argument("--allow-cpu-asr-fallback", action="store_true", help="explicitly allow slower CPU speech fallback")
     p_resume.set_defaults(fn=cmd_resume)
 
     p_jobs = sub.add_parser("jobs", help="list jobs")

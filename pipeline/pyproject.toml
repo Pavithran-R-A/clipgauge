@@ -16,6 +16,10 @@ dependencies = [
     "scipy>=1.14",
     "speechbrain>=1.0",
     "torchlibrosa>=0.1.0",
+    # Keep the locked Torch stack direct so Windows uses the CUDA index.
+    "torch==2.8.0",
+    "torchaudio==2.8.0",
+    "torchvision==0.23.0",
     "whisperx==3.8.6",
 ]
 
@@ -37,3 +41,19 @@ packages = ["clipgauge_pipeline"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["slow: tests that exercise longer media or render paths"]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu126", marker = "sys_platform == 'win32' and platform_machine == 'AMD64'" },
+]
+torchaudio = [
+    { index = "pytorch-cu126", marker = "sys_platform == 'win32' and platform_machine == 'AMD64'" },
+]
+torchvision = [
+    { index = "pytorch-cu126", marker = "sys_platform == 'win32' and platform_machine == 'AMD64'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true

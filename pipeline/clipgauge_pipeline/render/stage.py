@@ -18,7 +18,7 @@ def captions_allowed_for_clip(clip: dict, captions_ok: bool) -> bool:
 
 class RenderStage(Stage):
     name = "render"
-    schema_version = 1
+    schema_version = 3  # v3: render refreshed quality-filtered finalists
 
     def artifacts_ok(self, ctx: StageContext, data: dict) -> bool:
         if data.get("caption_preset") != ctx.settings.caption_preset:

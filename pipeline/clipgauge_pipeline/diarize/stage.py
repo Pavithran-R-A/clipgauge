@@ -14,7 +14,7 @@ from ..models import registry, specs
 
 class DiarizeStage(Stage):
     name = "diarize"
-    schema_version = 2  # v2: refined affinity (v1 collapsed real two-host audio to one speaker)
+    schema_version = 3  # v3: consume CUDA-qualified ASR checkpoints
 
     def run(self, ctx: StageContext) -> dict:
         prior = ctx.prior or {}

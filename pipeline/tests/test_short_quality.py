@@ -97,3 +97,58 @@ def test_fragment_endings_are_penalized_but_cliffhangers_remain_valid():
     for fragment in ("These.", "So.", "Here."):
         assert short_quality.assess(fragment, [], 1.0)["complete_ending"] is False
     assert short_quality.assess("Wait.", [], 1.0)["complete_ending"] is True
+
+
+def test_real_unfinished_endings_are_ineligible():
+    for fragment in ("Can I hold your", "this one's bigger than"):
+        quality = short_quality.assess(fragment, [], 3.0)
+        assert quality["complete_ending"] is False
+        assert quality["eligible_to_recommend"] is False
+        assert "INCOMPLETE_ENDING" in quality["rejection_reasons"]
+
+
+def test_hook_metrics_preserve_rubric_disagreement_conservatively():
+    quality = short_quality.assess(
+        "The answer is hidden in the final test.",
+        [],
+        4.0,
+        llm={"hook_strength": 0, "hook_reason": "none"},
+    )
+
+    assert quality["rubric_hook_0_10"] == 0.0
+    assert quality["retention_hook_0_100"] > 0.0
+    assert quality["effective_hook_0_100"] == 0.0
+    assert quality["hook_disagreement"] is True
+
+
+def test_contradictory_story_shape_is_inconsistent_and_penalized():
+    quality = short_quality.assess(
+        "The argument ended without anyone reacting.",
+        [],
+        5.0,
+        llm={"story_shape": "conflict_reaction", "payoff_strength": 0},
+    )
+
+    assert quality["payoff"] == 0.0
+    assert quality["story_consistent"] is False
+    assert quality["story_consistency_reason"]
+    assert short_quality.recommendation_score(33.0, quality) < 10.0
+
+
+def test_clear_complete_payoff_beats_platform_only_candidate():
+    weak = short_quality.assess("The discussion continued without an answer.", [], 5.0, llm={"hook_strength": 0, "payoff_strength": 0})
+    strong = short_quality.assess("Why did it fail? Because we fixed it!", [{"type": "reaction"}], 5.0, llm={"hook_strength": 8, "payoff_strength": 8})
+
+    assert short_quality.recommendation_score(33.0, weak) < short_quality.recommendation_score(27.0, strong)
+
+
+def test_rank_and_selection_drop_ineligible_candidates():
+    entries = [
+        {"start": 0, "end": 10, "recommendation_score": 90, "eligible_to_recommend": False, "rejection_reasons": ["INCOMPLETE_ENDING"]},
+        {"start": 20, "end": 30, "recommendation_score": 60, "eligible_to_recommend": True, "rejection_reasons": []},
+    ]
+
+    selected = short_quality.select_eligible_finalists(entries, 6)
+
+    assert len(selected) == 1
+    assert selected[0]["start"] == 20

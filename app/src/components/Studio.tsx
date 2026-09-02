@@ -35,10 +35,12 @@ interface Props {
   startedAt: number | null
   stages: Record<string, StageProgress>
   error: string | null
+  errorCode: string | null
   notice: string | null
   onRun: (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, browserSession?: string) => void
   localModelId?: string
   onCancel: () => void
+  onContinueCpu: () => void
   onNavigate: (section: 'providers' | 'setup' | 'privacy') => void
   selectedProvider: string
   onSelectProvider: (provider: string) => void
@@ -55,7 +57,7 @@ function formatElapsed(seconds: number) {
   return `${minutes}:${String(seconds % 60).padStart(2, '0')}`
 }
 
-export default function Studio({ running, runState, cancelling, startedAt, stages, error, notice, onRun, localModelId, onCancel, onNavigate, selectedProvider, onSelectProvider }: Props) {
+export default function Studio({ running, runState, cancelling, startedAt, stages, error, errorCode, notice, onRun, localModelId, onContinueCpu, onCancel, onNavigate, selectedProvider, onSelectProvider }: Props) {
   const [source, setSource] = useState('')
   const provider = selectedProvider
   const [captions, setCaptions] = useState('classic')
@@ -97,6 +99,7 @@ export default function Studio({ running, runState, cancelling, startedAt, stage
 
   return (
     <div className="workspace-page create-page">
+      {errorCode === 'ASR_GPU_FALLBACK_REQUIRES_APPROVAL' && <section className="cpu-recovery card-surface" aria-live="polite"><div><strong>Choose how speech should continue</strong><p>GPU speech acceleration failed. Repair it in Setup, or approve a slower CPU run for this video.</p></div><div className="detail-actions"><button type="button" className="button button-secondary" onClick={() => onNavigate('setup')}>Repair GPU acceleration</button><button type="button" className="button button-secondary" onClick={onContinueCpu}>Continue in slower CPU mode</button></div></section>}
       <header className="page-header create-header"><div><p className="section-eyebrow">Create</p><h1>Create clips</h1><p className="page-lede">Turn a long video into vertical clips worth sharing.</p></div><div className="header-actions"><button type="button" className="button button-secondary" onClick={() => onNavigate('privacy')}><LockKeyhole size={16} aria-hidden="true" /> Privacy</button><button type="button" className="button button-secondary" onClick={() => onNavigate('setup')}><Settings2 size={16} aria-hidden="true" /> Setup</button></div></header>
       <div className="create-layout">
         <div className="create-main-column">
