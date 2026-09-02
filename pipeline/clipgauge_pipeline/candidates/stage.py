@@ -27,7 +27,7 @@ def detect_scenes(media_path: str, progress=None) -> list[float]:
 
 class CandidatesStage(Stage):
     name = "candidates"
-    schema_version = 2  # v2: consume refreshed event and speech boundaries
+    schema_version = 3  # v3: consume refreshed CUDA-qualified events
 
     def run(self, ctx: StageContext) -> dict:
         import numpy as np

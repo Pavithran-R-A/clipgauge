@@ -107,7 +107,7 @@ def test_real_unfinished_endings_are_ineligible():
         assert "INCOMPLETE_ENDING" in quality["rejection_reasons"]
 
 
-def test_hook_metrics_preserve_rubric_disagreement_conservatively():
+def test_hook_metrics_keep_structured_and_deterministic_signals_distinct():
     quality = short_quality.assess(
         "The answer is hidden in the final test.",
         [],
@@ -115,10 +115,45 @@ def test_hook_metrics_preserve_rubric_disagreement_conservatively():
         llm={"hook_strength": 0, "hook_reason": "none"},
     )
 
-    assert quality["rubric_hook_0_10"] == 0.0
-    assert quality["retention_hook_0_100"] > 0.0
-    assert quality["effective_hook_0_100"] == 0.0
+    assert quality["rubric_hook_0_10"] is None
+    assert quality["structured_hook_0_10"] == 0.0
+    assert quality["deterministic_hook_0_100"] > 0.0
+    assert quality["effective_hook_0_100"] > 0.0
     assert quality["hook_disagreement"] is True
+
+
+def test_hook_fields_remain_distinct_and_explicit():
+    quality = short_quality.assess(
+        "The answer is hidden in the final test.",
+        [],
+        4.0,
+        llm={"hook": 8, "hook_strength": 2},
+    )
+
+    assert quality["rubric_hook_0_10"] == 8.0
+    assert quality["structured_hook_0_10"] == 2.0
+    assert quality["deterministic_hook_0_100"] == 38.0
+    assert quality["effective_hook_0_100"] != 20.0
+
+
+def test_boundary_completeness_does_not_depend_on_fragment_tokens(monkeypatch):
+    monkeypatch.setattr(short_quality, "_FRAGMENT_FUNCTION_WORDS", set())
+
+    for fragment in ("Can I hold your", "this one's bigger than"):
+        quality = short_quality.assess(
+            fragment,
+            [],
+            3.0,
+            ending_evidence={
+                "punctuated": False,
+                "segment_boundary": False,
+                "silence": False,
+                "speaker_turn_boundary": False,
+                "semantic_complete": False,
+            },
+        )
+        assert quality["complete_ending"] is False
+        assert "INCOMPLETE_ENDING" in quality["rejection_reasons"]
 
 
 def test_contradictory_story_shape_is_inconsistent_and_penalized():

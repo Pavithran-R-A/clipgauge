@@ -3,6 +3,7 @@
 import numpy as np
 
 from clipgauge_pipeline.events import post
+from clipgauge_pipeline.events import stage as events_stage
 from clipgauge_pipeline.events.dsp import long_pauses
 
 
@@ -87,3 +88,12 @@ def test_postprocess_full_chain():
     assert len(spans) == 1
     start, end, _ = spans[0]
     assert start < 1.2 and end > 1.8
+
+
+def test_events_device_selection_keeps_cpu_fallback(monkeypatch):
+    import torch
+
+    monkeypatch.setattr(events_stage.managed, "activate_cuda_runtime", lambda: None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    assert str(events_stage.select_inference_device(torch)) == "cpu"

@@ -82,6 +82,22 @@ def test_stage_runs_once_then_caches():
     assert stage.runs == 1  # second run served from checkpoint
 
 
+def test_stage_timing_diagnostic_records_active_and_cached_runs():
+    job = queue.create_job("file", "/tmp/x.mp4", _settings_json())
+    stage = CountingStage()
+    queue.run_stages(job, [stage], _noop_progress)
+    queue.run_stages(job, [stage], _noop_progress)
+
+    timing = json.loads(queue.stage_timing_path(job).read_text())
+    records = timing["stages"]
+    assert records[0]["name"] == "counting"
+    assert records[0]["active_seconds"] >= 0
+    assert records[0]["cached"] is False
+    assert records[1]["cached"] is True
+    assert set(records[0]) >= {"name", "active_seconds", "cached", "backend", "workload", "workload_count"}
+    assert "source" not in records[0]
+
+
 def test_schema_version_bump_invalidates():
     job = queue.create_job("file", "/tmp/x.mp4", _settings_json())
     stage = CountingStage()

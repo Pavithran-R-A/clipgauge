@@ -36,6 +36,13 @@ def test_windows_verified_cuda_runtime_wins_over_vulkan():
     assert key == "windows-x86_64-cuda"
 
 
+def test_local_scoring_budget_allows_bounded_refill():
+    budget = scoring_stage.scoring_budget(local=True, candidate_count=35)
+
+    assert scoring_stage.LOCAL_T1_CANDIDATE_LIMIT == 20
+    assert budget["t1_limit"] == 20
+
+
 def test_windows_vulkan_remains_fallback_without_cuda_runtime():
     key = local_runtime.select_runtime_asset_key(
         platform_key="windows-x86_64",
@@ -93,7 +100,7 @@ def test_windows_without_verified_gpu_keeps_cpu_runtime_fallback():
 def test_local_scoring_has_a_hard_expensive_work_budget():
     budget = scoring_stage.scoring_budget(local=True, candidate_count=35)
     assert budget["candidate_count"] == 35
-    assert budget["t1_limit"] == 10
+    assert budget["t1_limit"] == 20
     assert budget["finalist_limit"] == 6
     assert budget["music_llm"] is False
 
@@ -161,12 +168,13 @@ def test_local_scoring_actual_model_calls_stay_bounded(monkeypatch, tmp_path, ca
 
         def generate_json(self, _prompt, _schema, **_kwargs):
             self.calls += 1
+            strong = self.calls > 10
             return {
-                "hook": 7, "hook_type": "bold_claim", "funniness": 5,
+                "hook": 8 if strong else 0, "hook_type": "bold_claim", "funniness": 5,
                 "punchline_index": -1, "shock": 2, "curiosity_gap": 6,
                 "value": 7, "self_contained": True, "bait_phrases": [],
                 "summary": "A complete local scoring fixture.",
-                "hook_strength": 7, "hook_reason": "claim",
+                "hook_strength": 2 if strong else 0, "hook_reason": "claim",
                 "standalone_comprehension": 7, "setup_strength": 7,
                 "escalation_strength": 7, "payoff_strength": 7,
                 "payoff_location": "middle", "ending_completeness": 7,
@@ -209,6 +217,8 @@ def test_local_scoring_actual_model_calls_stay_bounded(monkeypatch, tmp_path, ca
 
     assert client.calls == result["performance"]["t1_calls"]
     assert client.calls <= scoring_stage.LOCAL_T1_CANDIDATE_LIMIT
+    assert result["performance"]["refill_rounds"] == 1
+    assert result["strong_recommendation_count"] >= 1
     assert result["performance"]["finalist_limit"] == scoring_stage.LOCAL_FINALIST_LIMIT
     assert result["performance"]["music_llm_calls"] == 0
     assert selection_inputs

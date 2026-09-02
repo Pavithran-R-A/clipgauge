@@ -13,6 +13,7 @@ _HOOK_MARKERS = {"why", "how", "what", "never", "nobody", "imagine", "watch", "l
 _PRONOUNS = {"he", "she", "they", "it", "that", "this"}
 _PUNCTUATION = (".", "!", "?")
 _FRAGMENT_FUNCTION_WORDS = {"and", "because", "but", "here", "or", "so", "these", "then", "to", "with"}
+_GRAMMATICAL_TERMINAL_MARKERS = {"my", "our", "his", "her", "its", "their", "your", "than"}
 _STORY_SCORES = {
     "hook_setup_payoff": 92.0,
     "question_answer": 86.0,
@@ -29,6 +30,26 @@ def _words(text: str) -> list[str]:
 
 def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, float(value)))
+
+
+def _effective_hook(
+    rubric_hook: float | None,
+    structured_hook: float | None,
+    deterministic_hook: float,
+) -> tuple[float, bool]:
+    """Blend independent hook signals without trusting one noisy field."""
+    signals = []
+    if rubric_hook is not None:
+        signals.append((rubric_hook * 10.0, 0.55))
+    if structured_hook is not None:
+        signals.append((structured_hook * 10.0, 0.15))
+    signals.append((deterministic_hook, 0.30))
+    weight = sum(item[1] for item in signals)
+    weighted = sum(value * signal_weight for value, signal_weight in signals) / weight
+    spread = max(value for value, _ in signals) - min(value for value, _ in signals)
+    disagreement = spread >= 35.0
+    consistency_penalty = min(10.0, max(0.0, spread - 35.0) * 0.10)
+    return round(_clamp(weighted - consistency_penalty), 1), disagreement
 
 
 def recommendation_score(platform_score: float, quality: dict[str, Any]) -> float:
@@ -79,6 +100,7 @@ def _deterministic(
     duration: float,
     *,
     segment_boundary: bool = False,
+    ending_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     tokens = _words(text)
     first = tokens[:8]
@@ -98,15 +120,17 @@ def _deterministic(
         event.get("type") in {"laugh", "gasp", "scream", "reaction"} for event in events
     )
     terminal = last[-1] if last else ""
-    # Grammar evidence supplements, but does not replace, punctuation.
-    grammatical_fragment = terminal in _FRAGMENT_FUNCTION_WORDS or terminal in {
-        "my", "our", "his", "her", "its", "their", "your", "than"
-    }
-    complete_ending = bool(
-        last
-        and not grammatical_fragment
-        and (str(text).rstrip().endswith(_PUNCTUATION) or segment_boundary)
+    evidence = ending_evidence or {}
+    punctuated = bool(evidence.get("punctuated", str(text).rstrip().endswith(_PUNCTUATION)))
+    structural_boundary = any(
+        bool(evidence.get(key, False))
+        for key in ("segment_boundary", "silence", "speaker_turn_boundary", "semantic_complete")
+    ) or segment_boundary
+    grammatical_fragment = (
+        terminal in _FRAGMENT_FUNCTION_WORDS
+        or terminal in _GRAMMATICAL_TERMINAL_MARKERS
     )
+    complete_ending = bool(last and (punctuated or structural_boundary) and not grammatical_fragment)
     filler_ratio = sum(token in _FILLER for token in tokens) / max(1, len(tokens))
     density = min(100.0, len(tokens) / max(1.0, duration) * 5.0)
     payoff = 76.0 if has_reaction else 62.0 if has_reveal else 28.0
@@ -143,24 +167,32 @@ def assess(
     *,
     llm: dict[str, Any] | None = None,
     segment_boundary: bool = False,
+    ending_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Combine deterministic evidence with fields from the existing T1 call."""
-    evidence = _deterministic(text, events or [], duration, segment_boundary=segment_boundary)
+    evidence = _deterministic(
+        text,
+        events or [],
+        duration,
+        segment_boundary=segment_boundary,
+        ending_evidence=ending_evidence,
+    )
     fields = llm or {}
-    retention_hook = evidence["hook"]
+    deterministic_hook = evidence["hook"]
     rubric_hook = None
-    rubric_value = fields.get("rubric_hook_0_10", fields.get("rubric_hook", fields.get("hook_strength")))
+    rubric_value = fields.get("hook", fields.get("rubric_hook_0_10", fields.get("rubric_hook")))
     if isinstance(rubric_value, (int, float)):
         rubric_hook = _clamp(float(rubric_value), 0.0, 10.0)
-    retention_value = fields.get("retention_hook_0_100")
-    if isinstance(retention_value, (int, float)):
-        retention_hook = _clamp(float(retention_value))
-    hook_disagreement = rubric_hook is not None and abs(retention_hook - rubric_hook * 10.0) >= 20.0
-    effective_hook = min(retention_hook, rubric_hook * 10.0) if rubric_hook is not None else retention_hook
+    structured_hook = None
+    structured_value = fields.get("hook_strength")
+    if isinstance(structured_value, (int, float)):
+        structured_hook = _clamp(float(structured_value), 0.0, 10.0)
+    effective_hook, hook_disagreement = _effective_hook(
+        rubric_hook, structured_hook, deterministic_hook
+    )
     hook = effective_hook
     if fields:
-        if rubric_hook is None:
-            hook = retention_hook
+        hook = effective_hook
     standalone = evidence["standalone"]
     setup = evidence["setup"]
     escalation = evidence["escalation"]
@@ -208,7 +240,9 @@ def assess(
         "score": round(_clamp(score), 1),
         "hook": round(_clamp(hook), 1),
         "rubric_hook_0_10": round(rubric_hook, 1) if rubric_hook is not None else None,
-        "retention_hook_0_100": round(_clamp(retention_hook), 1),
+        "structured_hook_0_10": round(structured_hook, 1) if structured_hook is not None else None,
+        "deterministic_hook_0_100": round(_clamp(deterministic_hook), 1),
+        "retention_hook_0_100": round(_clamp(deterministic_hook), 1),
         "effective_hook_0_100": round(_clamp(effective_hook), 1),
         "hook_disagreement": bool(hook_disagreement),
         "hook_reason": str(fields.get("hook_reason") or evidence["hook_reason"]),
@@ -221,6 +255,23 @@ def assess(
         "payoff_location": str(fields.get("payoff_location", "none")),
         "ending_completeness": round(_clamp(ending), 1),
         "complete_ending": bool(evidence["complete_ending"]),
+        "ending_evidence": {
+            "punctuated": bool(
+                (ending_evidence or {}).get(
+                    "punctuated", str(text).rstrip().endswith(_PUNCTUATION)
+                )
+            ),
+            "segment_boundary": bool(
+                (ending_evidence or {}).get("segment_boundary", segment_boundary)
+            ),
+            "silence": bool((ending_evidence or {}).get("silence", False)),
+            "speaker_turn_boundary": bool(
+                (ending_evidence or {}).get("speaker_turn_boundary", False)
+            ),
+            "semantic_complete": bool(
+                (ending_evidence or {}).get("semantic_complete", False)
+            ),
+        },
         "information_density": round(evidence["information_density"], 1),
         "reaction_strength": round(_clamp(reaction), 1),
         "filler_ratio": round(evidence["filler_ratio"], 3),

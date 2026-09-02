@@ -1,11 +1,12 @@
 # v0.5.4 Python dependency VEX
 
 Audit basis: `pip-audit` against the Windows 3.12 environment on
-2026-09-02. It reported 20 raw records, 19 unique advisory IDs, and three
+2026-09-02. It reported 27 raw records, 22 unique advisory IDs, and three
 packages: Lightning 2.6.5, NLTK 3.10.2, and Transformers 4.57.6.
 
-The older record count was 14. It is stale. Two Transformers 2290 records are
-aliases of one advisory with different reported fix versions. The CUDA Torch
+The older record count was 14. It is stale. Duplicate records remain listed
+below where the audit emitted them. Two Transformers 2290 records are aliases
+of one advisory with different reported fix versions. The CUDA Torch
 wheel is `2.8.0+cu126`; the Windows audit did not emit Torch records for that
 local-version build. The lock still retains the reviewed Torch 2.8.0 advisory
 coverage from the earlier platform-neutral audit.
@@ -32,6 +33,9 @@ attacker-controlled repository or checkpoint metadata.
 | `PYSEC-2026-3749` | nltk 3.10.2 | `CVE-2026-79675`, `GHSA-m4rf-3fr8-xwx3` | new | No affected JVM option path exists. | NOT_AFFECTED |
 | `PYSEC-2026-3752` | nltk 3.10.2 | `CVE-2026-81725`, `GHSA-8mpw-7fpc-4gqj` | new | No affected NLTK parser path exists. | NOT_AFFECTED |
 | `CVE-2026-78680` | nltk 3.10.2 | `GHSA-6hwm-xvph-95vm` | new | No affected NLTK runtime path exists. | NOT_AFFECTED |
+| `CVE-2026-12876` | nltk 3.10.2 | `GHSA-ff5c-cp5c-9wjf` | new | No affected NLTK parser path exists. | NOT_AFFECTED |
+| `CVE-2026-81723` | nltk 3.10.2 | `GHSA-vp2x-qp44-57v7` | new | No affected NLTK parser path exists. | NOT_AFFECTED |
+| `CVE-2026-71513` | nltk 3.10.2 | `GHSA-5gh2-94qg-qppq` | new | No affected NLTK runtime path exists. | NOT_AFFECTED |
 | `PYSEC-2025-217` | transformers 4.57.6 | `CVE-2025-14929` | existing | X-CLIP conversion is absent. | NOT_AFFECTED |
 | `PYSEC-2026-2290` | transformers 4.57.6 | `CVE-2026-5241`, `GHSA-fgcw-684q-jj6r` | existing | LightGlue and arbitrary repository loading are absent. | NOT_AFFECTED |
 | `PYSEC-2026-2288` | transformers 4.57.6 | `CVE-2026-1839`, `GHSA-69w3-r845-3855` | existing | Trainer and RNG-state loading are absent. | NOT_AFFECTED |
