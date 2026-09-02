@@ -288,7 +288,7 @@ def test_cancellation_cleanup_uses_owned_handle(provider_ready, fake_popen, monk
     assert supervisor.handle is None
 
 
-def test_parent_log_descriptor_is_closed_after_spawn(provider_ready, monkeypatch, tmp_path):
+def test_provider_output_is_suppressed_after_spawn(provider_ready, monkeypatch):
     captured = {}
     process = FakeProcess()
     responses = iter([
@@ -306,8 +306,8 @@ def test_parent_log_descriptor_is_closed_after_spawn(provider_ready, monkeypatch
 
     supervisor.start()
 
-    assert captured["stdout"].closed is True
-    assert captured["stderr"].closed is True
+    assert captured["stdout"] is youtube_compat.subprocess.DEVNULL
+    assert captured["stderr"] is youtube_compat.subprocess.DEVNULL
     supervisor.stop()
 
 

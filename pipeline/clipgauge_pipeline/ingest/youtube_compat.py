@@ -540,24 +540,18 @@ class ProviderSupervisor:
             command = [str(node_path()), "build/main.js", "--port", str(DEFAULT_PORT)]
             env = os.environ.copy()
             env["PATH"] = str(node_path().parent) + os.pathsep + env.get("PATH", "")
-            log_path = _root() / "provider.log"
-            log = None
             creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
             kwargs: dict[str, Any] = {
                 "cwd": str(server_home()), "stdin": subprocess.DEVNULL,
+                "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
                 "creationflags": creationflags,
             }
             if os.name != "nt":
                 kwargs["start_new_session"] = True
             try:
-                log = log_path.open("ab")
-                kwargs.update({"stdout": log, "stderr": log})
                 process = subprocess.Popen(command, **kwargs)
             except OSError as error:
                 raise runtime.RuntimeIntegrityError(f"NODE_FAILURE: managed provider could not be spawned: {error}") from error
-            finally:
-                if log is not None:
-                    log.close()
 
             endpoint = f"http://127.0.0.1:{DEFAULT_PORT}"
             self.handle = ProviderHandle(process=process, endpoint=endpoint)
