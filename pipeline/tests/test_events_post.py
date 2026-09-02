@@ -91,9 +91,18 @@ def test_postprocess_full_chain():
 
 
 def test_events_device_selection_keeps_cpu_fallback(monkeypatch):
-    import torch
-
     monkeypatch.setattr(events_stage.managed, "activate_cuda_runtime", lambda: None)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
-    assert str(events_stage.select_inference_device(torch)) == "cpu"
+    class FakeCuda:
+        @staticmethod
+        def is_available():
+            return False
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+        @staticmethod
+        def device(name):
+            return name
+
+    assert str(events_stage.select_inference_device(FakeTorch)) == "cpu"
