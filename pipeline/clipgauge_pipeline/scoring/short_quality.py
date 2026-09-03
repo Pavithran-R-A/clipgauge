@@ -328,7 +328,16 @@ def assess(
     if topic["topic_shift_count"] >= 2:
         semantic_closure -= 15.0
     llm_semantic = fields.get("semantic_closure")
-    if isinstance(llm_semantic, (int, float)):
+    llm_relevance = fields.get("payoff_relevance_to_premise")
+    rich_tier = fields.get("quality_tier")
+    rich_scores_conflict = (
+        rich_tier in {"GOOD", "STRONG"}
+        and (
+            isinstance(llm_semantic, (int, float)) and float(llm_semantic) < 6.0
+            or isinstance(llm_relevance, (int, float)) and float(llm_relevance) < 5.0
+        )
+    )
+    if isinstance(llm_semantic, (int, float)) and not rich_scores_conflict:
         semantic_closure = min(semantic_closure, _clamp(float(llm_semantic), 0.0, 10.0) * 10.0)
     semantic_closure = round(_clamp(semantic_closure), 1)
     payoff_relevance = 100.0
@@ -336,8 +345,7 @@ def assess(
         payoff_relevance -= 65.0
     elif topic["topic_shift_count"] >= 2:
         payoff_relevance -= min(45.0, topic["topic_shift_count"] * 20.0)
-    llm_relevance = fields.get("payoff_relevance_to_premise")
-    if isinstance(llm_relevance, (int, float)):
+    if isinstance(llm_relevance, (int, float)) and not rich_scores_conflict:
         payoff_relevance = min(payoff_relevance, _clamp(float(llm_relevance), 0.0, 10.0) * 10.0)
     payoff_relevance = round(_clamp(payoff_relevance), 1)
     quality_flags: list[str] = []

@@ -26,6 +26,7 @@ from . import short_quality
 SELECT_COUNT = 12
 LOCAL_T1_CANDIDATE_LIMIT = 20
 LOCAL_T1_ROUND_SIZE = 10
+LOCAL_T1_MIN_CALLS = 12
 LOCAL_STRONG_MINIMUM = 3
 LOCAL_T1_WALL_BUDGET_SECONDS = 180.0
 LOCAL_FINALIST_LIMIT = 6
@@ -44,11 +45,17 @@ def scoring_budget(*, local: bool, candidate_count: int) -> dict[str, int | floa
     }
 
 
-def _transcript_slice(segments: list[dict], start: float, end: float) -> tuple[str, str]:
+def _transcript_slice(
+    segments: list[dict],
+    start: float,
+    end: float,
+    *,
+    include_sentence_ids: bool = False,
+) -> tuple[str, str]:
     """(speaker-labeled transcript, flat text) for a window."""
     lines: list[str] = []
     flat: list[str] = []
-    for seg in segments:
+    for index, seg in enumerate(segments):
         if seg["end"] < start or seg["start"] > end:
             continue
         words = [w for w in seg.get("words", []) if start <= w["start"] < end]
@@ -56,7 +63,10 @@ def _transcript_slice(segments: list[dict], start: float, end: float) -> tuple[s
             continue
         text = " ".join(w["word"] for w in words)
         speaker = seg.get("speaker", 0)
-        lines.append(f"S{speaker}: {text}")
+        if include_sentence_ids:
+            lines.append(f"S{index + 1:04d} (speaker {speaker}): {text}")
+        else:
+            lines.append(f"S{speaker}: {text}")
         flat.append(text)
     return "\n".join(lines), " ".join(flat)
 
@@ -90,6 +100,15 @@ def _events_desc(events: list[dict]) -> str:
     for e in events[:12]:
         parts.append(f"{e['type']} at {e['start'] - 0:.0f}s (conf {e.get('confidence', 0):.2f})")
     return "; ".join(parts)
+
+
+def _generate_t1(client, prompt: str, schema: dict, sentence_ids: set[str]) -> dict:
+    """Run one T1 judgment and enforce managed balanced boundaries."""
+    result = client.generate_json(prompt, schema)
+    if schema is rubric.BALANCED_T1_SCHEMA:
+        result = rubric.normalize_balanced_output(result)
+        rubric.validate_balanced_output(result, sentence_ids)
+    return result
 
 
 def _ending_evidence(
@@ -190,12 +209,21 @@ def _story_metadata(candidate: dict) -> dict:
 
 
 def shortlist_local_candidates(
-    candidates: list[dict], segments: list[dict], limit: int = LOCAL_T1_CANDIDATE_LIMIT
+    candidates: list[dict],
+    segments: list[dict],
+    limit: int = LOCAL_T1_CANDIDATE_LIMIT,
+    *,
+    include_sentence_ids: bool = False,
 ) -> list[tuple[dict, str, str]]:
     """Prepare and deterministically cap expensive local scoring work."""
     prepared: list[tuple[dict, str, str]] = []
     for candidate in candidates:
-        labeled, flat = _transcript_slice(segments, candidate["start"], candidate["end"])
+        labeled, flat = _transcript_slice(
+            segments,
+            candidate["start"],
+            candidate["end"],
+            include_sentence_ids=include_sentence_ids,
+        )
         if len(flat.split()) >= 20:
             prepared.append((candidate, labeled, flat))
     prepared.sort(key=_local_prerank, reverse=True)
@@ -345,6 +373,12 @@ class ScoreStage(Stage):
             raise StageError(str(err)) from err
         llm_mode = profile.kind
         is_local = bool(profile.capabilities.local)
+        t1_schema = (
+            rubric.T1_SCHEMA
+            if profile.metadata.get("managed") is False
+            else rubric.schema_for_model(client.model)
+        )
+        include_sentence_ids = t1_schema is rubric.BALANCED_T1_SCHEMA
 
         segments = diarize["segments"]
         timeline = events["timeline"]
@@ -376,11 +410,21 @@ class ScoreStage(Stage):
         # order and full semantic pass; local mode cheaply pre-ranks viable
         # windows and sends only the best bounded subset to the model.
         if is_local:
-            prepared = shortlist_local_candidates(candidates, segments, len(candidates))
+            prepared = shortlist_local_candidates(
+                candidates,
+                segments,
+                len(candidates),
+                include_sentence_ids=include_sentence_ids,
+            )
         else:
             prepared = []
             for cand in candidates:
-                labeled, flat = _transcript_slice(segments, cand["start"], cand["end"])
+                labeled, flat = _transcript_slice(
+                    segments,
+                    cand["start"],
+                    cand["end"],
+                    include_sentence_ids=include_sentence_ids,
+                )
                 if len(flat.split()) >= 20:
                     prepared.append((cand, labeled, flat))
 
@@ -404,7 +448,12 @@ class ScoreStage(Stage):
             }
             try:
                 t1_calls += 1
-                t1 = client.generate_json(rubric.t1_prompt(labeled, context), rubric.T1_SCHEMA)
+                t1 = _generate_t1(
+                    client,
+                    rubric.t1_prompt(labeled, context),
+                    t1_schema,
+                    set(cand.get("sentence_ids", [])),
+                )
             except llm_mod.LlmError:
                 raise
             except Exception as err:  # noqa: BLE001
@@ -448,7 +497,7 @@ class ScoreStage(Stage):
             selected_midpoints: list[float] = []
             remaining: list[tuple[dict, str, str]] = []
             strong_count = sum(is_search_strong(item["short_quality"]) for item in scored)
-            if strong_count < LOCAL_STRONG_MINIMUM:
+            if t1_calls < LOCAL_T1_MIN_CALLS or strong_count < LOCAL_STRONG_MINIMUM:
                 selected_midpoints = [
                     (float(item[0]["start"]) + float(item[0]["end"])) / 2.0
                     for item in round_one
@@ -472,7 +521,12 @@ class ScoreStage(Stage):
                     context = {"duration": end - start, "events_desc": _events_desc(window_events)}
                     try:
                         t1_calls += 1
-                        t1 = client.generate_json(rubric.t1_prompt(labeled, context), rubric.T1_SCHEMA)
+                        t1 = _generate_t1(
+                            client,
+                            rubric.t1_prompt(labeled, context),
+                            t1_schema,
+                            set(cand.get("sentence_ids", [])),
+                        )
                     except llm_mod.LlmError:
                         raise
                     except Exception as err:  # noqa: BLE001
@@ -512,7 +566,9 @@ class ScoreStage(Stage):
                     refill_rounds = 1
             strong_count = sum(is_search_strong(item["short_quality"]) for item in scored)
             remaining = [item for item in remaining if item not in refill]
-            if remaining and strong_count < LOCAL_STRONG_MINIMUM:
+            if remaining and (
+                t1_calls < LOCAL_T1_MIN_CALLS or strong_count < LOCAL_STRONG_MINIMUM
+            ):
                 tier_three = select_diverse_scoring_batch(
                     remaining,
                     len(remaining),
@@ -534,7 +590,12 @@ class ScoreStage(Stage):
                     context = {"duration": end - start, "events_desc": _events_desc(window_events)}
                     try:
                         t1_calls += 1
-                        t1 = client.generate_json(rubric.t1_prompt(labeled, context), rubric.T1_SCHEMA)
+                        t1 = _generate_t1(
+                            client,
+                            rubric.t1_prompt(labeled, context),
+                            t1_schema,
+                            set(cand.get("sentence_ids", [])),
+                        )
                     except llm_mod.LlmError:
                         raise
                     except Exception as err:  # noqa: BLE001
@@ -610,7 +671,12 @@ class ScoreStage(Stage):
                 segments, refined_start, refined_end
             )
             entry["start"], entry["end"] = refined_start, refined_end
-            labeled, flat = _transcript_slice(segments, refined_start, refined_end)
+            labeled, flat = _transcript_slice(
+                segments,
+                refined_start,
+                refined_end,
+                include_sentence_ids=include_sentence_ids,
+            )
             window_events = _events_in(timeline, refined_start, refined_end)
             entry["transcript"] = labeled
             entry["short_quality"] = short_quality.assess(
