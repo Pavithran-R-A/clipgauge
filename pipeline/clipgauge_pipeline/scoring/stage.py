@@ -176,6 +176,19 @@ def _words_for_prerank(text: str) -> list[str]:
     return [word.lower() for word in text.replace("\n", " ").split() if word.strip()]
 
 
+def _story_metadata(candidate: dict) -> dict:
+    """Carry transparent story synthesis evidence into score checkpoints."""
+    keys = (
+        "candidate_id", "sentence_ids", "central_premise", "hook_sentence", "hook_time",
+        "setup_end", "payoff_sentence", "payoff_time", "semantic_closure", "topic_coherence",
+        "topic_shift_count", "standalone_comprehension", "story_shape", "syntactic_complete",
+        "story_variant", "topic_key", "boundary_confidence", "editorial_signal",
+        "hook_strength", "information_density",
+        "duration_fit",
+    )
+    return {key: candidate.get(key) for key in keys if key in candidate}
+
+
 def shortlist_local_candidates(
     candidates: list[dict], segments: list[dict], limit: int = LOCAL_T1_CANDIDATE_LIMIT
 ) -> list[tuple[dict, str, str]]:
@@ -313,7 +326,7 @@ def select_diverse_finalists(entries: list[dict], limit: int = LOCAL_FINALIST_LI
 
 class ScoreStage(Stage):
     name = "score"
-    schema_version = 14  # v14: reaction endings close the same narrative
+    schema_version = 24  # v24: score compact payoff variants
 
     def run(self, ctx: StageContext) -> dict:
         prior = ctx.prior or {}
@@ -424,6 +437,7 @@ class ScoreStage(Stage):
                     "summary": t1.get("summary", ""),
                     "transcript": labeled,
                     "short_quality": quality,
+                    **_story_metadata(cand),
                 }
             )
 
@@ -490,6 +504,7 @@ class ScoreStage(Stage):
                             "summary": t1.get("summary", ""),
                             "transcript": labeled,
                             "short_quality": quality,
+                            **_story_metadata(cand),
                         }
                     )
                 if refill and t1_calls > refill_calls_before:
@@ -551,6 +566,7 @@ class ScoreStage(Stage):
                             "summary": t1.get("summary", ""),
                             "transcript": labeled,
                             "short_quality": quality,
+                            **_story_metadata(cand),
                         }
                     )
                 if tier_three and t1_calls > tier_three_calls_before:

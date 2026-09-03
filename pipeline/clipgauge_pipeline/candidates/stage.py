@@ -1,6 +1,8 @@
-"""Candidates stage: build every free channel, weigh them into the interest
-curve, extract ~35 sentence-snapped candidate windows. No LLM spend here —
-this count is the cost gate for T1/T2."""
+"""Candidates stage: signals to story-unit variants.
+
+The stage keeps scene cuts as supporting evidence, then constructs variable
+story spans before bounded local editorial boundary selection.
+"""
 
 from __future__ import annotations
 
@@ -27,13 +29,13 @@ def detect_scenes(media_path: str, progress=None) -> list[float]:
 
 class CandidatesStage(Stage):
     name = "candidates"
-    schema_version = 3  # v3: consume refreshed CUDA-qualified events
+    schema_version = 15  # v15: favor thirty-second payoff variants
 
     def run(self, ctx: StageContext) -> dict:
         import numpy as np
 
         from . import curve as curve_mod
-        from . import windows as windows_mod
+        from . import story_units
 
         prior = ctx.prior or {}
         ingest = prior.get("ingest")
@@ -51,13 +53,19 @@ class CandidatesStage(Stage):
             raise StageError("curves.json missing — re-run events.")
         curves = json.loads(curves_path.read_text())
 
-        ctx.emit(-1, "Detecting scene changes…")
-        try:
-            scene_times = detect_scenes(ingest["media_path"])
-        except Exception:  # noqa: BLE001 — scenes are a minor channel; degrade
-            scene_times = []
         scenes_path = ctx.job_dir / "scenes.json"
-        _atomic_write_json(scenes_path, scene_times)
+        if scenes_path.exists():
+            try:
+                scene_times = json.loads(scenes_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                scene_times = []
+        else:
+            ctx.emit(-1, "Detecting scene changes…")
+            try:
+                scene_times = detect_scenes(ingest["media_path"])
+            except Exception:  # noqa: BLE001 — scenes are a minor channel; degrade
+                scene_times = []
+            _atomic_write_json(scenes_path, scene_times)
 
         ctx.emit(0.6, "Building interest curve…")
         channels = {
@@ -73,11 +81,55 @@ class CandidatesStage(Stage):
         }
         curve, effective_weights = curve_mod.interest_curve(channels)
 
-        ctx.emit(0.8, "Extracting candidate windows…")
-        candidates = windows_mod.extract(curve, channels, segments, duration)
+        ctx.emit(0.8, "Building story candidates…")
+        units = story_units.build_sentence_units(
+            segments,
+            scene_times=scene_times,
+            timeline=events["timeline"],
+            interest_curve=curve.tolist(),
+        )
+
+        boundary_client = None
+        boundary_attempts = 0
+        try:
+            from ..scoring import providers as providers_mod
+
+            profile = providers_mod.profile_from_snapshot(ctx.settings.provider_snapshot())
+            if profile.capabilities.local:
+                client = providers_mod.make_adapter(profile)
+
+                def propose(neighborhood, _anchor):
+                    nonlocal boundary_attempts
+                    boundary_attempts += 1
+                    try:
+                        payload = client.generate_json(
+                            story_units.boundary_prompt(neighborhood),
+                            story_units.BOUNDARY_SCHEMA,
+                            purpose="boundary",
+                            job_id=ctx.job_dir.name,
+                        )
+                    except Exception as err:  # noqa: BLE001 — deterministic fallback remains valid
+                        ctx.emit(-1, f"Boundary proposal unavailable: {err}")
+                        return []
+                    proposal = story_units.parse_boundary_proposal(payload, neighborhood)
+                    return [proposal] if proposal else []
+
+                boundary_client = propose
+        except Exception:  # noqa: BLE001 — scoring may still use a cloud provider
+            boundary_client = None
+
+        synthesis = story_units.synthesize(
+            units,
+            channels={name: values.tolist() for name, values in channels.items()},
+            boundary_proposer=boundary_client,
+            anchor_limit=story_units.ANCHOR_LIMIT,
+            boundary_limit=story_units.MAX_BOUNDARY_CALLS,
+            shortlist_limit=story_units.SHORTLIST_LIMIT,
+        )
+        candidates = synthesis["candidates"]
         if not candidates:
             raise StageError(
-                "No candidate moments found — the video may be too short or too quiet."
+                "No complete story candidates found — the video may be too quiet or fragmented."
             )
 
         # Persist the curve for the review UI's timeline visualization.
@@ -88,8 +140,14 @@ class CandidatesStage(Stage):
         )
 
         return {
-            "candidates": [c.to_json() for c in candidates],
+            "candidates": candidates,
             "count": len(candidates),
+            "sentence_units": synthesis["units"],
+            "topic_segment_count": synthesis["topic_segment_count"],
+            "anchors": synthesis["anchors"],
+            "raw_span_variants": synthesis["raw_span_variants"],
+            "cheap_survivors": synthesis["cheap_survivors"],
+            "boundary_calls": boundary_attempts,
             "effective_weights": effective_weights,
             "scene_count": len(scene_times),
             "heatmap_present": bool(ingest.get("heatmap")),
