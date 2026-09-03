@@ -105,7 +105,11 @@ def t1_prompt(transcript_text: str, context: dict) -> str:
         "of the word where the biggest laugh lands, or -1.\n"
         "Also return the bounded short-form fields. Use only facts visible in "
         "the transcript and listed events. Offsets are seconds relative to this "
-        "candidate. Choose payoff_location=none when no payoff exists."
+        "candidate. Choose payoff_location=none when no payoff exists. If the "
+        "provider supports optional fields, return a short central_premise, "
+        "narrative_beats, semantic_closure, and payoff_relevance_to_premise in "
+        "this same response. Treat a final question or newly introduced topic "
+        "as weak semantic closure, even when grammatically complete."
     )
 
 

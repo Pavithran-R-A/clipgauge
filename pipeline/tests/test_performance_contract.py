@@ -40,7 +40,16 @@ def test_local_scoring_budget_allows_bounded_refill():
     budget = scoring_stage.scoring_budget(local=True, candidate_count=35)
 
     assert scoring_stage.LOCAL_T1_CANDIDATE_LIMIT == 20
-    assert budget["t1_limit"] == 20
+    assert budget["t1_limit"] == 35
+    assert budget["tier_two_limit"] == 20
+    assert budget["wall_time_seconds"] == scoring_stage.LOCAL_T1_WALL_BUDGET_SECONDS
+
+
+def test_local_prerank_recognizes_question_openings_without_punctuation():
+    ordinary = ({"start": 0.0, "end": 10.0, "curve_score": 0.5, "channel_scores": {}}, "", "The room is underground and comfortable with several rooms.")
+    question = ({"start": 10.0, "end": 20.0, "curve_score": 0.5, "channel_scores": {}}, "", "Can I hold one while the bunker doors are closing and everyone reacts.")
+
+    assert scoring_stage._local_prerank(question)[2] > scoring_stage._local_prerank(ordinary)[2]
 
 
 def test_windows_vulkan_remains_fallback_without_cuda_runtime():
@@ -100,7 +109,8 @@ def test_windows_without_verified_gpu_keeps_cpu_runtime_fallback():
 def test_local_scoring_has_a_hard_expensive_work_budget():
     budget = scoring_stage.scoring_budget(local=True, candidate_count=35)
     assert budget["candidate_count"] == 35
-    assert budget["t1_limit"] == 20
+    assert budget["t1_limit"] == 35
+    assert budget["tier_two_limit"] == 20
     assert budget["finalist_limit"] == 6
     assert budget["music_llm"] is False
 
@@ -194,7 +204,7 @@ def test_local_scoring_actual_model_calls_stay_bounded(monkeypatch, tmp_path, ca
     monkeypatch.setattr(scoring_stage, "select_diverse_finalists", capture_selection)
     monkeypatch.setattr(scoring_stage.providers_mod, "profile_from_snapshot", lambda _snapshot: profile)
     monkeypatch.setattr(scoring_stage.providers_mod, "make_adapter", lambda _profile: client)
-    words = [{"word": f"word{i}", "start": i * 0.4, "end": i * 0.4 + 0.2} for i in range(25)]
+    words = [{"word": f"word{i}{'!' if i == 24 else ''}", "start": i * 0.4, "end": i * 0.4 + 0.2} for i in range(25)]
     curves_path = tmp_path / "curves.json"
     curves_path.write_text(json.dumps({"arousal": [], "arousal_grid_sec": 0.5}), encoding="utf-8")
     candidates = [
@@ -216,9 +226,9 @@ def test_local_scoring_actual_model_calls_stay_bounded(monkeypatch, tmp_path, ca
     result = scoring_stage.ScoreStage().run(ctx)
 
     assert client.calls == result["performance"]["t1_calls"]
-    assert client.calls <= scoring_stage.LOCAL_T1_CANDIDATE_LIMIT
+    assert client.calls <= candidate_count
     assert result["performance"]["refill_rounds"] == 1
-    assert result["strong_recommendation_count"] >= 1
+    assert result["good_recommendation_count"] >= 1
     assert result["performance"]["finalist_limit"] == scoring_stage.LOCAL_FINALIST_LIMIT
     assert result["performance"]["music_llm_calls"] == 0
     assert selection_inputs
@@ -229,3 +239,68 @@ def test_local_scoring_actual_model_calls_stay_bounded(monkeypatch, tmp_path, ca
         or item["boundary_refinement"]["tail_adjustment"] != 0
         for item in result["clips"]
     )
+
+
+def test_local_scoring_reaches_remaining_tier_without_strong_candidates(monkeypatch, tmp_path):
+    profile = providers.preset_profile("clipgauge-local", metadata={"managed": False})
+    client_profile = profile
+
+    class Client:
+        profile = client_profile
+        model = client_profile.model
+        last_result = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def structured_level(self):
+            return "json_mode"
+
+        def generate_json(self, _prompt, _schema, **_kwargs):
+            self.calls += 1
+            return {
+                "hook": 0, "hook_type": "none", "funniness": 0,
+                "punchline_index": -1, "shock": 0, "curiosity_gap": 0,
+                "value": 1, "self_contained": True, "bait_phrases": [],
+                "summary": "A deliberately weak fixture.",
+                "hook_strength": 0, "hook_reason": "none",
+                "standalone_comprehension": 2, "setup_strength": 2,
+                "escalation_strength": 1, "payoff_strength": 0,
+                "payoff_location": "none", "ending_completeness": 2,
+                "story_shape": "none", "information_density": 1,
+                "reaction_strength": 0, "recommended_start_offset": 0,
+                "recommended_end_offset": 10,
+            }
+
+    client = Client()
+    monkeypatch.setattr(scoring_stage.providers_mod, "profile_from_snapshot", lambda _snapshot: profile)
+    monkeypatch.setattr(scoring_stage.providers_mod, "make_adapter", lambda _profile: client)
+    words = [
+        {"word": f"word{i}{'!' if i == 24 else ''}", "start": i * 0.4, "end": i * 0.4 + 0.2}
+        for i in range(25)
+    ]
+    curves_path = tmp_path / "curves.json"
+    curves_path.write_text(json.dumps({"arousal": [], "arousal_grid_sec": 0.5}), encoding="utf-8")
+    candidates = [
+        {"start": 0.0, "end": 10.0, "curve_score": i / 35, "channel_scores": {"energy": i}}
+        for i in range(35)
+    ]
+    ctx = SimpleNamespace(
+        prior={
+            "ingest": {"probe": {"duration_sec": 10.0}, "media_path": "fixture.mp4"},
+            "diarize": {"segments": [{"start": 0.0, "end": 10.0, "speaker": 0, "words": words}]},
+            "events": {"timeline": [], "curves_path": str(curves_path)},
+            "candidates": {"candidates": candidates},
+        },
+        settings=SimpleNamespace(provider_snapshot=lambda: {}),
+        job_dir=tmp_path,
+        emit=lambda *_args: None,
+    )
+
+    result = scoring_stage.ScoreStage().run(ctx)
+
+    assert client.calls == 35
+    assert result["performance"]["rounds_run"] == 3
+    assert result["performance"]["refill_rounds"] == 2
+    assert result["performance"]["t1_wall_budget_seconds"] == scoring_stage.LOCAL_T1_WALL_BUDGET_SECONDS
+    assert result["strong_recommendation_count"] == 0

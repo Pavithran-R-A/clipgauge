@@ -9,6 +9,7 @@ of candidate windows into an hour of sequential local-model generations.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -25,16 +26,19 @@ from . import short_quality
 SELECT_COUNT = 12
 LOCAL_T1_CANDIDATE_LIMIT = 20
 LOCAL_T1_ROUND_SIZE = 10
-LOCAL_STRONG_MINIMUM = 4
+LOCAL_STRONG_MINIMUM = 3
+LOCAL_T1_WALL_BUDGET_SECONDS = 180.0
 LOCAL_FINALIST_LIMIT = 6
 
 
-def scoring_budget(*, local: bool, candidate_count: int) -> dict[str, int | bool]:
+def scoring_budget(*, local: bool, candidate_count: int) -> dict[str, int | float | bool]:
     """Return the deterministic expensive-work ceiling for one scoring run."""
     count = max(0, int(candidate_count))
     return {
         "candidate_count": count,
-        "t1_limit": min(count, LOCAL_T1_CANDIDATE_LIMIT) if local else count,
+        "t1_limit": count,
+        "tier_two_limit": min(count, LOCAL_T1_CANDIDATE_LIMIT) if local else count,
+        "wall_time_seconds": LOCAL_T1_WALL_BUDGET_SECONDS if local else 0.0,
         "finalist_limit": LOCAL_FINALIST_LIMIT if local else SELECT_COUNT,
         "music_llm": not local,
     }
@@ -145,9 +149,13 @@ def _local_prerank(item: tuple[dict, str, str]) -> tuple[float, ...]:
     text = flat.strip()
     starts_complete = float(bool(words and words[0] not in {"um", "uh", "like"}))
     ends_complete = float(bool(text.endswith((".", "!", "?"))))
-    question_or_open_loop = float(bool("?" in text or (words and words[0] in {
-        "why", "how", "what", "when", "where", "who", "imagine", "watch"
-    })))
+    question_or_open_loop = float(bool(
+        "?" in text
+        or (words and words[0] in {
+            "why", "how", "what", "when", "where", "who", "imagine", "watch",
+            "can", "could", "would", "did", "do", "does", "is", "are",
+        })
+    ))
     concrete_detail = float(bool(any(any(char.isdigit() for char in word) for word in words)))
     concrete_detail += float(bool(set(words) & {"money", "year", "years", "dollars", "percent", "first", "only"}))
     reaction = float(bool(set(words) & {"wow", "what", "no", "oh", "laugh", "laughed", "shocked", "insane"}))
@@ -208,12 +216,41 @@ def select_diverse_scoring_batch(
 def is_strong_recommendation(quality: dict[str, object]) -> bool:
     """Apply the final recommendation floor after structural validation."""
     return bool(
-        quality.get("eligible_to_recommend")
+        quality.get("quality_tier") == "STRONG"
+        and quality.get("eligible_to_recommend")
         and quality.get("complete_ending")
         and float(quality.get("effective_hook_0_100", 0.0)) >= 20.0
         and float(quality.get("payoff", 0.0)) >= 45.0
         and float(quality.get("standalone", 0.0)) >= 55.0
         and quality.get("story_consistent", True)
+    )
+
+
+def is_good_recommendation(quality: dict[str, object]) -> bool:
+    """Accept only GOOD or STRONG results for final rendering."""
+    return bool(
+        quality.get("eligible_to_recommend")
+        and quality.get("quality_tier") in {"GOOD", "STRONG"}
+    )
+
+
+def is_search_strong(quality: dict[str, object]) -> bool:
+    """Count promising candidates before final boundary repair."""
+    flags = set(quality.get("quality_flags") or [])
+    # Segment-boundary evidence is collected during the repair pass.  The
+    # provisional search may use the T1 ending score instead.
+    flags.discard("WEAK_SEMANTIC_CLOSURE")
+    rejection_reasons = set(quality.get("rejection_reasons") or [])
+    provisional_ending = (
+        rejection_reasons <= {"INCOMPLETE_ENDING"}
+        and float(quality.get("ending_completeness", 0.0)) >= 50.0
+    )
+    return bool(
+        (quality.get("eligible_to_recommend") or provisional_ending)
+        and not flags
+        and float(quality.get("effective_hook_0_100", 0.0)) >= 40.0
+        and float(quality.get("payoff", 0.0)) >= 45.0
+        and float(quality.get("standalone", 0.0)) >= 55.0
     )
 
 
@@ -229,6 +266,16 @@ def quality_audit(quality: dict[str, object]) -> dict[str, object]:
         "standalone": quality.get("standalone"),
         "ending_completeness": quality.get("ending_completeness"),
         "complete_ending": quality.get("complete_ending", False),
+        "syntactic_complete": quality.get("syntactic_complete", False),
+        "semantic_closure_0_100": quality.get("semantic_closure_0_100"),
+        "open_loop_at_end": quality.get("open_loop_at_end", False),
+        "central_premise": quality.get("central_premise", ""),
+        "topic_coherence_0_100": quality.get("topic_coherence_0_100"),
+        "topic_shift_count": quality.get("topic_shift_count", 0),
+        "late_new_topic": quality.get("late_new_topic", False),
+        "payoff_relevance_to_premise": quality.get("payoff_relevance_to_premise"),
+        "quality_flags": quality.get("quality_flags", []),
+        "quality_tier": quality.get("quality_tier", "STRUCTURALLY_VALID"),
         "story_consistent": quality.get("story_consistent", True),
         "eligible_to_recommend": quality.get("eligible_to_recommend", False),
         "structurally_valid": quality.get("structurally_valid", False),
@@ -266,7 +313,7 @@ def select_diverse_finalists(entries: list[dict], limit: int = LOCAL_FINALIST_LI
 
 class ScoreStage(Stage):
     name = "score"
-    schema_version = 8  # v8: persist structural and strong classifications
+    schema_version = 14  # v14: reaction endings close the same narrative
 
     def run(self, ctx: StageContext) -> dict:
         prior = ctx.prior or {}
@@ -316,7 +363,7 @@ class ScoreStage(Stage):
         # order and full semantic pass; local mode cheaply pre-ranks viable
         # windows and sends only the best bounded subset to the model.
         if is_local:
-            prepared = shortlist_local_candidates(candidates, segments, int(budget["t1_limit"]))
+            prepared = shortlist_local_candidates(candidates, segments, len(candidates))
         else:
             prepared = []
             for cand in candidates:
@@ -326,11 +373,14 @@ class ScoreStage(Stage):
 
         scored: list[dict] = []
         t1_calls = 0
+        scoring_started = time.monotonic()
         round_one = (
             select_diverse_scoring_batch(prepared, LOCAL_T1_ROUND_SIZE)
             if is_local else prepared
         )
         for i, (cand, labeled, flat) in enumerate(round_one):
+            if is_local and time.monotonic() - scoring_started >= LOCAL_T1_WALL_BUDGET_SECONDS:
+                break
             start, end = cand["start"], cand["end"]
             ctx.emit(i / max(1, len(prepared)) * 0.6, f"Scoring moment {i + 1}/{len(prepared)}…")
             window_events = _events_in(timeline, start, end)
@@ -380,10 +430,10 @@ class ScoreStage(Stage):
         rounds_run = 1 if round_one else 0
         refill_rounds = 0
         if is_local and t1_calls < int(budget["t1_limit"]):
-            strong_count = sum(
-                is_strong_recommendation(item["short_quality"])
-                for item in scored
-            )
+            refill: list[tuple[dict, str, str]] = []
+            selected_midpoints: list[float] = []
+            remaining: list[tuple[dict, str, str]] = []
+            strong_count = sum(is_search_strong(item["short_quality"]) for item in scored)
             if strong_count < LOCAL_STRONG_MINIMUM:
                 selected_midpoints = [
                     (float(item[0]["start"]) + float(item[0]["end"])) / 2.0
@@ -392,10 +442,13 @@ class ScoreStage(Stage):
                 remaining = [item for item in prepared if item not in round_one]
                 refill = select_diverse_scoring_batch(
                     remaining,
-                    min(LOCAL_T1_ROUND_SIZE, int(budget["t1_limit"]) - t1_calls),
+                    min(LOCAL_T1_ROUND_SIZE, len(remaining)),
                     selected_midpoints,
                 )
+                refill_calls_before = t1_calls
                 for i, (cand, labeled, flat) in enumerate(refill, start=len(round_one)):
+                    if time.monotonic() - scoring_started >= LOCAL_T1_WALL_BUDGET_SECONDS:
+                        break
                     start, end = cand["start"], cand["end"]
                     window_events = _events_in(timeline, start, end)
                     near_laughs = [
@@ -439,9 +492,70 @@ class ScoreStage(Stage):
                             "short_quality": quality,
                         }
                     )
-                if refill:
+                if refill and t1_calls > refill_calls_before:
                     rounds_run += 1
                     refill_rounds = 1
+            strong_count = sum(is_search_strong(item["short_quality"]) for item in scored)
+            remaining = [item for item in remaining if item not in refill]
+            if remaining and strong_count < LOCAL_STRONG_MINIMUM:
+                tier_three = select_diverse_scoring_batch(
+                    remaining,
+                    len(remaining),
+                    selected_midpoints + [
+                        (float(item[0]["start"]) + float(item[0]["end"])) / 2.0
+                        for item in refill
+                    ],
+                )
+                tier_three_calls_before = t1_calls
+                for i, (cand, labeled, flat) in enumerate(tier_three, start=t1_calls):
+                    if time.monotonic() - scoring_started >= LOCAL_T1_WALL_BUDGET_SECONDS:
+                        break
+                    start, end = cand["start"], cand["end"]
+                    window_events = _events_in(timeline, start, end)
+                    near_laughs = [
+                        e for e in _events_in(timeline, start, end, pad=3.0)
+                        if e["type"] == "laugh"
+                    ]
+                    context = {"duration": end - start, "events_desc": _events_desc(window_events)}
+                    try:
+                        t1_calls += 1
+                        t1 = client.generate_json(rubric.t1_prompt(labeled, context), rubric.T1_SCHEMA)
+                    except llm_mod.LlmError:
+                        raise
+                    except Exception as err:  # noqa: BLE001
+                        ctx.emit(-1, f"moment {i + 1} scoring failed, skipping: {err}")
+                        continue
+                    quality = short_quality.assess(flat, window_events, end - start, llm=t1)
+                    arousal_pct = _window_pct(arousal, arousal_grid, start, end)
+                    heatmap_pct = (
+                        _window_pct(heat_values, 1.0, start, end) if heat_values is not None else None
+                    )
+                    sub, adjustments = rubric.cross_validate(
+                        t1,
+                        laughs_near=near_laughs,
+                        arousal_pct=arousal_pct,
+                        heatmap_pct=heatmap_pct,
+                        constants=cv_constants,
+                    )
+                    scored.append(
+                        {
+                            "start": start,
+                            "end": end,
+                            "curve_score": cand["curve_score"],
+                            "channel_scores": cand["channel_scores"],
+                            "t1_raw": t1,
+                            "subscores": {k: round(v, 2) for k, v in sub.items()},
+                            "adjustments": adjustments,
+                            "arousal_pct": round(arousal_pct, 3),
+                            "heatmap_pct": round(heatmap_pct, 3) if heatmap_pct is not None else None,
+                            "summary": t1.get("summary", ""),
+                            "transcript": labeled,
+                            "short_quality": quality,
+                        }
+                    )
+                if tier_three and t1_calls > tier_three_calls_before:
+                    rounds_run += 1
+                    refill_rounds = 2
 
         if not scored:
             raise StageError("No candidate produced a scoreable transcript.")
@@ -531,8 +645,12 @@ class ScoreStage(Stage):
             if entry["short_quality"].get("eligible_to_recommend", False)
         ]
         strong = [entry for entry in eligible if is_strong_recommendation(entry["short_quality"])]
-        borderline = [entry for entry in eligible if not is_strong_recommendation(entry["short_quality"])]
-        finalists = select_diverse_finalists(strong, int(budget["finalist_limit"]))
+        good = [
+            entry for entry in eligible
+            if entry not in strong and is_good_recommendation(entry["short_quality"])
+        ]
+        borderline = [entry for entry in eligible if entry not in strong and entry not in good]
+        finalists = select_diverse_finalists(strong + good, int(budget["finalist_limit"]))
 
         # T2 visual pass + music brief on finalists only.  Current local models
         # are text-only and intentionally skip extra music-model generations so
@@ -596,6 +714,16 @@ class ScoreStage(Stage):
                     "payoff": entry["short_quality"].get("payoff"),
                     "ending_completeness": entry["short_quality"].get("ending_completeness"),
                     "complete_ending": entry["short_quality"].get("complete_ending", False),
+                    "syntactic_complete": entry["short_quality"].get("syntactic_complete", False),
+                    "semantic_closure_0_100": entry["short_quality"].get("semantic_closure_0_100"),
+                    "open_loop_at_end": entry["short_quality"].get("open_loop_at_end", False),
+                    "central_premise": entry["short_quality"].get("central_premise", ""),
+                    "topic_coherence_0_100": entry["short_quality"].get("topic_coherence_0_100"),
+                    "topic_shift_count": entry["short_quality"].get("topic_shift_count", 0),
+                    "late_new_topic": entry["short_quality"].get("late_new_topic", False),
+                    "payoff_relevance_to_premise": entry["short_quality"].get("payoff_relevance_to_premise"),
+                    "quality_flags": entry["short_quality"].get("quality_flags", []),
+                    "quality_tier": entry["short_quality"].get("quality_tier", "STRUCTURALLY_VALID"),
                     "story": entry["short_quality"].get("story_shape"),
                     "story_consistent": entry["short_quality"].get("story_consistent", True),
                     "eligible_to_recommend": entry["short_quality"].get("eligible_to_recommend", False),
@@ -666,19 +794,22 @@ class ScoreStage(Stage):
                 for entry in borderline
             ],
             "strong_recommendation_count": len(strong),
+            "good_recommendation_count": len(good),
             "scored_count": len(scored),
             "t2_ran": supports_vision,
             "scoring_config_version": scoring_config["version"],
             "scoring_constants": cv_constants,
             "performance": {
                 "candidate_count": len(candidates),
-                "viable_candidate_count": len(prepared) if not is_local else min(len(prepared), int(budget["t1_limit"])),
-                "candidate_llm_limit": int(budget["t1_limit"]),
+                "viable_candidate_count": len(prepared),
+                "candidate_llm_limit": len(prepared),
                 "t1_calls": t1_calls,
-                "hard_t1_limit": LOCAL_T1_CANDIDATE_LIMIT if is_local else len(candidates),
+                "hard_t1_limit": len(prepared),
+                "t1_wall_budget_seconds": LOCAL_T1_WALL_BUDGET_SECONDS if is_local else None,
                 "rounds_run": rounds_run,
                 "refill_rounds": refill_rounds,
                 "strong_recommendation_count": len(strong),
+                "good_recommendation_count": len(good),
                 "t2_calls": t2_calls,
                 "finalist_limit": int(budget["finalist_limit"]),
                 "music_llm_calls": music_llm_calls,

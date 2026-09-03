@@ -187,3 +187,100 @@ def test_rank_and_selection_drop_ineligible_candidates():
 
     assert len(selected) == 1
     assert selected[0]["start"] == 20
+
+
+def test_generic_reaction_without_context_is_not_strong():
+    quality = short_quality.assess(
+        "Whoa, this is huge. People walk through the bunker and look around.",
+        [],
+        8.0,
+    )
+
+    assert quality["quality_tier"] != "STRONG"
+    assert "WEAK_COLD_HOOK" in quality["quality_flags"]
+
+
+def test_complete_question_can_lack_semantic_closure():
+    quality = short_quality.assess(
+        "The bunker has rooms and a refrigerator. Did they enter the 100-day challenge?",
+        [],
+        8.0,
+    )
+
+    assert quality["syntactic_complete"] is True
+    assert quality["open_loop_at_end"] is True
+    assert quality["semantic_closure_0_100"] < 60.0
+    assert "WEAK_SEMANTIC_CLOSURE" in quality["quality_flags"]
+
+
+def test_late_topic_is_not_a_relevant_payoff():
+    quality = short_quality.assess(
+        "The bunker has rooms and a refrigerator. The 100-day challenge asks contestants to win money?",
+        [],
+        10.0,
+        llm={
+            "hook": 2,
+            "hook_strength": 2,
+            "payoff_strength": 8,
+            "payoff_location": "late",
+            "ending_completeness": 8,
+            "story_shape": "hook_setup_payoff",
+        },
+    )
+
+    assert quality["late_new_topic"] is True
+    assert quality["payoff_relevance_to_premise"] < 50.0
+    assert "PAYOFF_NOT_RELEVANT" in quality["quality_flags"]
+
+
+def test_structurally_valid_is_not_strong_when_topic_drifts():
+    quality = short_quality.assess(
+        "The bunker is underground and comfortable. The refrigerator is full. A separate challenge asks for 100 days.",
+        [],
+        10.0,
+        llm={
+            "hook": 7,
+            "hook_strength": 7,
+            "payoff_strength": 7,
+            "ending_completeness": 8,
+            "story_shape": "hook_setup_payoff",
+        },
+    )
+
+    assert quality["structurally_valid"] is True
+    assert quality["quality_tier"] == "STRUCTURALLY_VALID"
+    assert quality["strong_recommendation"] is False
+    assert quality["topic_shift_count"] >= 1
+
+
+def test_repeated_premise_anchor_does_not_count_as_topic_drift():
+    quality = short_quality.assess(
+        "The bunker is underground. The door is massive. The bunker protects families.",
+        [],
+        8.0,
+    )
+
+    assert quality["topic_shift_count"] == 0
+    assert quality["late_new_topic"] is False
+
+
+def test_coherent_story_with_narrative_beats_can_be_strong():
+    quality = short_quality.assess(
+        "Why did the test fail? Because the battery exploded, and everyone gasped!",
+        [{"type": "gasp"}],
+        8.0,
+        llm={
+            "hook": 9,
+            "hook_strength": 9,
+            "standalone_comprehension": 9,
+            "setup_strength": 8,
+            "escalation_strength": 8,
+            "payoff_strength": 9,
+            "ending_completeness": 9,
+            "story_shape": "hook_setup_payoff",
+            "reaction_strength": 9,
+        },
+    )
+
+    assert quality["quality_tier"] == "STRONG"
+    assert quality["quality_flags"] == []

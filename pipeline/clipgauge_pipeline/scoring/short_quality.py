@@ -3,14 +3,28 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from typing import Any
 
 _TOKEN = re.compile(r"[\w']+", re.UNICODE)
 _FILLER = {"um", "uh", "like", "you", "know", "basically", "actually"}
 _REVEAL = {"because", "but", "then", "until", "turns", "revealed", "found", "realized"}
-_REACTION = {"wow", "what", "no", "oh", "laugh", "laughed", "shocked", "insane"}
+_REACTION = {"wow", "what", "no", "oh", "laugh", "laughed", "gasp", "gasped", "shocked", "insane"}
 _HOOK_MARKERS = {"why", "how", "what", "never", "nobody", "imagine", "watch", "look"}
 _PRONOUNS = {"he", "she", "they", "it", "that", "this"}
+_GENERIC_REACTION_WORDS = {
+    "wow", "whoa", "oh", "no", "crazy", "insane", "huge", "amazing",
+    "unbelievable", "wild", "awesome", "big", "way", "really",
+}
+_TOPIC_STOPWORDS = {
+    "a", "about", "after", "all", "an", "and", "are", "as", "at", "be",
+    "because", "but", "by", "for", "from", "had", "has", "have", "he",
+    "her", "here", "him", "his", "how", "i", "if", "in", "is", "it", "its",
+    "me", "my", "of", "on", "or", "our", "she", "so", "that", "the", "their",
+    "them", "then", "there", "they", "this", "to", "was", "we", "were", "what",
+    "when", "where", "which", "who", "with", "you", "your", "just", "like",
+    "really", "very", "way", "people", "look", "looks", "looking",
+}
 _PUNCTUATION = (".", "!", "?")
 _FRAGMENT_FUNCTION_WORDS = {"and", "because", "but", "here", "or", "so", "these", "then", "to", "with"}
 _GRAMMATICAL_TERMINAL_MARKERS = {"my", "our", "his", "her", "its", "their", "your", "than"}
@@ -30,6 +44,73 @@ def _words(text: str) -> list[str]:
 
 def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, float(value)))
+
+
+def _sentence_units(text: str) -> list[set[str]]:
+    units = re.split(r"[.!?]+|\n+", str(text))
+    return [
+        {
+            token for token in _words(unit)
+            if token not in _TOPIC_STOPWORDS and len(token) > 2
+        }
+        for unit in units
+        if _words(unit)
+    ]
+
+
+def _generic_reaction_opening(text: str) -> bool:
+    opening = re.split(r"[.!?]+", str(text), maxsplit=1)[0]
+    tokens = _words(opening)
+    if not tokens or len(tokens) > 8:
+        return False
+    allowed = _GENERIC_REACTION_WORDS | _TOPIC_STOPWORDS
+    return any(token in _GENERIC_REACTION_WORDS for token in tokens) and all(
+        token in allowed for token in tokens
+    )
+
+
+def _topic_metrics(text: str, fields: dict[str, Any]) -> dict[str, Any]:
+    units = _sentence_units(text)
+    if len(units) < 2:
+        premise = str(fields.get("central_premise") or str(text).strip())[:160]
+        return {
+            "central_premise": premise,
+            "narrative_beats": list(fields.get("narrative_beats") or []),
+            "topic_coherence_0_100": 100.0,
+            "topic_shift_count": 0,
+            "late_new_topic": False,
+        }
+    token_counts = Counter(token for unit in units for token in unit)
+    anchors = {token for token, count in token_counts.items() if count >= 2}
+    shifts = 0
+    novel_run = 0
+    seen: set[str] = set()
+    for current in units:
+        continuous = bool(current.intersection(seen) or current.intersection(anchors))
+        if len(current) >= 2 and seen and not continuous:
+            novel_run += 1
+            if novel_run == 2:
+                shifts += 1
+        else:
+            novel_run = 0
+        seen.update(current)
+    earlier = set().union(*units[:-1])
+    closing_reaction = bool(units[-1].intersection(_REACTION))
+    late_new_topic = (
+        len(units[-1]) >= 2
+        and not units[-1].intersection(earlier)
+        and not closing_reaction
+    )
+    coherence = _clamp(100.0 - shifts * 16.0 - (18.0 if late_new_topic else 0.0))
+    premise = str(fields.get("central_premise") or " ".join(sorted(units[0])))[:160]
+    beats = fields.get("narrative_beats")
+    return {
+        "central_premise": premise,
+        "narrative_beats": list(beats) if isinstance(beats, list) else [],
+        "topic_coherence_0_100": coherence,
+        "topic_shift_count": shifts,
+        "late_new_topic": late_new_topic,
+    }
 
 
 def _effective_hook(
@@ -109,9 +190,16 @@ def _deterministic(
     specific_number = any(any(character.isdigit() for character in token) for token in first)
     contrast = bool(set(first) & {"but", "except", "instead", "until"})
     hook = 38.0 + (28.0 if first_marker else 0.0) + (18.0 if specific_number else 0.0) + (12.0 if contrast else 0.0)
+    generic_opening = _generic_reaction_opening(text)
+    if generic_opening:
+        hook -= 26.0
     if first and first[0] in _FILLER:
         hook -= 22.0
-    hook_reason = "question" if first_marker and first[0] in {"why", "how", "what"} else "specific_reveal" if specific_number else "conflict" if contrast else "none"
+    hook_reason = (
+        "reaction" if generic_opening else
+        "question" if first_marker and first[0] in {"why", "how", "what"} else
+        "specific_reveal" if specific_number else "conflict" if contrast else "none"
+    )
 
     has_setup = len(tokens) >= 10
     reveal_indexes = [index for index, token in enumerate(tokens) if token in _REVEAL and index >= 3]
@@ -156,6 +244,7 @@ def _deterministic(
         "loopability": 68.0 if complete_ending and (has_reveal or has_reaction) else 38.0,
         "has_reveal": has_reveal,
         "has_reaction": has_reaction,
+        "generic_opening": generic_opening,
         "complete_ending": complete_ending,
     }
 
@@ -222,6 +311,46 @@ def assess(
         story_consistent = bool(check())
         if not story_consistent:
             story_consistency_reason = f"{story_name} requires {requirement}."
+    topic = _topic_metrics(text, fields)
+    syntactic_complete = bool(
+        str(text).rstrip().endswith(_PUNCTUATION)
+        or (ending_evidence or {}).get("semantic_complete", False)
+    )
+    open_loop_at_end = bool(
+        str(text).rstrip().endswith("?")
+        or story_name == "open_ended"
+    )
+    semantic_closure = 82.0 if syntactic_complete else 35.0
+    if open_loop_at_end:
+        semantic_closure -= 35.0
+    if topic["late_new_topic"]:
+        semantic_closure -= 30.0
+    if topic["topic_shift_count"] >= 2:
+        semantic_closure -= 15.0
+    llm_semantic = fields.get("semantic_closure")
+    if isinstance(llm_semantic, (int, float)):
+        semantic_closure = min(semantic_closure, _clamp(float(llm_semantic), 0.0, 10.0) * 10.0)
+    semantic_closure = round(_clamp(semantic_closure), 1)
+    payoff_relevance = 100.0
+    if topic["late_new_topic"]:
+        payoff_relevance -= 65.0
+    elif topic["topic_shift_count"] >= 2:
+        payoff_relevance -= min(45.0, topic["topic_shift_count"] * 20.0)
+    llm_relevance = fields.get("payoff_relevance_to_premise")
+    if isinstance(llm_relevance, (int, float)):
+        payoff_relevance = min(payoff_relevance, _clamp(float(llm_relevance), 0.0, 10.0) * 10.0)
+    payoff_relevance = round(_clamp(payoff_relevance), 1)
+    quality_flags: list[str] = []
+    if evidence["generic_opening"]:
+        quality_flags.append("WEAK_COLD_HOOK")
+    if topic["topic_shift_count"] >= 2:
+        quality_flags.append("TOPIC_DRIFT")
+    if topic["late_new_topic"]:
+        quality_flags.append("LATE_NEW_TOPIC")
+    if semantic_closure < 60.0:
+        quality_flags.append("WEAK_SEMANTIC_CLOSURE")
+    if payoff_relevance < 50.0:
+        quality_flags.append("PAYOFF_NOT_RELEVANT")
     score = (
         hook * 0.20 + standalone * 0.15 + setup * 0.10 + escalation * 0.10
         + payoff * 0.18 + ending * 0.10 + evidence["information_density"] * 0.08
@@ -236,6 +365,31 @@ def assess(
         standalone=standalone,
         story_name=story_name,
     )
+    structurally_valid = not rejection_reasons
+    if not structurally_valid:
+        quality_tier = "REJECTED"
+    elif quality_flags:
+        quality_tier = "STRUCTURALLY_VALID"
+    elif (
+        effective_hook >= 65.0
+        and payoff >= 65.0
+        and standalone >= 65.0
+        and semantic_closure >= 70.0
+        and topic["topic_coherence_0_100"] >= 75.0
+        and payoff_relevance >= 65.0
+    ):
+        quality_tier = "STRONG"
+    elif (
+        effective_hook >= 40.0
+        and payoff >= 45.0
+        and standalone >= 55.0
+        and semantic_closure >= 60.0
+        and topic["topic_coherence_0_100"] >= 65.0
+        and payoff_relevance >= 50.0
+    ):
+        quality_tier = "GOOD"
+    else:
+        quality_tier = "STRUCTURALLY_VALID"
     return {
         "score": round(_clamp(score), 1),
         "hook": round(_clamp(hook), 1),
@@ -255,6 +409,15 @@ def assess(
         "payoff_location": str(fields.get("payoff_location", "none")),
         "ending_completeness": round(_clamp(ending), 1),
         "complete_ending": bool(evidence["complete_ending"]),
+        "syntactic_complete": syntactic_complete,
+        "semantic_closure_0_100": semantic_closure,
+        "open_loop_at_end": open_loop_at_end,
+        "central_premise": topic["central_premise"],
+        "narrative_beats": topic["narrative_beats"],
+        "topic_coherence_0_100": round(topic["topic_coherence_0_100"], 1),
+        "topic_shift_count": topic["topic_shift_count"],
+        "late_new_topic": topic["late_new_topic"],
+        "payoff_relevance_to_premise": payoff_relevance,
         "ending_evidence": {
             "punctuated": bool(
                 (ending_evidence or {}).get(
@@ -283,6 +446,10 @@ def assess(
         "story_consistency_reason": story_consistency_reason,
         "eligible_to_recommend": not rejection_reasons,
         "rejection_reasons": rejection_reasons,
+        "quality_flags": quality_flags,
+        "structurally_valid": structurally_valid,
+        "strong_recommendation": quality_tier == "STRONG",
+        "quality_tier": quality_tier,
         "llm_structured": bool(fields),
     }
 
