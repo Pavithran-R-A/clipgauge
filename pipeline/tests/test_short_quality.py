@@ -1,6 +1,36 @@
 from clipgauge_pipeline.scoring import short_quality
 
 
+def test_known_positive_fixture_remains_recommendable():
+    quality = short_quality.assess(
+        "If you're wondering why this bunker is worth three million dollars, "
+        "it's because of this YouTuber's collection of insane and dangerous "
+        "weapons. That's a backpack flamethrower. This guy's like a real-life "
+        "Tony Stark. I mean, look at this wrist-mounted rocket launcher. Fires "
+        "knives and has a taser in it. And a machine gun with a chainsaw. Oh my "
+        "gosh, this is crazy. Don't break into this bunker.",
+        [],
+        31.145,
+    )
+    assert quality["eligible_to_recommend"] is True
+    assert quality["quality_tier"] in {"GOOD", "STRONG"}
+
+
+def test_known_negative_fixture_remains_rejected():
+    quality = short_quality.assess(
+        "Whoa, this is huge. This is way bigger than I thought it would be. "
+        "This is so fancy. It does not feel like you're in a bunker. No, I feel "
+        "like I'm in a normal house. Surely, if you own a fifty million dollar "
+        "bunker, you wouldn't care if I took a Diet Coke. Wait, how old is this? "
+        "This expired two years ago. It tasted so bad. Hey, Google if I'm going "
+        "to die. Yeah, it's because we're three stories underground. Wait, is "
+        "this the video where we trapped Hugo and Rain in a bunker for 100 days?",
+        [],
+        43.413,
+    )
+    assert quality["eligible_to_recommend"] is False
+
+
 def test_short_quality_prefers_hook_setup_reveal_and_reaction():
     strong = short_quality.assess(
         "Why did the quiet engineer hide the result? Because the test failed, then everyone shouted wow!",

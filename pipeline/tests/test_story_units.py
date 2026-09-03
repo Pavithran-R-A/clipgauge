@@ -3,6 +3,8 @@ from __future__ import annotations
 from clipgauge_pipeline.candidates.story_units import (
     BOUNDARY_SCHEMA,
     BoundaryProposal,
+    _contains_payoff,
+    _story_candidate,
     build_sentence_units,
     cheap_filter_and_dedupe,
     generate_anchors,
@@ -134,3 +136,114 @@ def test_bounded_boundary_proposer_can_return_multiple_variants():
     result = synthesize(units, boundary_proposer=proposer, anchor_limit=4, boundary_limit=1, shortlist_limit=20)
     assert result["boundary_calls"] == 1
     assert any(item["story_variant"].startswith("llm-") for item in result["candidates"])
+
+
+def test_punctuation_is_not_payoff_evidence():
+    units = build_sentence_units(_segments([
+        "This bunker is underground.",
+        "The room has a steel door.",
+    ], seconds=5.0))
+    assert _contains_payoff(units[-1]) is False
+
+
+def test_syntax_and_semantic_closure_are_separate():
+    units = build_sentence_units(_segments([
+        "This bunker is underground.",
+        "The room has a steel door.",
+    ], seconds=5.0))
+    candidate = _story_candidate(units, units[0], "plain")
+    assert candidate is not None
+    assert candidate["syntactic_complete"] is True
+    assert candidate["payoff_candidate"] is False
+    assert candidate["semantic_closure"] is None
+
+
+def test_standalone_score_does_not_assume_any_token_is_context_free():
+    units = build_sentence_units(_segments([
+        "This is an incredible room in the bunker.",
+        "It has a steel door.",
+    ], seconds=5.0))
+    candidate = _story_candidate(units, units[0], "plain")
+    assert candidate is not None
+    assert 0.0 < candidate["standalone_comprehension"] < 80.0
+
+
+def test_minute_bucket_keeps_semantically_distinct_stories():
+    def candidate(start: float, topic: str) -> dict:
+        return {
+            "start": start,
+            "end": start + 10.0,
+            "sentence_ids": [f"{topic}-1", f"{topic}-2"],
+            "central_premise": f"A story about {topic}.",
+            "payoff_sentence": f"The {topic} result is surprising.",
+            "topic_key": [topic],
+            "story_variant": f"det-{topic}",
+            "syntactic_complete": True,
+            "editorial_signal": True,
+            "hook_strength": 0.5,
+            "duration_fit": 1.0,
+            "semantic_closure": None,
+            "topic_coherence": 80.0,
+            "curve_score": 0.5,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate(0.0, "bunker"),
+        candidate(20.0, "hydroponics"),
+        candidate(40.0, "weapons"),
+    ], limit=3)
+    assert len(result) == 3
+
+
+def test_duplicate_with_unknown_payoff_time_does_not_crash():
+    base = {
+        "start": 0.0,
+        "end": 10.0,
+        "sentence_ids": ["one", "two"],
+        "central_premise": "A bunker story.",
+        "payoff_sentence": "The bunker opens.",
+        "topic_key": ["bunker"],
+        "story_variant": "det-one",
+        "syntactic_complete": True,
+        "editorial_signal": True,
+        "hook_strength": 0.5,
+        "duration_fit": 1.0,
+        "semantic_closure": None,
+        "topic_coherence": 80.0,
+        "curve_score": 0.5,
+        "payoff_time": None,
+    }
+    duplicate = {**base, "start": 20.0, "end": 30.0, "story_variant": "det-two", "payoff_time": 25.0}
+    assert len(cheap_filter_and_dedupe([base, duplicate], limit=2)) == 1
+
+
+def test_positive_story_has_cheap_payoff_evidence():
+    units = build_sentence_units(_segments([
+        "Why is this bunker worth a million dollars?",
+        "Because it contains dangerous weapons.",
+    ], seconds=5.0))
+    candidate = _story_candidate(units, units[0], "positive")
+    assert candidate is not None
+    assert candidate["payoff_candidate"] is True
+    assert candidate["payoff_confidence"] > 0.0
+
+
+def test_plain_story_has_no_cheap_payoff_evidence():
+    units = build_sentence_units(_segments([
+        "This bunker is underground.",
+        "The room has a steel door.",
+    ], seconds=5.0))
+    candidate = _story_candidate(units, units[0], "negative")
+    assert candidate is not None
+    assert candidate["payoff_candidate"] is False
+
+
+def test_premise_fact_is_not_mistaken_for_payoff():
+    units = build_sentence_units(_segments([
+        "If you're wondering why this bunker is worth $3 million, it's because of dangerous weapons.",
+        "That is a backpack flamethrower.",
+        "Oh my gosh, this is crazy.",
+    ], seconds=5.0))
+    candidate = _story_candidate(units, units[0], "premise")
+    assert candidate is not None
+    assert candidate["payoff_sentence_id"] == units[-1].sentence_id

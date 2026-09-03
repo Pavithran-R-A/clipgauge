@@ -16,7 +16,7 @@ MAX_STORY_SECONDS = 75.0
 ANCHOR_LIMIT = 20
 MAX_BOUNDARY_CALLS = 15
 SHORTLIST_LIMIT = 24
-MAX_CANDIDATES_PER_TIME_BUCKET = 2
+MAX_CANDIDATES_PER_TIME_BUCKET = 4
 TOPIC_BOUNDARY_THRESHOLD = 0.62
 MIN_TOPIC_UNITS = 5
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -38,6 +38,8 @@ _QUESTION_STARTS = {
 }
 _FILLER_STARTS = {"all", "alright", "okay", "ok", "so", "well", "yeah", "yo"}
 _PREMISE_WORDS = {"billion", "million", "secret", "dangerous", "hidden", "survive", "infinite", "classified"}
+_DEICTIC_WORDS = {"this", "that", "these", "those", "he", "she", "they", "it", "there", "here"}
+_CONTEXT_REFERENCES = ("as i said", "like before", "again", "then", "so far", "as before")
 
 
 @dataclass(frozen=True)
@@ -214,12 +216,76 @@ def generate_anchors(units: list[SentenceUnit], limit: int = ANCHOR_LIMIT) -> li
     return sorted(selected, key=lambda item: item.start)
 
 
+def _payoff_evidence(
+    unit: SentenceUnit, preceding: list[SentenceUnit] | None = None
+) -> tuple[bool, float, str]:
+    """Return weak deterministic payoff evidence, never punctuation evidence."""
+    text = unit.text.lower().strip()
+    tokens = set(_TOKEN_RE.findall(text))
+    previous = preceding or []
+    previous_question = any("?" in item.text for item in previous[-2:])
+    confidence = 0.0
+    reasons: list[str] = []
+    if previous_question and (
+        text.startswith(("because", "yes", "no", "it is", "the answer", "there is"))
+        or "answer" in tokens
+    ):
+        confidence += 0.55
+        reasons.append("answers_question")
+    if tokens & _REACTION_WORDS and any(
+        any(char.isdigit() for char in item.text) or item.tokens & _PREMISE_WORDS
+        for item in previous[-2:]
+    ):
+        confidence += 0.42
+        reasons.append("reacts_to_reveal")
+    starts_with_resolution = text.startswith((
+        "because", "which means", "that means", "that's why", "therefore", "as a result",
+    ))
+    explicit_outcome = any(phrase in text for phrase in (
+        "turns out", "ended up", "managed to",
+    )) or bool(tokens & {"won", "failed", "survived", "works"})
+    if starts_with_resolution or explicit_outcome:
+        confidence += 0.45
+        reasons.append("cause_or_outcome")
+    if any(word in tokens for word in {"revealed", "reveal", "fact", "result", "conclusion", "finally"}):
+        confidence += 0.35
+        reasons.append("specific_reveal")
+    if previous_question and any(char.isdigit() for char in text) and any(
+        word in tokens for word in {"worth", "cost", "million", "billion", "dollars"}
+    ):
+        confidence += 0.25
+        reasons.append("specific_fact")
+    return bool(confidence >= 0.35), round(min(0.95, confidence), 4), ",".join(reasons)
+
+
 def _contains_payoff(unit: SentenceUnit) -> bool:
-    text = unit.text.lower()
-    return bool(
-        set(_TOKEN_RE.findall(text)) & (_REACTION_WORDS | {"answer", "because", "finally", "only", "survive"})
-        or text.rstrip().endswith((".", "!", "?"))
-    )
+    """Use payoff cues only; sentence punctuation is syntax evidence."""
+    return _payoff_evidence(unit)[0]
+
+
+def _standalone_score(unit: SentenceUnit) -> float:
+    """Approximate context-free comprehension without fake certainty."""
+    text = unit.text.lower().strip()
+    words = _TOKEN_RE.findall(text)
+    if not words:
+        return 0.0
+    score = 40.0
+    specific = bool(any(char.isdigit() for char in text) or unit.tokens & _PREMISE_WORDS)
+    proper_noun = any(word[:1].isupper() for word in unit.text.split()[1:] if word)
+    understandable_question = "?" in text and len(unit.tokens) >= 3
+    if specific:
+        score += 18.0
+    if proper_noun:
+        score += 10.0
+    if understandable_question:
+        score += 8.0
+    if words[0] in _DEICTIC_WORDS:
+        score -= 20.0
+    if any(text.startswith(reference) for reference in _CONTEXT_REFERENCES):
+        score -= 18.0
+    if len(unit.tokens) <= 2:
+        score -= 12.0
+    return round(max(10.0, min(85.0, score)), 1)
 
 
 def _premise(units: list[SentenceUnit]) -> str:
@@ -269,10 +335,27 @@ def _story_candidate(
         return None
     first = units[0]
     last = units[-1]
-    payoff = proposal.payoff_sentence_id if proposal else next(
-        (unit.sentence_id for unit in reversed(units) if _contains_payoff(unit)), last.sentence_id
+    payoff_unit = next(
+        (
+            unit for index, unit in reversed(list(enumerate(units)))
+            if _payoff_evidence(unit, units[:index])[0]
+        ),
+        None,
     )
-    payoff_unit = next((unit for unit in units if unit.sentence_id == payoff), last)
+    if proposal:
+        proposed_payoff = next(
+            (unit for unit in units if unit.sentence_id == proposal.payoff_sentence_id),
+            None,
+        )
+        if proposed_payoff is not None:
+            proposed_index = units.index(proposed_payoff)
+            if _payoff_evidence(proposed_payoff, units[:proposed_index])[0]:
+                payoff_unit = proposed_payoff
+    payoff_candidate = payoff_unit is not None
+    payoff_confidence = (
+        _payoff_evidence(payoff_unit, units[:units.index(payoff_unit)])[1]
+        if payoff_unit is not None else 0.0
+    )
     coherence = round(100.0 * sum(1.0 - min(1.0, unit.topic_boundary_before) for unit in units[1:]) / max(1, len(units) - 1), 1)
     topic_shifts = len({unit.topic_id for unit in units}) - 1
     start_words = set(_TOKEN_RE.findall(first.text.lower()))
@@ -286,7 +369,7 @@ def _story_candidate(
         + 0.12 * bool(any(char.isdigit() for char in first.text))
         + 0.10 * bool(first.tokens),
     ) - filler_penalty
-    semantic_closure = bool(last.text.rstrip().endswith((".", "!", "?")) and _contains_payoff(last))
+    syntactic_complete = bool(last.text.rstrip().endswith((".", "!", "?")))
     premise = proposal.central_premise if proposal and proposal.central_premise else _premise(units)
     editorial_signal = bool(
         any(char.isdigit() for char in " ".join(unit.text for unit in units))
@@ -306,14 +389,18 @@ def _story_candidate(
         "hook_sentence": first.text,
         "hook_time": round(first.start, 3),
         "setup_end": round(units[min(1, len(units) - 1)].end, 3),
-        "payoff_sentence": payoff_unit.text,
-        "payoff_time": round(payoff_unit.start, 3),
-        "semantic_closure": semantic_closure,
+        "payoff_sentence": payoff_unit.text if payoff_unit else "",
+        "payoff_time": round(payoff_unit.start, 3) if payoff_unit else None,
+        "payoff_sentence_id": payoff_unit.sentence_id if payoff_unit else None,
+        "payoff_candidate": payoff_candidate,
+        "payoff_confidence": payoff_confidence,
+        "semantic_closure": None,
         "topic_coherence": coherence,
         "topic_shift_count": topic_shifts,
-        "standalone_comprehension": round(min(100.0, 45.0 + 40.0 * bool(first.tokens) + 15.0 * bool(premise)), 1),
+        "standalone_comprehension": _standalone_score(first),
         "story_shape": proposal.story_shape if proposal else _story_shape(units),
-        "syntactic_complete": bool(last.text.rstrip().endswith((".", "!", "?"))),
+        "syntactic_complete": syntactic_complete,
+        "context_dependency": _standalone_score(first) < 30.0,
         "quality_tier": "STRUCTURALLY_VALID",
         "audio_events": sorted({event for unit in units for event in unit.audio_events}),
         "story_variant": variant,
@@ -357,23 +444,20 @@ def cheap_filter_and_dedupe(candidates: list[dict[str, Any]], limit: int = SHORT
         and candidate.get("central_premise")
         and len(candidate.get("sentence_ids", [])) >= 2
         and candidate.get("editorial_signal")
+        and not candidate.get("context_dependency", False)
     ]
     viable.sort(key=lambda item: (
-        float(item.get("hook_strength", 0.0)),
         item.get("story_variant", "").startswith("llm-"),
         float(item.get("duration_fit", 0.0)),
-        -float(item.get("end", 0.0)) + float(item.get("start", 0.0)),
-        bool(item.get("semantic_closure")),
-        bool(item.get("payoff_sentence")),
-        float(item.get("topic_coherence", 0.0)),
+        float(item.get("information_density", 0.0)),
         float(item.get("curve_score", 0.0)),
+        float(item.get("hook_strength", 0.0)),
+        float(item.get("topic_coherence", 0.0)),
+        bool(item.get("payoff_candidate")),
     ), reverse=True)
     kept: list[dict[str, Any]] = []
     bucket_counts: dict[int, int] = {}
     for candidate in viable:
-        bucket = int(float(candidate["start"]) // 60)
-        if bucket_counts.get(bucket, 0) >= MAX_CANDIDATES_PER_TIME_BUCKET:
-            continue
         duplicate_index = next(
             (index for index, other in enumerate(kept) if _story_similarity(candidate, other) >= 0.92),
             None,
@@ -390,7 +474,7 @@ def cheap_filter_and_dedupe(candidates: list[dict[str, Any]], limit: int = SHORT
             other = kept[duplicate_index]
             if (
                 not str(other.get("story_variant", "")).startswith("llm-")
-                and float(candidate.get("payoff_time", 0.0)) > float(other.get("payoff_time", 0.0))
+                and float(candidate.get("payoff_time") or 0.0) > float(other.get("payoff_time") or 0.0)
             ):
                 kept[duplicate_index] = candidate
             continue
@@ -406,6 +490,9 @@ def cheap_filter_and_dedupe(candidates: list[dict[str, Any]], limit: int = SHORT
             None,
         )
         if nearby_index is not None:
+            continue
+        bucket = int(float(candidate["start"]) // 60)
+        if bucket_counts.get(bucket, 0) >= MAX_CANDIDATES_PER_TIME_BUCKET:
             continue
         kept.append(candidate)
         bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
@@ -435,14 +522,15 @@ def synthesize(
             boundary_calls += 1
             proposals = boundary_proposer(neighborhood, anchor)
         anchor_index = units.index(anchor)
-        ends = [
+        complete_ends = [
             index for index, unit in enumerate(units)
             if anchor.start - 30.0 <= unit.start <= anchor.start + 45.0
             and unit.end >= anchor.start
-            and _contains_payoff(unit)
+            and unit.text.rstrip().endswith((".", "!", "?"))
         ]
-        end_candidates = list(dict.fromkeys(ends[:5] + ends[-5:] + [
-            index for index in ends
+        payoff_ends = [index for index in complete_ends if _contains_payoff(units[index])]
+        end_candidates = list(dict.fromkeys(payoff_ends[:5] + payoff_ends[-5:] + complete_ends[:4] + complete_ends[-4:] + [
+            index for index in complete_ends
             if units[index].audio_events or set(_TOKEN_RE.findall(units[index].text.lower())) & _REACTION_WORDS
         ]))
         start_indices = [max(0, anchor_index - 3), max(0, anchor_index - 2), max(0, anchor_index - 1), anchor_index]
