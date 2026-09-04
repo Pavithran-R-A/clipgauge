@@ -2,6 +2,15 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.9] — 2026-09-04
+
+ClipGauge v0.5.9 repairs the production model acceptance fixture.
+
+### Fixed
+
+- Uses genuine laughter mixed into a speech segment, so event detection overlaps transcript units and candidate discovery exercises the real editorial path.
+- Keeps v0.5.8 immutable and preserves its diagnostics and runtime repairs.
+
 ## [0.5.8] — 2026-09-04
 
 ClipGauge v0.5.8 strengthens the production model acceptance fixture.

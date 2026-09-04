@@ -387,9 +387,9 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/e2e-input"
           ffmpeg -hide_banner -loglevel error -y \
             -i "$GITHUB_WORKSPACE/pipeline/tests/fixtures/v041-jfk.flac" \
-            -i "$GITHUB_WORKSPACE/pipeline/tests/fixtures/clapping-esc50.wav" \
+            -i "$GITHUB_WORKSPACE/pipeline/tests/fixtures/laughing-esc50.wav" \
             -f lavfi -i anullsrc=r=16000:cl=mono:d=1 \
-            -filter_complex "[0:a]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono,asplit=3[speech1][speech2][speech3];[1:a]atrim=duration=1,asetpts=PTS-STARTPTS,aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono[applause];[2:a]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono[silence];[speech1][silence][speech2][applause][speech3]concat=n=5:v=0:a=1[out]" \
+            -filter_complex "[0:a]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono,asplit=3[speech1][speech2][speech3];[1:a]atrim=duration=3,asetpts=PTS-STARTPTS,aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono[laugh];[2:a]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono[silence];[speech2][laugh]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mixed2];[speech1][silence][mixed2][silence][speech3]concat=n=5:v=0:a=1[out]" \
             -map "[out]" -ar 16000 -ac 1 -c:a flac \
             "$GITHUB_WORKSPACE/e2e-input/acceptance.flac"
           ffmpeg -hide_banner -loglevel error -y \
