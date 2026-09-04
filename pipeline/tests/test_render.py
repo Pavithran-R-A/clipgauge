@@ -27,8 +27,20 @@ def test_windows_ffmpeg_managed_path_uses_one_filesystem_safe_version_component(
 
     managed = ffmpeg_bin._managed_dir()
 
-    assert managed == tmp_path / "runtimes" / "ffmpeg" / "autobuild-2026-08-18-15-03-N-126207-g21bbd98e7b" / "win64-gpl"
+    assert managed == tmp_path / "runtimes" / "ffmpeg" / "9.0.1-essentials" / "win64-gpl"
     assert len(managed.relative_to(tmp_path / "runtimes" / "ffmpeg").parts) == 2
+
+
+def test_windows_ffmpeg_manifest_uses_persistent_verified_asset(monkeypatch):
+    monkeypatch.setattr(ffmpeg_bin.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(ffmpeg_bin.platform, "machine", lambda: "AMD64")
+
+    asset = ffmpeg_bin._platform_asset()
+
+    assert asset is not None
+    assert asset["url"] == "https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-essentials_build.zip"
+    assert asset["sha256"] == "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9"
+    assert asset["size"] == 111253802
 
 
 def test_crop_boxes_even_and_bounded():
@@ -311,3 +323,57 @@ def test_windows_ffmpeg_missing_offers_managed_fallback(monkeypatch):
     finally:
         ffmpeg_bin.readiness.cache_clear()
         ffmpeg_bin.resolve.cache_clear()
+
+
+def test_windows_managed_ffmpeg_swap_failure_preserves_known_good_install(monkeypatch, tmp_path):
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    (managed / "ffmpeg.exe").write_bytes(b"known-good-ffmpeg")
+    (managed / "ffprobe.exe").write_bytes(b"known-good-ffprobe")
+    archive = tmp_path / "candidate.zip"
+    archive.write_bytes(b"candidate")
+
+    monkeypatch.setattr(ffmpeg_bin, "_managed_dir", lambda: managed)
+    monkeypatch.setattr(ffmpeg_bin, "_has_subtitles_filter", lambda _path: True)
+
+    def fake_extract(_archive, staging, **_kwargs):
+        staging.mkdir(parents=True)
+        (staging / "ffmpeg.exe").write_bytes(b"replacement-ffmpeg")
+        (staging / "ffprobe.exe").write_bytes(b"replacement-ffprobe")
+
+    monkeypatch.setattr(ffmpeg_bin.runtime, "extract_zip_selected_verified", fake_extract)
+    real_replace = ffmpeg_bin.os.replace
+
+    def fail_new_install(source, destination):
+        if destination == managed and source.name.endswith(".staging"):
+            raise OSError("simulated replacement failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(ffmpeg_bin.os, "replace", fail_new_install)
+
+    assert ffmpeg_bin._atomic_install_windows(archive) is False
+    assert (managed / "ffmpeg.exe").read_bytes() == b"known-good-ffmpeg"
+    assert (managed / "ffprobe.exe").read_bytes() == b"known-good-ffprobe"
+
+
+def test_windows_managed_ffmpeg_rejects_non_caption_capable_replacement(monkeypatch, tmp_path):
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    (managed / "ffmpeg.exe").write_bytes(b"known-good-ffmpeg")
+    (managed / "ffprobe.exe").write_bytes(b"known-good-ffprobe")
+    archive = tmp_path / "candidate.zip"
+    archive.write_bytes(b"candidate")
+
+    monkeypatch.setattr(ffmpeg_bin, "_managed_dir", lambda: managed)
+    monkeypatch.setattr(ffmpeg_bin, "_has_subtitles_filter", lambda _path: False)
+
+    def fake_extract(_archive, staging, **_kwargs):
+        staging.mkdir(parents=True)
+        (staging / "ffmpeg.exe").write_bytes(b"replacement-ffmpeg")
+        (staging / "ffprobe.exe").write_bytes(b"replacement-ffprobe")
+
+    monkeypatch.setattr(ffmpeg_bin.runtime, "extract_zip_selected_verified", fake_extract)
+
+    assert ffmpeg_bin._atomic_install_windows(archive) is False
+    assert (managed / "ffmpeg.exe").read_bytes() == b"known-good-ffmpeg"
+    assert (managed / "ffprobe.exe").read_bytes() == b"known-good-ffprobe"

@@ -224,6 +224,7 @@ def _atomic_install_windows(archive: Path) -> bool:
         return False
     wanted = {"ffmpeg.exe", "ffprobe.exe"}
     staging = managed.with_name(f".{managed.name}.{time.time_ns()}.staging")
+    backup: Path | None = None
     try:
         runtime.extract_zip_selected_verified(
             archive,
@@ -235,9 +236,7 @@ def _atomic_install_windows(archive: Path) -> bool:
         if not _has_subtitles_filter(str(ffmpeg_path)):
             raise runtime.RuntimeIntegrityError("managed FFmpeg lacks the required subtitles/libass filter")
         managed.parent.mkdir(parents=True, exist_ok=True)
-        backup = managed.with_name(f".{managed.name}.previous")
-        if backup.exists():
-            shutil.rmtree(backup, ignore_errors=True)
+        backup = managed.with_name(f".{managed.name}.{time.time_ns()}.previous")
         if managed.exists():
             os.replace(managed, backup)
         os.replace(staging, managed)
@@ -245,6 +244,11 @@ def _atomic_install_windows(archive: Path) -> bool:
             shutil.rmtree(backup, ignore_errors=True)
         return True
     except (OSError, runtime.RuntimeIntegrityError, zipfile.BadZipFile):
+        if backup is not None and backup.exists() and not managed.exists():
+            try:
+                os.replace(backup, managed)
+            except OSError:
+                pass
         shutil.rmtree(staging, ignore_errors=True)
         return False
 

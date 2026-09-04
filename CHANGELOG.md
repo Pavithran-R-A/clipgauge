@@ -2,6 +2,21 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.6] — 2026-09-04
+
+ClipGauge v0.5.6 repairs two release-blocking runtime defects.
+
+### Fixed
+
+- Replaced the obsolete Windows managed FFmpeg source with a persistent, hash-pinned caption-capable archive.
+- Preserved the last known-good managed FFmpeg install when replacement fails.
+- Accepted valid non-empty local-model health responses across llama.cpp platforms.
+
+### Validation
+
+- Added nested archive, executable selection, capability rejection, rollback, and local-runtime regression coverage.
+- Release model E2E failures now upload pipeline and runtime diagnostics without changing failure status.
+
 ## [0.5.5] — 2026-09-04
 
 ClipGauge v0.5.5 improves the Windows creator path, export reliability, local processing, and short-form selection quality.

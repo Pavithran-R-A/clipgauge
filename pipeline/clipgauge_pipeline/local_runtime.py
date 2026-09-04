@@ -339,7 +339,7 @@ class LocalRuntime:
             reply = message.get("content") if isinstance(message, dict) else None
             usage = payload.get("usage") if isinstance(payload, dict) else None
             generated_tokens = usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0
-            ok = response.status_code == 200 and reply.strip() == "OK" if isinstance(reply, str) else False
+            ok = response.status_code == 200 and bool(reply.strip()) if isinstance(reply, str) else False
             result = {
                 "ok": ok,
                 "backend": backend,

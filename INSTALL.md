@@ -1,6 +1,6 @@
-# Installing ClipGauge v0.5.5
+# Installing ClipGauge v0.5.6
 
-ClipGauge v0.5.5 is distributed from source and, when the native release gates succeed, as unsigned Linux Debian, Windows NSIS, and macOS qualification artifacts. No signing or notarization is implied unless the release evidence explicitly proves it.
+ClipGauge v0.5.6 is distributed from source and, when the native release gates succeed, as unsigned Linux Debian, Windows NSIS, and macOS qualification artifacts. No signing or notarization is implied unless the release evidence explicitly proves it.
 
 ## Source-build prerequisites
 
@@ -53,11 +53,11 @@ dpkg-deb --info src-tauri/target/release/bundle/deb/*.deb
 dpkg-deb --contents src-tauri/target/release/bundle/deb/*.deb
 ```
 
-Do not treat an unsigned artifact as proof of publisher identity. Verify `SHA256SUMS`, review package metadata, and understand that Windows may show SmartScreen warnings. macOS builds that are not signed and notarized may be blocked or warned about by Gatekeeper. Distribution, signing, notarization, and trust decisions remain explicit release limitations for v0.5.5.
+Do not treat an unsigned artifact as proof of publisher identity. Verify `SHA256SUMS`, review package metadata, and understand that Windows may show SmartScreen warnings. macOS builds that are not signed and notarized may be blocked or warned about by Gatekeeper. Distribution, signing, notarization, and trust decisions remain explicit release limitations for v0.5.6.
 
 ## Windows and macOS release artifacts
 
-The v0.5.5 release workflow builds a fresh Windows x64 NSIS installer from the v0.5.5 tag only after native tests, resource staging, silent installation, and installed-process smoke checks pass. The installer is unsigned. Do not describe it as Authenticode-signed.
+The v0.5.6 release workflow builds a fresh Windows x64 NSIS installer from the v0.5.6 tag only after native tests, resource staging, silent installation, and installed-process smoke checks pass. The installer is unsigned. Do not describe it as Authenticode-signed.
 
 The release workflow also attempts native Apple Silicon and Intel macOS qualification. These jobs inspect `.app` metadata and packaged resources and may build unsigned DMG files for engineering validation. A successful macOS compilation is not a signed or notarized distribution claim; use the release notes to determine whether any macOS artifact is attached publicly.
 

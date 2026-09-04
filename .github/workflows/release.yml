@@ -405,6 +405,43 @@ jobs:
           test -d "$job_dir"
           uv run python ../scripts/validate-model-e2e.py ../model-e2e.jsonl "$job_dir" "$job_dir/clips/clip_00.mp4" > ../model-e2e-summary.json
           printf 'job_id=%s\n' "$job_id" > ../model-e2e-job.txt
+      - name: Upload model E2E diagnostics
+        if: always()
+        id: model-e2e-diagnostics
+        shell: bash
+        run: |
+          set +e
+          diagnostics_dir="$GITHUB_WORKSPACE/model-e2e-diagnostics"
+          mkdir -p "$diagnostics_dir"
+          for file in model-e2e.jsonl setup-asr.jsonl setup-analysis.jsonl setup-runtime.jsonl setup-model.jsonl; do
+            if [ -f "$GITHUB_WORKSPACE/$file" ]; then
+              cp "$GITHUB_WORKSPACE/$file" "$diagnostics_dir/"
+            fi
+          done
+          : > "$diagnostics_dir/model-e2e-job.txt"
+          if [ -f "$GITHUB_WORKSPACE/model-e2e.jsonl" ]; then
+            python3 -c 'import json; events=[json.loads(line) for line in open("model-e2e.jsonl") if line.lstrip().startswith("{")]; ids=[event.get("job_id") for event in reversed(events) if event.get("event")=="terminal" or event.get("event")=="job"]; print(next((item for item in ids if item), ""))' > "$diagnostics_dir/model-e2e-job.txt"
+          fi
+          job_id=$(tr -d '\r\n' < "$diagnostics_dir/model-e2e-job.txt" 2>/dev/null)
+          if [ -n "$job_id" ] && [ -d "$CLIPGAUGE_HOME/jobs/$job_id/diagnostics" ]; then
+            cp -R "$CLIPGAUGE_HOME/jobs/$job_id/diagnostics" "$diagnostics_dir/job-diagnostics"
+          fi
+          {
+            printf 'release_tag=%s\n' "$RELEASE_TAG"
+            printf 'workflow_run=%s\n' "$GITHUB_RUN_ID"
+            printf 'workflow_sha=%s\n' "$GITHUB_SHA"
+            printf 'job_id=%s\n' "$job_id"
+            printf 'runner_os=%s\n' "$RUNNER_OS"
+            printf 'python=%s\n' "$(python3 --version 2>&1)"
+            printf 'ffmpeg=%s\n' "$(ffmpeg -version 2>/dev/null | head -n 1)"
+          } > "$diagnostics_dir/failure-summary.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: clipgauge-model-e2e-diagnostics-${{ github.sha }}
+          path: model-e2e-diagnostics
+          if-no-files-found: warn
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         with:
           name: clipgauge-model-e2e-${{ github.sha }}

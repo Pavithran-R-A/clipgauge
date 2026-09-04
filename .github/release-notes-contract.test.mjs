@@ -46,3 +46,22 @@ test('keeps production model setup retries bounded and verified', () => {
   assert.match(modelJob, /setup download-model clipgauge-local\/qwen3-1\.7b-q8_0/)
   assert.doesNotMatch(modelJob, /while true|for \(;;\)/)
 })
+
+test('uploads model failure diagnostics without masking failures', () => {
+  const start = workflow.indexOf('  model-e2e-release:')
+  const end = workflow.indexOf('  release-metadata:', start)
+  const modelJob = workflow.slice(start, end)
+  assert.match(modelJob, /id: model-e2e-diagnostics/)
+  assert.match(modelJob, /if: always\(\)/)
+  for (const filename of [
+    'model-e2e.jsonl',
+    'setup-asr.jsonl',
+    'setup-analysis.jsonl',
+    'setup-runtime.jsonl',
+    'setup-model.jsonl',
+    'diagnostics',
+  ]) {
+    assert.match(modelJob, new RegExp(filename.replace('.', '\\.') ))
+  }
+  assert.match(modelJob, /failure-summary\.txt/)
+})

@@ -266,7 +266,7 @@ def test_local_runtime_inference_probe_reports_only_safe_metrics(monkeypatch, tm
     assert "content" not in result
 
 
-def test_local_runtime_inference_probe_rejects_wrong_reply(monkeypatch, tmp_path):
+def test_local_runtime_inference_probe_accepts_nonempty_reply(monkeypatch, tmp_path):
     instance = local_runtime.LocalRuntime(root=tmp_path, manifest={})
 
     class Response:
@@ -274,7 +274,24 @@ def test_local_runtime_inference_probe_rejects_wrong_reply(monkeypatch, tmp_path
 
         @staticmethod
         def json():
-            return {"choices": [{"message": {"content": "not OK"}}], "usage": {"completion_tokens": 1}}
+            return {"choices": [{"message": {"content": "<think>ready</think>\n OK "}}], "usage": {"completion_tokens": 1}}
+
+    monkeypatch.setattr(local_runtime.httpx, "post", lambda *args, **kwargs: Response())
+    result = instance.probe_inference("http://127.0.0.1:18089/v1", "qwen", backend="vulkan")
+
+    assert result["ok"] is True
+    assert "reason" not in result
+
+
+def test_local_runtime_inference_probe_rejects_empty_reply(monkeypatch, tmp_path):
+    instance = local_runtime.LocalRuntime(root=tmp_path, manifest={})
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": ""}}], "usage": {"completion_tokens": 0}}
 
     monkeypatch.setattr(local_runtime.httpx, "post", lambda *args, **kwargs: Response())
     result = instance.probe_inference("http://127.0.0.1:18089/v1", "qwen", backend="vulkan")
@@ -346,3 +363,35 @@ def test_valid_staged_archive_installation(tmp_path):
         assert (output / "bin/tool").is_file()
     else:
         assert (output / "bin/tool").stat().st_mode & 0o111
+
+
+def test_selected_zip_extracts_nested_executables(tmp_path):
+    archive = tmp_path / "nested.zip"
+    _archive(archive, [
+        "ffmpeg-9.0.1-essentials_build/bin/ffmpeg.exe",
+        "ffmpeg-9.0.1-essentials_build/bin/ffprobe.exe",
+    ])
+    output = tmp_path / "installed"
+
+    installed = runtime.extract_zip_selected_verified(
+        archive,
+        output,
+        expected_basenames={"ffmpeg.exe", "ffprobe.exe"},
+        member_modes={"ffmpeg.exe": 0o755, "ffprobe.exe": 0o755},
+    )
+
+    assert {path.name for path in installed} == {"ffmpeg.exe", "ffprobe.exe"}
+    assert (output / "ffmpeg.exe").read_bytes() == b"payload"
+    assert (output / "ffprobe.exe").read_bytes() == b"payload"
+
+
+def test_selected_zip_rejects_missing_executable(tmp_path):
+    archive = tmp_path / "missing.zip"
+    _archive(archive, ["ffmpeg-9.0.1-essentials_build/bin/ffmpeg.exe"])
+
+    with pytest.raises(runtime.RuntimeIntegrityError, match="missing expected executables"):
+        runtime.extract_zip_selected_verified(
+            archive,
+            tmp_path / "installed",
+            expected_basenames={"ffmpeg.exe", "ffprobe.exe"},
+        )
