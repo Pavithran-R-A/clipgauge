@@ -71,6 +71,8 @@ test('uses a deterministic multi-segment genuine speech acceptance input', () =>
   const end = workflow.indexOf('  release-metadata:', start)
   const modelJob = workflow.slice(start, end)
   assert.match(modelJob, /anullsrc=r=16000:cl=mono:d=1/)
+  assert.match(modelJob, /clapping-esc50\.wav/)
+  assert.match(modelJob, /atrim=duration=1/)
   assert.match(modelJob, /concat=n=5:v=0:a=1/)
   assert.match(modelJob, /asplit=3\[speech1\]\[speech2\]\[speech3\]/)
   assert.match(modelJob, /acceptance\.flac/)

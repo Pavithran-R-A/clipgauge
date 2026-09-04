@@ -2,6 +2,15 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.8] — 2026-09-04
+
+ClipGauge v0.5.8 strengthens the production model acceptance fixture.
+
+### Fixed
+
+- Added a real clapping event to the separated speech fixture, giving candidate discovery a deterministic editorial cue without weakening story rules.
+- Preserved the v0.5.7 release diagnostics and runtime repairs.
+
 ## [0.5.7] — 2026-09-04
 
 ClipGauge v0.5.7 hardens the production model acceptance fixture.
