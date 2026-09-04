@@ -2,6 +2,15 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.7] — 2026-09-04
+
+ClipGauge v0.5.7 hardens the production model acceptance fixture.
+
+### Fixed
+
+- Built the release speech input from separated genuine-speech segments, so candidate qualification is deterministic without weakening story rules.
+- Preserved the v0.5.6 runtime repairs and failure diagnostics.
+
 ## [0.5.6] — 2026-09-04
 
 ClipGauge v0.5.6 repairs two release-blocking runtime defects.

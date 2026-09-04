@@ -386,9 +386,15 @@ jobs:
         run: |
           mkdir -p "$GITHUB_WORKSPACE/e2e-input"
           ffmpeg -hide_banner -loglevel error -y \
+            -i "$GITHUB_WORKSPACE/pipeline/tests/fixtures/v041-jfk.flac" \
+            -f lavfi -i anullsrc=r=16000:cl=mono:d=1 \
+            -filter_complex "[0:a]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono,asplit=3[speech1][speech2][speech3];[1:a]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono,asplit=2[silence1][silence2];[speech1][silence1][speech2][silence2][speech3]concat=n=5:v=0:a=1[out]" \
+            -map "[out]" -ar 16000 -ac 1 -c:a flac \
+            "$GITHUB_WORKSPACE/e2e-input/acceptance.flac"
+          ffmpeg -hide_banner -loglevel error -y \
             -f lavfi -i color=c=0x182033:s=1280x720:r=30 \
-            -stream_loop -1 -i tests/fixtures/v041-jfk.flac \
-            -t 33 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac -ar 16000 -shortest \
+            -i "$GITHUB_WORKSPACE/e2e-input/acceptance.flac" \
+            -t 36 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac -ar 16000 -shortest \
             "$GITHUB_WORKSPACE/e2e-input/v041-controlled.mp4"
       - name: Run the real production-default pipeline
         working-directory: pipeline
