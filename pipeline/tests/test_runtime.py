@@ -290,6 +290,7 @@ def test_local_runtime_uses_new_process_group_on_windows(monkeypatch, tmp_path):
     monkeypatch.setattr(instance, "command", lambda _model_id, _port: ["llama-server"])
     monkeypatch.setattr(instance, "model_path", lambda _model_id: model)
     monkeypatch.setattr(instance, "runtime_backend", lambda: "cpu")
+    monkeypatch.setattr(instance, "runtime_asset_key", lambda: "windows-x86_64")
     monkeypatch.setattr(instance, "_port", lambda _endpoint=None: 18089)
     monkeypatch.setattr(local_runtime.os, "name", "nt")
     monkeypatch.setattr(local_runtime.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, raising=False)
