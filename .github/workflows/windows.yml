@@ -82,10 +82,39 @@ jobs:
           New-Item -ItemType Directory -Force $nativeHome | Out-Null
           New-Item -ItemType File -Force (Join-Path $nativeHome "onboarded") | Out-Null
           $env:CLIPGAUGE_HOME = $nativeHome
-          uv run clipgauge --jsonl setup install-group --group core:asr | Tee-Object "$env:GITHUB_WORKSPACE\setup-asr.jsonl"
-          if ($LASTEXITCODE -ne 0) { throw "ASR setup failed with exit code $LASTEXITCODE" }
-          uv run clipgauge --jsonl setup install-group --group core:analysis | Tee-Object "$env:GITHUB_WORKSPACE\setup-analysis.jsonl"
-          if ($LASTEXITCODE -ne 0) { throw "analysis setup failed with exit code $LASTEXITCODE" }
+
+          function Install-VerifiedSetupGroup {
+            param(
+              [Parameter(Mandatory = $true)][string]$Group,
+              [Parameter(Mandatory = $true)][string]$LogPath,
+              [int]$MaxAttempts = 4
+            )
+
+            Remove-Item -Force -ErrorAction SilentlyContinue $LogPath
+            for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+              Write-Host "Installing verified setup group $Group (attempt $attempt/$MaxAttempts)"
+              uv run clipgauge --jsonl setup install-group --group $Group | Tee-Object -FilePath $LogPath -Append
+              $exitCode = $LASTEXITCODE
+              if ($exitCode -eq 0) {
+                Write-Host "Verified setup group $Group completed on attempt $attempt."
+                return
+              }
+
+              if ($attempt -eq $MaxAttempts) {
+                throw "$Group setup failed after $MaxAttempts attempts; final exit code $exitCode"
+              }
+
+              # The managed downloader keeps verified assets and resumable .part
+              # files. Re-running the same consented group therefore retries only
+              # unfinished work without bypassing pinned size/SHA-256 checks.
+              $delaySeconds = 15 * [math]::Pow(2, $attempt - 1)
+              Write-Warning "$Group setup exited $exitCode; retrying in $delaySeconds seconds."
+              Start-Sleep -Seconds $delaySeconds
+            }
+          }
+
+          Install-VerifiedSetupGroup -Group "core:asr" -LogPath "$env:GITHUB_WORKSPACE\setup-asr.jsonl"
+          Install-VerifiedSetupGroup -Group "core:analysis" -LogPath "$env:GITHUB_WORKSPACE\setup-analysis.jsonl"
 
       - name: Install silently and run deterministic packaged Windows UI qualification
         shell: pwsh

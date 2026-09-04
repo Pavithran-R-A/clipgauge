@@ -54,6 +54,22 @@ struct RunJobRequest {
     secret_header: Option<String>,
     #[serde(default)]
     captions: Option<String>,
+    #[serde(default)]
+    cookies_from_browser: Option<String>,
+    #[serde(default)]
+    allow_cpu_asr_fallback: bool,
+}
+
+fn validate_browser_session(value: Option<&str>) -> Result<Option<String>, String> {
+    match value {
+        None => Ok(None),
+        Some(browser) if matches!(browser, "chrome" | "chromium" | "firefox") => {
+            Ok(Some(browser.to_string()))
+        }
+        Some(_) => {
+            Err("Unsupported browser session. Choose Chrome, Chromium, or Firefox.".to_string())
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +92,8 @@ struct ResumeJobRequest {
     captions: Option<String>,
     #[serde(default)]
     camera: Option<String>,
+    #[serde(default)]
+    allow_cpu_asr_fallback: bool,
 }
 
 fn home_dir() -> PathBuf {
@@ -83,6 +101,20 @@ fn home_dir() -> PathBuf {
     // CLIPGAUGE_HOME, but packaged Rust commands never accept an arbitrary
     // user-provided root that could escape the asset scope.
     dirs_home().join(".clipgauge")
+}
+
+fn profile_home_from_env(
+    home: Option<std::ffi::OsString>,
+    userprofile: Option<std::ffi::OsString>,
+) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    let value = userprofile.or(home);
+    #[cfg(not(target_os = "windows"))]
+    let value = home.or(userprofile);
+
+    value
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 fn copy_legacy_tree(source: &Path, destination: &Path) -> Result<(), String> {
@@ -149,11 +181,17 @@ fn migrate_legacy_data() -> Result<(), String> {
 }
 
 fn dirs_home() -> PathBuf {
-    // HOME on Unix; Windows services and some launch paths only set USERPROFILE.
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+    // Windows profile identity must ignore shell-specific HOME overrides.
+    profile_home_from_env(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
+}
+
+fn onboarded_marker_exists(home: &Path) -> bool {
+    home.join("onboarded").exists()
+}
+
+fn mark_onboarded_at(home: &Path) -> Result<(), String> {
+    fs::create_dir_all(home).map_err(|e| e.to_string())?;
+    fs::write(home.join("onboarded"), "1").map_err(|e| e.to_string())
 }
 
 fn validate_job_id(job_id: &str) -> Result<PathBuf, String> {
@@ -670,7 +708,10 @@ fn run_job(
         auth,
         secret_header,
         captions,
+        cookies_from_browser,
+        allow_cpu_asr_fallback,
     } = request;
+    let cookies_from_browser = validate_browser_session(cookies_from_browser.as_deref())?;
     let (program, base_args) = pipeline_invocation();
     let processes = state.processes.clone();
     let key = format!("run:{}", diagnostics::diagnostic_id());
@@ -693,6 +734,13 @@ fn run_job(
         if let Some(preset) = captions {
             args.push("--captions".to_string());
             args.push(preset);
+        }
+        if let Some(browser) = cookies_from_browser {
+            args.push("--cookies-from-browser".to_string());
+            args.push(browser);
+        }
+        if allow_cpu_asr_fallback {
+            args.push("--allow-cpu-asr-fallback".to_string());
         }
         stream_pipeline(
             &app,
@@ -722,6 +770,7 @@ fn resume_job(
         secret_header,
         captions,
         camera,
+        allow_cpu_asr_fallback,
     } = request;
     validate_job_id(&job_id)?;
     let (program, base_args) = pipeline_invocation();
@@ -750,6 +799,9 @@ fn resume_job(
         if let Some(cam) = camera {
             args.push("--camera".to_string());
             args.push(cam);
+        }
+        if allow_cpu_asr_fallback {
+            args.push("--allow-cpu-asr-fallback".to_string());
         }
         stream_pipeline(
             &app,
@@ -1154,18 +1206,13 @@ fn get_setup_state_blocking() -> Result<Value, String> {
         let has = secrets::get_provider_auth(&id)?.is_some();
         provider_keys.insert(kind.to_string(), Value::Bool(has));
     }
-    let onboarded = home_dir().join("onboarded").exists();
+    let onboarded = onboarded_marker_exists(&home_dir());
     Ok(json!({"has_gemini_key": has_key, "onboarded": onboarded, "provider_keys": provider_keys}))
 }
 
 #[tauri::command]
 async fn mark_onboarded() -> Result<(), String> {
-    spawn_blocking_result(|| {
-        let home = home_dir();
-        fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-        fs::write(home.join("onboarded"), "1").map_err(|e| e.to_string())
-    })
-    .await
+    spawn_blocking_result(|| mark_onboarded_at(&home_dir())).await
 }
 
 fn loopback_json(path: &str) -> Result<Value, String> {
@@ -1707,15 +1754,20 @@ async fn request_playback_url(
 }
 
 #[tauri::command]
-async fn export_clip(job_id: String, clip: u32, title: Option<String>) -> Result<String, String> {
+async fn export_clip(
+    job_id: String,
+    clip: u32,
+    title: Option<String>,
+    destination: Option<String>,
+) -> Result<String, String> {
     spawn_blocking_result(move || {
-        artifact::export_clip(
-            &home_dir(),
-            &dirs_home().join("Downloads"),
-            &job_id,
-            clip,
-            title,
-        )
+        let home = home_dir();
+        match destination {
+            Some(path) => artifact::export_clip_to(&home, &job_id, clip, Path::new(&path)),
+            None => {
+                artifact::export_clip(&home, &dirs_home().join("Downloads"), &job_id, clip, title)
+            }
+        }
     })
     .await
 }
@@ -1808,9 +1860,82 @@ mod tests {
     use super::{
         canonical_provider_id, generate_support_bundle_at, ig_connect_args, ig_failure_message,
         is_completion_payload, migrate_legacy_data_from, selected_provider_env,
-        spawn_blocking_result, ResumeJobRequest, RunJobRequest,
+        spawn_blocking_result, validate_browser_session, ResumeJobRequest, RunJobRequest,
     };
     use serde_json::json;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_profile_resolution_ignores_shell_home() {
+        let resolved = super::profile_home_from_env(
+            Some(std::ffi::OsString::from(r"C:\\fake-terminal-home")),
+            Some(std::ffi::OsString::from(r"C:\\fake-windows-profile")),
+        );
+        assert_eq!(
+            resolved,
+            std::path::PathBuf::from(r"C:\\fake-windows-profile")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_onboarding_marker_survives_cross_launch_home_change() {
+        let root = std::env::temp_dir().join(format!(
+            "clipgauge-profile-resolution-{}",
+            super::diagnostics::diagnostic_id()
+        ));
+        let profile = root.join("windows-profile");
+        let first_profile = super::profile_home_from_env(
+            Some(std::ffi::OsString::from(r"C:\\fake-terminal-home")),
+            Some(profile.as_os_str().to_os_string()),
+        );
+        let first_data_root = first_profile.join(".clipgauge");
+        super::mark_onboarded_at(&first_data_root).unwrap();
+
+        let second_profile = super::profile_home_from_env(
+            Some(std::ffi::OsString::from(r"C:\\different-terminal-home")),
+            Some(profile.as_os_str().to_os_string()),
+        );
+        let second_data_root = second_profile.join(".clipgauge");
+
+        assert_eq!(first_data_root, second_data_root);
+        assert!(super::onboarded_marker_exists(&second_data_root));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_onboarding_commands_share_profile_root_across_launches() {
+        let root = std::env::temp_dir().join(format!(
+            "clipgauge-onboarding-resolution-{}",
+            super::diagnostics::diagnostic_id()
+        ));
+        let profile = root.join("windows-profile");
+        let previous_home = std::env::var_os("HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
+
+        std::env::set_var("HOME", r"C:\\fake-terminal-home");
+        std::env::set_var("USERPROFILE", profile.as_os_str());
+        let mark_result = tauri::async_runtime::block_on(super::mark_onboarded());
+
+        std::env::set_var("HOME", r"C:\\different-terminal-home");
+        let state_result = super::get_setup_state_blocking();
+
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match previous_userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+
+        mark_result.unwrap();
+        let state = state_result.unwrap();
+        assert_eq!(state["onboarded"], true);
+        assert!(profile.join(".clipgauge/onboarded").exists());
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn blocking_bridge_helper_runs_work_on_a_worker_thread() {
@@ -1843,6 +1968,18 @@ mod tests {
             "preset-openrouter"
         );
         assert!(canonical_provider_id("../openrouter").is_err());
+    }
+
+    #[test]
+    fn browser_session_validation_is_explicit_and_allowlisted() {
+        assert_eq!(validate_browser_session(None).unwrap(), None);
+        assert_eq!(
+            validate_browser_session(Some("firefox"))
+                .unwrap()
+                .as_deref(),
+            Some("firefox")
+        );
+        assert!(validate_browser_session(Some("edge")).is_err());
     }
 
     #[test]

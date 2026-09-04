@@ -129,3 +129,31 @@ def test_median_filter_suppresses_interior_spikes():
     out = median_filter([1.0, 1.0, 100.0, 1.0, 1.0], 3)
     assert out[2] == 1.0
     assert median_filter([5.0], 3) == [5.0]
+
+
+def test_generated_trajectory_uses_group_union_and_environment_fallback():
+    n = 50
+    one = ScoredTrack(0, [0.2] * n, [0.5] * n, [0.04] * n, [2.0] * n)
+    other = ScoredTrack(0, [0.8] * n, [0.5] * n, [0.04] * n, [2.0] * n)
+
+    class Cam:
+        speaker_change = "cut"
+        punch_in = False
+        punch_in_sensitivity = 1.0
+        zoom_lock_per_scene = True
+
+    one_traj = director.build_trajectory(
+        AsdAnalysis([one], n, [], 25), [], [], np.zeros(0), 0.1, 0.0, 2.0, 1920, 1080, Cam()
+    )
+    group_traj = director.build_trajectory(
+        AsdAnalysis([one, other], n, [], 25), [], [], np.zeros(0), 0.1, 0.0, 2.0, 1920, 1080, Cam()
+    )
+    environment_traj = director.build_trajectory(
+        AsdAnalysis([], n, [], 25), [], [], np.zeros(0), 0.1, 0.0, 2.0, 1920, 1080, Cam()
+    )
+
+    assert one_traj.meta["camera_mode_distribution"]["speaker"] > 0
+    assert group_traj.meta["camera_mode_distribution"]["group"] > 0
+    assert environment_traj.meta["camera_mode_distribution"]["environment"] > 0
+    assert group_traj.frames[10][0] > one_traj.frames[10][0]
+    assert abs(environment_traj.frames[10][0] - (1920 - environment_traj.frames[10][2]) / 2) < 2

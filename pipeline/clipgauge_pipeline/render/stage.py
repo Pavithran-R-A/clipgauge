@@ -4,14 +4,21 @@ MP4s, each verified (streams present, duration sane) before being reported."""
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from ..jobs.queue import Stage, StageContext, StageError, _atomic_write_text
 
 
+def captions_allowed_for_clip(clip: dict, captions_ok: bool) -> bool:
+    """Avoid caption collisions when T2 confirms source-burned text."""
+    visual = clip.get("t2")
+    return bool(captions_ok and not (isinstance(visual, dict) and visual.get("on_screen_text") is True))
+
+
 class RenderStage(Stage):
     name = "render"
-    schema_version = 1
+    schema_version = 7  # v7: consume refreshed scoring classifications
 
     def artifacts_ok(self, ctx: StageContext, data: dict) -> bool:
         if data.get("caption_preset") != ctx.settings.caption_preset:
@@ -22,7 +29,7 @@ class RenderStage(Stage):
         import numpy as np
 
         from ..captions import ass as ass_mod
-        from . import ffmpeg_bin, renderer
+        from . import ffmpeg_bin, renderer, scheduler
 
         caption_engine_ready = ffmpeg_bin.supports_captions()
         if not caption_engine_ready:
@@ -58,8 +65,12 @@ class RenderStage(Stage):
 
         out_dir = ctx.job_dir / "clips"
         out_dir.mkdir(exist_ok=True)
+        out_w, out_h = renderer.output_dimensions()
         outputs = []
         clips = score["clips"]
+        render_durations: list[float] = []
+        encoder = renderer.selected_video_encoder()
+        concurrency = scheduler.concurrency_limit(encoder)
         for i, clip in enumerate(clips):
             traj_path = camera["trajectories"].get(str(i))
             if not traj_path or not Path(traj_path).exists():
@@ -93,20 +104,31 @@ class RenderStage(Stage):
             ass_path = out_dir / f"clip_{i:02d}.ass"
             _atomic_write_text(
                 ass_path,
-                ass_mod.build_ass(words, clip_events, preset_name=preset, emoji_ok=emoji_ok),
+                ass_mod.build_ass(
+                    words,
+                    clip_events,
+                    preset_name=preset,
+                    emoji_ok=emoji_ok,
+                    output_width=out_w,
+                    output_height=out_h,
+                ),
             )
 
             out_path = out_dir / f"clip_{i:02d}.mp4"
+            clip_captions_ok = captions_allowed_for_clip(clip, captions_ok)
+            started_at = time.monotonic()
             try:
-                renderer.render_clip(
+                used_encoder = renderer.render_clip(
                     media, out_path, start, end, trajectory,
-                    ass_path if captions_ok else None, ass_mod.FONTS_DIR,
+                    ass_path if clip_captions_ok else None, ass_mod.FONTS_DIR,
                     lufs=ctx.settings.lufs_target,
                     true_peak=ctx.settings.true_peak_db,
                     src_w=src_w, src_h=src_h,
                 )
+                encoder = used_encoder
             except RuntimeError as err:
                 raise StageError(str(err)) from err
+            render_durations.append(round(time.monotonic() - started_at, 3))
             check = renderer.verify_output(out_path, end - start)
             if not check["ok"]:
                 raise StageError(
@@ -123,6 +145,7 @@ class RenderStage(Stage):
                     "duration": round(check["duration"], 2),
                     "words": len(words),
                     "event_tags": len(clip_events),
+                    "captions_suppressed": bool(captions_ok and not clip_captions_ok),
                 }
             )
 
@@ -133,4 +156,12 @@ class RenderStage(Stage):
             "emoji_ok": emoji_ok,
             "captions_burned": captions_ok,
             "caption_preset": preset,
+            "performance": {
+                "encoder": encoder,
+                "render_count": len(outputs),
+                "concurrency_limit": concurrency,
+                "observed_concurrency": 1,
+                "render_durations_sec": render_durations,
+                "total_render_sec": round(sum(render_durations), 3),
+            },
         }

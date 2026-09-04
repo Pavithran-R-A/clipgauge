@@ -15,7 +15,6 @@ const STAGE_LABELS: Record<string, string> = {
   camera: 'Smart reframing',
   render: 'Creating clips'
 }
-
 const AI_OPTIONS = [
   { id: 'clipgauge-local', name: 'ClipGauge Local', description: 'Private scoring on this computer.', tone: 'teal' },
   { id: 'openrouter', name: 'OpenRouter Free', description: 'A free cloud route when available.', tone: 'blue' },
@@ -36,10 +35,12 @@ interface Props {
   startedAt: number | null
   stages: Record<string, StageProgress>
   error: string | null
+  errorCode: string | null
   notice: string | null
-  onRun: (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) => void
+  onRun: (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, browserSession?: string) => void
   localModelId?: string
   onCancel: () => void
+  onContinueCpu: () => void
   onNavigate: (section: 'providers' | 'setup' | 'privacy') => void
   selectedProvider: string
   onSelectProvider: (provider: string) => void
@@ -56,10 +57,11 @@ function formatElapsed(seconds: number) {
   return `${minutes}:${String(seconds % 60).padStart(2, '0')}`
 }
 
-export default function Studio({ running, runState, cancelling, startedAt, stages, error, notice, onRun, localModelId, onCancel, onNavigate, selectedProvider, onSelectProvider }: Props) {
+export default function Studio({ running, runState, cancelling, startedAt, stages, error, errorCode, notice, onRun, localModelId, onContinueCpu, onCancel, onNavigate, selectedProvider, onSelectProvider }: Props) {
   const [source, setSource] = useState('')
   const provider = selectedProvider
   const [captions, setCaptions] = useState('classic')
+  const [browserSession, setBrowserSession] = useState('')
   const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
@@ -97,6 +99,7 @@ export default function Studio({ running, runState, cancelling, startedAt, stage
 
   return (
     <div className="workspace-page create-page">
+      {errorCode === 'ASR_GPU_FALLBACK_REQUIRES_APPROVAL' && <section className="cpu-recovery card-surface" aria-live="polite"><div><strong>Choose how speech should continue</strong><p>GPU speech acceleration failed. Repair it in Setup, or approve a slower CPU run for this video.</p></div><div className="detail-actions"><button type="button" className="button button-secondary" onClick={() => onNavigate('setup')}>Repair GPU acceleration</button><button type="button" className="button button-secondary" onClick={onContinueCpu}>Continue in slower CPU mode</button></div></section>}
       <header className="page-header create-header"><div><p className="section-eyebrow">Create</p><h1>Create clips</h1><p className="page-lede">Turn a long video into vertical clips worth sharing.</p></div><div className="header-actions"><button type="button" className="button button-secondary" onClick={() => onNavigate('privacy')}><LockKeyhole size={16} aria-hidden="true" /> Privacy</button><button type="button" className="button button-secondary" onClick={() => onNavigate('setup')}><Settings2 size={16} aria-hidden="true" /> Setup</button></div></header>
       <div className="create-layout">
         <div className="create-main-column">
@@ -113,7 +116,7 @@ export default function Studio({ running, runState, cancelling, startedAt, stage
         </div>
         <aside className="create-side-column"><section className="side-note card-surface"><div className="side-note-icon"><Info size={18} aria-hidden="true" /></div><div><strong>What happens next?</strong><p>ClipGauge finds strong moments, reframes them for vertical video, and adds captions. You’ll get a review screen with every clip and its reasons.</p></div></section><section className="selected-summary card-surface"><p className="section-eyebrow">Your choices</p><div className="summary-row"><span>AI</span><strong>{selectedAI.name}</strong></div><div className="summary-row"><span>Captions</span><strong>{selectedCaption.name}</strong></div><div className="summary-row"><span>Output</span><strong>Vertical 9:16</strong></div></section></aside>
       </div>
-      {hasProgress && <section className="processing-panel card-surface" aria-live="polite"><div className="processing-header"><div><p className="section-eyebrow">Creating your clips</p><h2>{creatorHeadline(runState)}</h2></div><span className="elapsed-pill">{formatElapsed(elapsed)} elapsed</span></div><div className="processing-timeline" data-testid="processing-timeline">{STAGE_ORDER.map((stage) => { const current = stages[stage]; const done = Boolean(current && current.fraction >= 1); const active = Boolean(current && !done) || (!current && running && stage === STAGE_ORDER.find((item) => !stages[item])); return <div className={`timeline-step ${done ? 'is-done' : ''} ${active ? 'is-active' : ''}`} key={stage}><span className="timeline-dot" aria-hidden="true">{done ? '✓' : active ? '•' : ''}</span><span>{current?.displayStage ?? STAGE_LABELS[stage]}</span>{active && current?.operation && <small>{current.operation}</small>}</div> })}</div>{notice && <p className="inline-message" role="status">{notice}</p>}{error && <p className="error-message" role="alert">{error}</p>}{youtubeAttention && <div className="youtube-recovery card-surface"><div><strong>YouTube playback verification was rejected</strong><p>ClipGauge itself is ready. You can retry later, use optional browser-assisted compatibility only with explicit approval, or import the video file directly.</p></div><div className="detail-actions"><button type="button" className="button button-secondary" onClick={() => onNavigate('setup')}>Open Setup</button><button type="button" className="button button-secondary" onClick={() => onRun(source.trim(), provider, captions, provider === 'clipgauge-local' ? localModelId : undefined)} disabled={running}>Retry later</button></div></div>}<details className="technical-disclosure"><summary>Show technical details</summary><div className="technical-progress-list">{Object.entries(stages).map(([name, stage]) => <div key={name}><span>{name}</span><span>{stage.message}</span></div>)}</div></details></section>}
+      {hasProgress && <section className="processing-panel card-surface" aria-live="polite"><div className="processing-header"><div><p className="section-eyebrow">Creating your clips</p><h2>{creatorHeadline(runState)}</h2></div><span className="elapsed-pill">{formatElapsed(elapsed)} elapsed</span></div><div className="processing-timeline" data-testid="processing-timeline">{STAGE_ORDER.map((stage) => { const current = stages[stage]; const done = Boolean(current && current.fraction >= 1); const active = Boolean(current && !done) || (!current && running && stage === STAGE_ORDER.find((item) => !stages[item])); return <div className={`timeline-step ${done ? 'is-done' : ''} ${active ? 'is-active' : ''}`} key={stage}><span className="timeline-dot" aria-hidden="true">{done ? '✓' : active ? '•' : ''}</span><span>{current?.displayStage ?? STAGE_LABELS[stage]}</span>{active && current?.operation && <small>{current.operation}</small>}</div> })}</div>{notice && <p className="inline-message" role="status">{notice}</p>}{error && <p className="error-message" role="alert">{error}</p>}{youtubeAttention && <div className="youtube-recovery card-surface"><div><strong>YouTube playback verification was rejected</strong><p>ClipGauge itself is ready. You can retry later, or try browser-assisted compatibility after explicit approval. ClipGauge reads the selected browser session only for this operation and never saves cookies.</p></div><label className="browser-session-choice" htmlFor="browser-session">Browser session<select id="browser-session" value={browserSession} onChange={(event) => setBrowserSession(event.target.value)}><option value="">Choose a browser</option><option value="chrome">Chrome</option><option value="firefox">Firefox</option><option value="chromium">Chromium</option></select></label><div className="detail-actions"><button type="button" className="button button-secondary" onClick={() => onNavigate('setup')}>Open Setup</button><button type="button" className="button button-secondary" onClick={() => onRun(source.trim(), provider, captions, provider === 'clipgauge-local' ? localModelId : undefined, undefined, undefined, undefined, browserSession)} disabled={running || !browserSession}>Try browser-assisted YouTube compatibility</button><button type="button" className="button button-secondary" onClick={() => onRun(source.trim(), provider, captions, provider === 'clipgauge-local' ? localModelId : undefined)} disabled={running}>Retry later</button></div></div>}<details className="technical-disclosure"><summary>Show technical details</summary><div className="technical-progress-list">{Object.entries(stages).map(([name, stage]) => <div key={name}><span>{name}</span><span>{stage.message}</span></div>)}</div></details></section>}
     </div>
   )
 }

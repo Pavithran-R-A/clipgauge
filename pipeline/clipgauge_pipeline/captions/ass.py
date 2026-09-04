@@ -25,6 +25,7 @@ THEBOLDFONT has unresolved licensing, so it was deliberately not vendored.
 from __future__ import annotations
 
 import re
+import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -194,35 +195,68 @@ def _esc(text: str) -> str:
     return text.replace("{", "(").replace("}", ")").replace("\\", "/")
 
 
-def _header(preset: Preset) -> str:
+def _header(preset: Preset, layout: dict[str, int]) -> str:
     bold = -1 if preset.bold else 0
     return (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
-        f"PlayResX: {PLAY_RES_X}\nPlayResY: {PLAY_RES_Y}\n"
+        f"PlayResX: {layout['play_res_x']}\nPlayResY: {layout['play_res_y']}\n"
         "ScaledBorderAndShadow: yes\nWrapStyle: 2\n\n"
         "[V4+ Styles]\n"
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
         "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Cap,{preset.font},{preset.size},{preset.primary},{preset.primary},"
+        f"Style: Cap,{preset.font},{layout['font_size']},{preset.primary},{preset.primary},"
         f"{preset.outline_color},&H96000000,{bold},0,0,0,100,100,0,0,1,"
-        f"{preset.outline},{preset.shadow},2,60,60,{preset.margin_v},1\n"
-        f"Style: Tag,{preset.font},{int(preset.size * 0.55)},{preset.event_tag_color},"
+        f"{preset.outline},{preset.shadow},2,60,60,{layout['margin_v']},1\n"
+        f"Style: Tag,{preset.font},{int(layout['font_size'] * 0.55)},{preset.event_tag_color},"
         f"{preset.event_tag_color},{preset.outline_color},&H96000000,0,-1,0,0,100,100,0,0,1,"
-        f"{max(2, preset.outline - 2)},0,2,60,60,{preset.margin_v + int(preset.size * 1.5)},1\n\n"
+        f"{max(2, preset.outline - 2)},0,2,60,60,{layout['margin_v'] + int(layout['font_size'] * 1.5)},1\n\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Text\n"
     )
 
 
-def _chunk_text(chunk: Chunk, active_idx: int | None, preset: Preset, entrance: bool) -> str:
+def caption_layout(output_width: int, output_height: int, preset: Preset) -> dict[str, int]:
+    """Scale caption geometry for alternate render sizes safely."""
+    scale = min(output_width / PLAY_RES_X, output_height / PLAY_RES_Y)
+    size = max(30, round(preset.size * scale))
+    margin = max(120, round(preset.margin_v * scale))
+    max_chars = max(14, min(34, round(output_width / max(1, size) * 0.52)))
+    return {
+        "play_res_x": int(output_width),
+        "play_res_y": int(output_height),
+        "font_size": size,
+        "margin_v": margin,
+        "max_chars": max_chars,
+    }
+
+
+def wrap_caption(text: str, max_chars: int) -> str:
+    """Keep captions to two readable lines, including long Unicode words."""
+    lines = textwrap.wrap(
+        text,
+        width=max(14, int(max_chars)),
+        break_long_words=True,
+        break_on_hyphens=False,
+        replace_whitespace=False,
+    ) or [""]
+    return r"\N".join(lines[:2])
+
+
+def _chunk_text(
+    chunk: Chunk, active_idx: int | None, preset: Preset, entrance: bool, max_chars: int
+) -> str:
     parts: list[str] = []
     if entrance and preset.pop:
         parts.append("{\\fscx82\\fscy82\\t(0,110,\\fscx100\\fscy100)}")
+    visible_length = 0
     for i, word in enumerate(chunk.words):
         text = _esc(word.text.upper() if preset.uppercase else word.text)
+        if visible_length and visible_length + len(text) + 1 > max_chars:
+            parts.append(r"\N")
+            visible_length = 0
         if i == active_idx:
             color = preset.active
         elif word.emphasized:
@@ -230,6 +264,7 @@ def _chunk_text(chunk: Chunk, active_idx: int | None, preset: Preset, entrance: 
         else:
             color = preset.primary
         parts.append(f"{{\\c{color}}}{text}")
+        visible_length += len(text) + 1
     return " ".join(parts)
 
 
@@ -238,11 +273,14 @@ def build_ass(
     events: list[dict],
     preset_name: str = "classic",
     emoji_ok: bool = False,
+    output_width: int = PLAY_RES_X,
+    output_height: int = PLAY_RES_Y,
 ) -> str:
     """The full ASS document for one clip. `events` carry clip-relative
     start/end + type; only bus-detected non-speech events become tags."""
     preset = PRESETS.get(preset_name, PRESETS["classic"])
-    lines = [_header(preset)]
+    layout = caption_layout(output_width, output_height, preset)
+    lines = [_header(preset, layout)]
 
     for chunk in chunk_words(words):
         for i, word in enumerate(chunk.words):
@@ -250,7 +288,7 @@ def build_ass(
             end = chunk.words[i + 1].start if i + 1 < len(chunk.words) else chunk.end
             if end <= start:
                 end = start + 0.04
-            text = _chunk_text(chunk, i, preset, entrance=(i == 0))
+            text = _chunk_text(chunk, i, preset, entrance=(i == 0), max_chars=layout["max_chars"])
             lines.append(
                 f"Dialogue: 0,{_fmt_time(start)},{_fmt_time(end)},Cap,,0,0,0,{text}\n"
             )

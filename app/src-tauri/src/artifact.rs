@@ -160,6 +160,59 @@ fn safe_stem(title: Option<&String>) -> String {
     }
 }
 
+fn validate_explicit_destination(destination: &Path) -> Result<(), String> {
+    if !destination.is_absolute() {
+        return Err("export destination must be an absolute path".into());
+    }
+    let is_mp4 = destination
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"));
+    if !is_mp4 {
+        return Err("export destination must end in .mp4".into());
+    }
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "export destination has no parent directory".to_string())?;
+    let parent_metadata = fs::metadata(parent)
+        .map_err(|_| "export destination parent directory does not exist".to_string())?;
+    if !parent_metadata.is_dir() {
+        return Err("export destination parent is not a directory".into());
+    }
+    match fs::symlink_metadata(destination) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err("export destination may not be a symlink".into());
+            }
+            if !metadata.is_file() {
+                return Err("export destination is not a regular file".into());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("could not inspect existing export destination".into()),
+    }
+    Ok(())
+}
+
+pub fn export_clip_to(
+    home: &Path,
+    job_id: &str,
+    clip: u32,
+    destination: &Path,
+) -> Result<String, String> {
+    let source = render_artifact(home, job_id, clip)?;
+    validate_explicit_destination(destination)?;
+    if fs::symlink_metadata(destination).is_ok() {
+        let existing = fs::canonicalize(destination)
+            .map_err(|_| "could not resolve existing export destination".to_string())?;
+        if existing == source {
+            return Err("export destination cannot overwrite the managed source artifact".into());
+        }
+    }
+    fs::copy(&source, destination).map_err(|e| e.to_string())?;
+    Ok(destination.to_string_lossy().to_string())
+}
+
 pub fn export_clip(
     home: &Path,
     downloads: &Path,
@@ -167,30 +220,7 @@ pub fn export_clip(
     clip: u32,
     title: Option<String>,
 ) -> Result<String, String> {
-    let dir = resolve_job_dir(home, job_id)?;
-    let render = read_stage(&dir, "render")?;
-    let outputs = render
-        .get("outputs")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "malformed render outputs".to_string())?;
-    let output = outputs
-        .iter()
-        .find(|entry| entry.get("clip").and_then(Value::as_u64) == Some(clip as u64))
-        .ok_or_else(|| "clip is not part of this job".to_string())?;
-    let source = output
-        .get("path")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "clip has no render artifact".to_string())?;
-    let source_path = Path::new(source);
-    let candidate = if source_path.is_absolute() {
-        source_path.to_path_buf()
-    } else {
-        dir.join(source_path)
-    };
-    let source = resolve_existing_file(&dir.join("clips"), &candidate)?;
-    if source.extension().and_then(|e| e.to_str()) != Some("mp4") {
-        return Err("clip artifact is not an MP4".into());
-    }
+    let source = render_artifact(home, job_id, clip)?;
     fs::create_dir_all(downloads).map_err(|e| e.to_string())?;
     let stem = safe_stem(title.as_ref());
     let mut dest = downloads.join(format!("{stem}.mp4"));
@@ -205,7 +235,7 @@ pub fn export_clip(
 
 #[cfg(test)]
 mod tests {
-    use super::{export_clip, job_results, source_media_artifact};
+    use super::{export_clip, export_clip_to, job_results, source_media_artifact};
     use serde_json::json;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -327,6 +357,53 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fs::read(exported).unwrap(), b"video");
+    }
+
+    #[test]
+    fn exports_to_an_explicit_absolute_destination() {
+        let home = relative_fixture();
+        let exports = home.join("chosen");
+        fs::create_dir_all(&exports).unwrap();
+        let destination = exports.join("picked-by-user.mp4");
+        let exported = export_clip_to(&home, "20260818-155237-c6b118", 0, &destination).unwrap();
+        assert_eq!(exported, destination.to_string_lossy());
+        assert_eq!(fs::read(destination).unwrap(), b"video");
+    }
+
+    #[test]
+    fn explicit_export_rejects_relative_and_non_mp4_destinations() {
+        let home = relative_fixture();
+        assert!(export_clip_to(
+            &home,
+            "20260818-155237-c6b118",
+            0,
+            std::path::Path::new("relative.mp4"),
+        )
+        .is_err());
+        let exports = home.join("chosen");
+        fs::create_dir_all(&exports).unwrap();
+        assert!(export_clip_to(
+            &home,
+            "20260818-155237-c6b118",
+            0,
+            &exports.join("wrong.txt"),
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_export_rejects_dangling_destination_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let home = fixture();
+        let exports = home.join("chosen");
+        fs::create_dir_all(&exports).unwrap();
+        let destination = exports.join("picked.mp4");
+        symlink(exports.join("missing.mp4"), &destination).unwrap();
+
+        let error = export_clip_to(&home, "20260818-155237-c6b118", 0, &destination).unwrap_err();
+        assert!(error.contains("may not be a symlink"));
     }
 
     #[test]

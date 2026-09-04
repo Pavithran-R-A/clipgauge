@@ -18,13 +18,13 @@ export const api = {
   privacySummary: (provider: string, model?: string, endpoint?: string) =>
     invoke<PrivacySummary>('privacy_summary', { llm: legacyMode(provider), provider, model, endpoint }),
   generateSupportBundle: (jobId?: string, diagnosticId?: string) => invoke<string>('generate_support_bundle', { jobId, diagnosticId }),
-  runJob: (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
+  runJob: (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, browserSession?: string) =>
     invoke<void>('run_job', {
-      request: { source, llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader, captions },
+      request: { source, llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader, captions, cookies_from_browser: browserSession },
     }),
-  resumeJob: (jobId: string, provider?: string, captions?: string, camera?: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
+  resumeJob: (jobId: string, provider?: string, captions?: string, camera?: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, allowCpuAsrFallback = false) =>
     invoke<void>('resume_job', {
-      request: { job_id: jobId, llm: provider ? legacyMode(provider) : undefined, provider, model, endpoint, auth, secret_header: secretHeader, captions, camera },
+      request: { job_id: jobId, llm: provider ? legacyMode(provider) : undefined, provider, model, endpoint, auth, secret_header: secretHeader, captions, camera, allow_cpu_asr_fallback: allowCpuAsrFallback },
     }),
   testConnection: (provider: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
     invoke<ProviderTestResult>('test_connection', { llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader }),
@@ -47,7 +47,8 @@ export const api = {
   startSetup: (args: string[]) => invoke<string>('start_setup', { args }),
   cancelSetup: (operationId: string) => invoke<void>('cancel_setup', { operationId }),
   saveClipEdits: (jobId: string, input: SaveClipEditsInput) => invoke<void>('save_clip_edits', { jobId, input }),
-  exportClip: (jobId: string, clip: number, title?: string) => invoke<string>('export_clip', { jobId, clip, title }),
+  exportClip: (jobId: string, clip: number, title?: string, destination?: string) =>
+    invoke<string>('export_clip', { jobId, clip, title, destination }),
   requestPlaybackUrl: (jobId: string, artifactType: 'render' | 'source', clip?: number) =>
     invoke<string>('request_playback_url', { jobId, artifactType, clip }),
   recordMediaEvent: (input: Record<string, unknown>) => invoke<void>('record_media_event', { input }),

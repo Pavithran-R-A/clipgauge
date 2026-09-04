@@ -61,6 +61,33 @@ class Trajectory:
     meta: dict = field(default_factory=dict)
 
 
+def composition_box(subjects: list[dict], padding: float = 0.12) -> tuple[float, float, float, float] | None:
+    """Return a padded normalized union box for group-aware framing."""
+    if not subjects:
+        return None
+    left = min(float(item["x"]) for item in subjects)
+    top = min(float(item["y"]) for item in subjects)
+    right = max(float(item["x"]) + float(item["w"]) for item in subjects)
+    bottom = max(float(item["y"]) + float(item["h"]) for item in subjects)
+    width, height = right - left, bottom - top
+    left = max(0.0, left - width * padding)
+    top = max(0.0, top - height * padding)
+    right = min(1.0, right + width * padding)
+    bottom = min(1.0, bottom + height * padding)
+    return tuple(round(value, 4) for value in (left, top, right - left, bottom - top))
+
+
+def shot_purpose(*, face_count: int, speaking_count: int, reaction: bool = False) -> str:
+    """Choose a framing purpose before applying crop geometry."""
+    if reaction and face_count:
+        return "reaction"
+    if face_count == 0:
+        return "environment"
+    if speaking_count > 1 or face_count > 1:
+        return "group"
+    return "speaker"
+
+
 def active_speaker_timeline(analysis: AsdAnalysis, fps: int = ASD_FPS) -> list[int | None]:
     """Per-frame winning track index via the hysteresis switch machine."""
     n = analysis.frame_count
@@ -190,6 +217,71 @@ def fuse_with_turns(
     return targets
 
 
+def _subject_box(track: ScoredTrack, frame: int) -> dict[str, float] | None:
+    """Approximate a normalized face box from the tracked face area."""
+    index = frame - track.start
+    if not 0 <= index < len(track.centres):
+        return None
+    side = max(0.08, min(0.42, float(np.sqrt(max(0.002, track.areas[index])))))
+    width = side * 0.82
+    height = side
+    x = max(0.0, min(1.0 - width, float(track.centres[index]) - width / 2))
+    y = max(0.0, min(1.0 - height, float(track.centres_y[index]) - height / 2))
+    return {"x": x, "y": y, "w": width, "h": height}
+
+
+def _subjects_at_frame(analysis: AsdAnalysis, frame: int) -> list[dict[str, float]]:
+    """Return simultaneously speaking subjects for this frame."""
+    subjects: list[dict[str, float]] = []
+    for track in analysis.tracks:
+        index = frame - track.start
+        if not 0 <= index < len(track.scores) or track.scores[index] <= SPEAKING_THRESHOLD:
+            continue
+        box = _subject_box(track, frame)
+        if box is not None:
+            subjects.append(box)
+    return subjects
+
+
+def _composition_targets(
+    analysis: AsdAnalysis,
+    targets: list[tuple[float, float] | None],
+    timeline: list[dict],
+    clip_start: float,
+    fps: int,
+) -> tuple[list[tuple[float, float, float]], list[str]]:
+    """Build crop targets from the subjects visible in each frame."""
+    composed: list[tuple[float, float, float]] = []
+    modes: list[str] = []
+    for frame, fallback in enumerate(targets):
+        subjects = _subjects_at_frame(analysis, frame)
+        if len(subjects) >= 2:
+            box = composition_box(subjects)
+            if box is not None:
+                x, y, width, height = box
+                composed.append((x + width / 2, y + height / 2, 1.0))
+                modes.append("group")
+                continue
+        if subjects:
+            subject = subjects[0]
+            reaction = any(
+                event.get("type") in {"laugh", "gasp", "scream", "reaction"}
+                and event.get("start", 0) <= clip_start + frame / fps <= event.get("end", 0)
+                for event in timeline
+            )
+            center = (subject["x"] + subject["w"] / 2, subject["y"] + subject["h"] / 2, 1.04 if reaction else 1.0)
+            composed.append(center)
+            modes.append("reaction" if reaction else "speaker")
+            continue
+        if fallback is not None:
+            composed.append((fallback[0], fallback[1], 1.0))
+            modes.append("speaker")
+        else:
+            composed.append((0.5, 0.5, 1.0))
+            modes.append("environment")
+    return composed, modes
+
+
 def switch_cut_frames(targets: list, threshold: float = 0.12) -> list[int]:
     """Frames where the target jumps far enough to read as a different person
     — these become hard cuts (virtual scene boundaries), so the smoother
@@ -285,8 +377,10 @@ def build_trajectory(
     canon = canonical_positions(analysis, speaker_frames, turns, clip_start, fps)
     targets = fuse_with_turns(speaker_frames, analysis, canon, turns, clip_start, fps)
 
-    # Fallback for faceless spans: centre crop.
-    filled = [(t if t is not None else (0.5, 0.5)) for t in targets] or [(0.5, 0.5)] * n
+    # Compose each frame from simultaneous speaking subjects. This keeps
+    # environment spans centered and preserves groups when both tracks talk.
+    composed, modes = _composition_targets(analysis, targets, timeline, clip_start, fps)
+    filled = composed or [(0.5, 0.5, 1.0)] * n
 
     cut_mode = getattr(getattr(camera, "camera", camera), "speaker_change", "cut") == "cut"
     switch_cuts = switch_cut_frames(filled) if cut_mode else []
@@ -299,7 +393,7 @@ def build_trajectory(
     for ci, f in enumerate(all_cuts):
         scene_ids[f:] = ci + 1
 
-    raw = [(t[0] * src_w, t[1] * src_h, 1.0) for t in filled[:n]]
+    raw = [(t[0] * src_w, t[1] * src_h, t[2]) for t in filled[:n]]
     window = max(5, int(SAVGOL_WINDOW_SEC * fps)) | 1
     smoothed = build_smoothed_trajectory(
         raw, list(scene_ids), window, SAVGOL_POLY,
@@ -347,5 +441,8 @@ def build_trajectory(
             "speakers_canonical": {str(k): [round(v[0], 3), round(v[1], 3)] for k, v in canon.items()},
             "switch_cuts": len(switch_cuts),
             "shot_cuts": len(shot_cuts),
+            "framing_purpose": max(set(modes), key=modes.count) if modes else "environment",
+            "camera_mode_distribution": {mode: modes.count(mode) for mode in sorted(set(modes))},
+            "faceless_fallback": not any(mode != "environment" for mode in modes),
         },
     )

@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import subprocess
 import time
+import gc
 from pathlib import Path
 
 from .. import config
 from ..jobs.queue import Stage, StageContext, StageError, _atomic_write_json
 from ..memory import release_cpu_memory
-from ..models import registry, specs
+from ..models import managed, registry, specs
 from ..render import ffmpeg_bin
 
 
@@ -41,9 +42,18 @@ def _extract_wav(media: Path, dst: Path, sr: int) -> None:
         raise StageError(f"Audio extraction failed: {(proc.stderr or '')[-500:]}")
 
 
+def select_inference_device(torch_module):
+    """Use CUDA only after managed runtime verification; otherwise use CPU."""
+    try:
+        managed.activate_cuda_runtime()
+    except Exception:
+        pass
+    return torch_module.device("cuda" if torch_module.cuda.is_available() else "cpu")
+
+
 class EventsStage(Stage):
     name = "events"
-    schema_version = 2  # v2: measured PANNs thresholds (v1 heard nothing)
+    schema_version = 4  # v4: use verified CUDA for PANNs when available
 
     def artifacts_ok(self, ctx: StageContext, data: dict) -> bool:
         return (ctx.job_dir / "curves.json").exists()
@@ -67,8 +77,8 @@ class EventsStage(Stage):
         from ..vendor.panns import models as panns_models
         from . import dsp, panns_channel, post
 
-        device = torch.device("cpu")
-        bench: dict[str, float] = {}
+        device = select_inference_device(torch)
+        bench: dict[str, float | str | int] = {"device": str(device)}
         events: list[dict] = []
 
         y16k, _ = load_mono(audio16, 16000)
@@ -99,6 +109,9 @@ class EventsStage(Stage):
                     }
                 )
             del lmodel
+            gc.collect()
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
             bench["laughter_sec"] = round(time.monotonic() - t0, 1)
             ctx.emit(0.35, f"{len(laughs)} laughter spans")
 
@@ -116,6 +129,9 @@ class EventsStage(Stage):
             progress=lambda f: ctx.emit(0.45 + f * 0.35, "Detecting audio events…"),
         )
         del pmodel
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
         for etype, probs in probs_by_type.items():
             enter, stay = panns_channel.THRESHOLDS.get(etype, (0.15, 0.08))
             for start, end, peak in post.postprocess(probs, fps, enter=enter, stay=stay):
@@ -129,6 +145,7 @@ class EventsStage(Stage):
                     }
                 )
         bench["panns_sec"] = round(time.monotonic() - t0, 1)
+        bench["panns_chunks"] = int(max(1, len(y32k) // (panns_models.SAMPLE_RATE * 30) + 1))
         wav32.unlink(missing_ok=True)  # 32k wav is only needed here
 
         # --- Channel 3: transcript long pauses ----------------------------

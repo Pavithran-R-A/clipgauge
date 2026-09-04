@@ -132,6 +132,7 @@ class Settings:
     cookies_from_browser: str | None = None
     caption_preset: str = "classic"
     laughter_specialist: bool = False
+    allow_cpu_asr_fallback: bool = False
 
     def provider_snapshot(self) -> dict[str, Any]:
         if self.provider_profile_id and self.provider_kind and self.provider_model:
@@ -169,6 +170,7 @@ class Settings:
             "cookies_from_browser": self.cookies_from_browser,
             "caption_preset": self.caption_preset,
             "laughter_specialist": self.laughter_specialist,
+            "allow_cpu_asr_fallback": self.allow_cpu_asr_fallback,
         }
 
     @classmethod
@@ -205,4 +207,5 @@ class Settings:
             cookies_from_browser=data.get("cookies_from_browser"),
             caption_preset=data.get("caption_preset", "classic"),
             laughter_specialist=data.get("laughter_specialist", False),
+            allow_cpu_asr_fallback=bool(data.get("allow_cpu_asr_fallback", False)),
         )

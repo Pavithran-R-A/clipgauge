@@ -170,6 +170,71 @@ def checkpoint_path(job: Job, stage: str) -> Path:
     return job.dir / f"{stage}.json"
 
 
+def stage_timing_path(job: Job) -> Path:
+    """Return the sanitized, user-visible stage timing sidecar."""
+    return job.dir / "diagnostics" / "stage-timing.json"
+
+
+def _stage_timing_metadata(stage: "Stage", data: dict) -> dict[str, Any]:
+    """Extract only safe scalar timing context from a stage result."""
+    explicit = data.get("timing") if isinstance(data.get("timing"), dict) else {}
+    performance = data.get("performance") if isinstance(data.get("performance"), dict) else {}
+    benchmark = data.get("benchmark") if isinstance(data.get("benchmark"), dict) else {}
+    source = {**benchmark, **performance, **explicit}
+    backend = (
+        source.get("backend")
+        or source.get("provider_kind")
+        or data.get("provider_kind")
+        or data.get("llm_mode")
+        or "unknown"
+    )
+    device = (
+        source.get("device")
+        or source.get("selected_device")
+        or data.get("selected_device")
+        or data.get("device")
+        or "unknown"
+    )
+    safe_workload_keys = {
+        "candidate_count", "viable_candidate_count", "scored_count", "t1_calls",
+        "t2_calls", "music_llm_calls", "panns_chunks", "model_count", "event_count",
+        "segment_count", "speaker_count", "frame_count", "duration_seconds",
+    }
+    workload = {
+        key: value for key, value in source.items()
+        if key in safe_workload_keys and isinstance(value, (bool, int, float, str))
+    }
+    workload_count = next(
+        (
+            value for key, value in workload.items()
+            if key.endswith("count") or key.endswith("chunks")
+        ),
+        None,
+    )
+    return {
+        "backend": str(backend)[:80],
+        "device": str(device)[:40],
+        "workload": workload,
+        "workload_count": workload_count,
+    }
+
+
+def _append_stage_timing(job: Job, record: dict[str, Any]) -> None:
+    path = stage_timing_path(job)
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        existing = {}
+    records = existing.get("stages", []) if isinstance(existing, dict) else []
+    if not isinstance(records, list):
+        records = []
+    records.append(record)
+    _atomic_write_json(
+        path,
+        {"schema_version": 1, "job_id": job.id, "stages": records},
+    )
+
+
 def write_checkpoint(job: Job, stage: str, schema_version: int, data: dict) -> None:
     prepared, descriptors = artifacts.prepare(job.dir, data, stage)
     envelope = {
@@ -307,6 +372,9 @@ class Stage:
     def artifacts_ok(self, ctx: StageContext, data: dict) -> bool:
         return True
 
+    def timing_metadata(self, data: dict) -> dict[str, Any]:
+        return _stage_timing_metadata(self, data)
+
 
 def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[str, dict]:
     """Run stages in order, skipping fresh checkpoints. Returns stage→data."""
@@ -324,8 +392,21 @@ def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[
             )
         if cached is not None and stage.artifacts_ok(ctx, cached):
             results[stage.name] = cached
+            _append_stage_timing(
+                job,
+                {
+                    "name": stage.name,
+                    "started_at": None,
+                    "finished_at": None,
+                    "active_seconds": 0.0,
+                    "cached": True,
+                    **stage.timing_metadata(cached),
+                },
+            )
             progress(stage.name, 1.0, "cached")
             continue
+        started_at = time.time()
+        started_mono = time.monotonic()
         mark_stage(job.id, stage.name, "running", stage.schema_version)
         progress(stage.name, -1.0, "starting")
         try:
@@ -333,10 +414,40 @@ def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[
         except StageError as err:
             err.stage = err.stage or stage.name
             mark_stage(job.id, stage.name, "failed", stage.schema_version, str(err))
+            _append_stage_timing(
+                job,
+                {
+                    "name": stage.name,
+                    "status": "failed",
+                    "started_at": round(started_at, 3),
+                    "finished_at": round(time.time(), 3),
+                    "active_seconds": round(max(0.0, time.monotonic() - started_mono), 3),
+                    "cached": False,
+                    "backend": "unknown",
+                    "device": "unknown",
+                    "workload": {},
+                    "workload_count": None,
+                },
+            )
             set_job_status(job.id, "failed", f"{stage.name}: {err}")
             raise
         except Exception as err:  # noqa: BLE001 - annotate, then protocol boundary handles it
             mark_stage(job.id, stage.name, "failed", stage.schema_version, repr(err))
+            _append_stage_timing(
+                job,
+                {
+                    "name": stage.name,
+                    "status": "failed",
+                    "started_at": round(started_at, 3),
+                    "finished_at": round(time.time(), 3),
+                    "active_seconds": round(max(0.0, time.monotonic() - started_mono), 3),
+                    "cached": False,
+                    "backend": "unknown",
+                    "device": "unknown",
+                    "workload": {},
+                    "workload_count": None,
+                },
+            )
             set_job_status(job.id, "failed", f"{stage.name}: {err!r}")
             raise StageExecutionError(stage.name, err) from err
         try:
@@ -344,9 +455,35 @@ def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[
         except artifacts.ArtifactError as err:
             message = f"{stage.name}: {err.message}"
             mark_stage(job.id, stage.name, "failed", stage.schema_version, message)
+            _append_stage_timing(
+                job,
+                {
+                    "name": stage.name,
+                    "status": "failed",
+                    "started_at": round(started_at, 3),
+                    "finished_at": round(time.time(), 3),
+                    "active_seconds": round(max(0.0, time.monotonic() - started_mono), 3),
+                    "cached": False,
+                    "backend": "unknown",
+                    "device": "unknown",
+                    "workload": {},
+                    "workload_count": None,
+                },
+            )
             set_job_status(job.id, "failed", message)
             raise StageError(message, code=err.code, stage=stage.name) from err
         results[stage.name] = data
+        _append_stage_timing(
+            job,
+            {
+                "name": stage.name,
+                "started_at": round(started_at, 3),
+                "finished_at": round(time.time(), 3),
+                "active_seconds": round(max(0.0, time.monotonic() - started_mono), 3),
+                "cached": False,
+                **stage.timing_metadata(data),
+            },
+        )
         progress(stage.name, 1.0, "done")
     set_job_status(job.id, "done", None)
     return results

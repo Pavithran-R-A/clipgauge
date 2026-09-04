@@ -65,9 +65,15 @@ def _cuda() -> dict[str, Any]:
         import ctranslate2  # type: ignore
 
         supported = sorted(ctranslate2.get_supported_compute_types("cuda"))
-        return {"available": True, "verified": True, "compute_types": supported}
+        device_count = int(ctranslate2.get_cuda_device_count())
+        return {
+            "available": True,
+            "verified": device_count > 0 and bool(supported),
+            "device_count": device_count,
+            "compute_types": supported,
+        }
     except (ImportError, RuntimeError, ValueError, AttributeError):
-        return {"available": False, "verified": False, "compute_types": []}
+        return {"available": False, "verified": False, "device_count": 0, "compute_types": []}
 
 
 def _vulkan() -> dict[str, Any]:
@@ -109,9 +115,45 @@ def snapshot(data_root: Path | None = None) -> dict[str, Any]:
 def select_asr_accelerator(capabilities: dict[str, Any]) -> tuple[str, str]:
     """Select only a backend with positive runtime evidence."""
     cuda = capabilities.get("cuda_ctranslate2") or {}
-    if cuda.get("verified") and cuda.get("compute_types"):
+    device_count = cuda.get("device_count")
+    has_device = device_count is None or int(device_count) > 0
+    if cuda.get("verified") and has_device and cuda.get("compute_types"):
         compute_types = set(cuda["compute_types"])
         for candidate in ("float16", "int8_float16", "int8"):
             if candidate in compute_types:
                 return "cuda", candidate
     return "cpu", "int8"
+
+
+def asr_readiness(capabilities: dict[str, Any]) -> dict[str, Any]:
+    """Return truthful ASR readiness without equating GPU detection to use."""
+    cuda = capabilities.get("cuda_ctranslate2") or {}
+    nvidia = capabilities.get("nvidia") or {}
+    device, compute_type = select_asr_accelerator(capabilities)
+    if device == "cuda":
+        return {
+            "state": "GPU ACCELERATED",
+            "device": device,
+            "compute_type": compute_type,
+            "reason": "CUDA runtime and device probe succeeded.",
+        }
+    if nvidia.get("available") and nvidia.get("verified"):
+        return {
+            "state": "GPU PRESENT — RUNTIME DEGRADED",
+            "device": "cpu",
+            "compute_type": compute_type,
+            "reason": "NVIDIA hardware is present, but CUDA speech execution is unverified.",
+        }
+    if cuda.get("available") and not cuda.get("verified"):
+        return {
+            "state": "GPU PROBE FAILED",
+            "device": "cpu",
+            "compute_type": compute_type,
+            "reason": "CUDA speech runtime did not verify a usable device.",
+        }
+    return {
+        "state": "CPU FALLBACK",
+        "device": "cpu",
+        "compute_type": compute_type,
+        "reason": "No verified speech accelerator is available.",
+    }

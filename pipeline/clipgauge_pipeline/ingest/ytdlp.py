@@ -24,7 +24,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
@@ -37,12 +37,39 @@ ProgressFn = Callable[[float, str], None]  # (fraction 0..1 or -1, message)
 _provider_supervisor = youtube_compat.ProviderSupervisor()
 
 
+def _stop_operation_provider() -> None:
+    stop = getattr(_provider_supervisor, "stop", None)
+    if callable(stop):
+        stop()
+
+
 def _needs_youtube_provider(url: str) -> bool:
     host = (urlsplit(url).hostname or "").lower()
     return host == "youtu.be" or host.endswith("youtube.com") or host.endswith("youtube-nocookie.com")
 
 
-SUPPORTED_BROWSER_SESSIONS = {"chrome", "chromium", "edge", "firefox", "brave", "opera", "safari", "vivaldi"}
+def normalize_youtube_url(url: str) -> str:
+    """Canonicalize supported share links before metadata or media transfer."""
+    parsed = urlsplit(url.strip())
+    host = (parsed.hostname or "").lower()
+    if host == "youtu.be":
+        video_id = parsed.path.strip("/").split("/", 1)[0]
+    elif host.endswith("youtube.com") or host.endswith("youtube-nocookie.com"):
+        if parsed.path.rstrip("/") == "/watch":
+            video_id = parse_qs(parsed.query).get("v", [""])[0]
+        elif parsed.path.startswith(("/shorts/", "/embed/")):
+            video_id = parsed.path.split("/", 2)[2]
+        else:
+            video_id = ""
+    else:
+        return url
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,32}", video_id):
+        raise YtDlpError("This YouTube link is missing a valid video ID.", code="YTDLP_URL_INVALID", retryable=False)
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
+# Keep the desktop fallback limited to browsers covered by this path.
+SUPPORTED_BROWSER_SESSIONS = {"chrome", "chromium", "firefox"}
 
 
 def _browser_auth_args(browser: str | None) -> list[str]:
@@ -54,7 +81,7 @@ def _browser_auth_args(browser: str | None) -> list[str]:
     return ["--cookies-from-browser", normalized]
 
 
-def _youtube_provider_args(url: str, compatibility_method: str = "bgutil") -> list[str]:
+def _youtube_provider_args(url: str, compatibility_method: str = "mweb") -> list[str]:
     if not _needs_youtube_provider(url):
         return []
     try:
@@ -75,7 +102,8 @@ def _youtube_provider_args(url: str, compatibility_method: str = "bgutil") -> li
             retryable=True,
         )
     provider_args = [
-        "--plugin-dirs", str(youtube_compat.plugin_dir()),
+        "--plugin-dirs", str(youtube_compat.plugin_dir().parent),
+        "--js-runtimes", f"node:{youtube_compat.node_path()}",
         "--extractor-args", f"youtubepot-bgutilhttp:base_url={endpoint}",
     ]
     if compatibility_method == "mweb":
@@ -342,19 +370,24 @@ def _pick_playlist_entry(data: dict) -> dict:
     return merged
 
 
-def fetch_meta(url: str, progress: ProgressFn, cookies_from_browser: str | None = None, compatibility_method: str = "bgutil") -> UrlMeta:
+def fetch_meta(url: str, progress: ProgressFn, cookies_from_browser: str | None = None, compatibility_method: str = "mweb") -> UrlMeta:
     bin_path = ensure_ytdlp(progress)
+    source_url = normalize_youtube_url(url) if _needs_youtube_provider(url) else url
 
     def _go() -> str:
-        args = [*_youtube_provider_args(url, compatibility_method=compatibility_method), *_browser_auth_args(cookies_from_browser)]
+        args = [*_youtube_provider_args(source_url, compatibility_method=compatibility_method), *_browser_auth_args(cookies_from_browser)]
         try:
-            return _run(bin_path, [*args, "-J", "--no-playlist", "--no-warnings", url])
+            return _run(bin_path, [*args, "-J", "--no-playlist", "--no-warnings", source_url])
         except YtDlpError as error:
             if error.details:
                 error.details["method"] = compatibility_method
             raise
 
-    out = _with_self_update_retry(bin_path, progress, _go)
+    try:
+        out = _with_self_update_retry(bin_path, progress, _go)
+    finally:
+        if _needs_youtube_provider(source_url):
+            _stop_operation_provider()
     data = json.loads(out)
     if data.get("_type") == "playlist":
         data = _pick_playlist_entry(data)
@@ -377,7 +410,7 @@ def fetch_meta(url: str, progress: ProgressFn, cookies_from_browser: str | None 
         id=str(data.get("id", "video")),
         title=str(data.get("title", "Imported video")),
         duration_sec=float(data["duration"]),
-        webpage_url=str(data.get("webpage_url") or data.get("url") or url),
+        webpage_url=str(data.get("webpage_url") or data.get("url") or source_url),
         heatmap=heatmap,
         raw=data,
     )
@@ -390,18 +423,19 @@ DOWNLOAD_FORMAT = (
 MWEB_DOWNLOAD_FORMAT = f"bv*[height<={config.MAX_HEIGHT}]+ba/b[height<={config.MAX_HEIGHT}]/b"
 
 
-def download_format_for(compatibility_method: str = "bgutil") -> str:
+def download_format_for(compatibility_method: str = "mweb") -> str:
     """Use yt-dlp automatic compatible formats for guest-client fallback."""
     return MWEB_DOWNLOAD_FORMAT if compatibility_method == "mweb" else DOWNLOAD_FORMAT
 
 _PCT_RE = re.compile(r"\[download\]\s+([\d.]+)%")
 
 
-def download(url: str, out_path: Path, progress: ProgressFn, cookies_from_browser: str | None = None, compatibility_method: str = "bgutil") -> None:
+def download(url: str, out_path: Path, progress: ProgressFn, cookies_from_browser: str | None = None, compatibility_method: str = "mweb") -> None:
     bin_path = ensure_ytdlp(progress)
+    source_url = normalize_youtube_url(url) if _needs_youtube_provider(url) else url
     ffmpeg = shutil.which("ffmpeg")
     args = [
-        *_youtube_provider_args(url, compatibility_method=compatibility_method),
+        *_youtube_provider_args(source_url, compatibility_method=compatibility_method),
         *_browser_auth_args(cookies_from_browser),
         "-f", download_format_for(compatibility_method),
         "--merge-output-format", "mp4",
@@ -412,7 +446,7 @@ def download(url: str, out_path: Path, progress: ProgressFn, cookies_from_browse
     ]
     if ffmpeg:
         args += ["--ffmpeg-location", ffmpeg]
-    args += ["-o", str(out_path), url]
+    args += ["-o", str(out_path), source_url]
 
     def _on_line(line: str) -> None:
         m = _PCT_RE.search(line)
@@ -430,7 +464,11 @@ def download(url: str, out_path: Path, progress: ProgressFn, cookies_from_browse
                 error.details["method"] = compatibility_method
             raise
 
-    _with_self_update_retry(bin_path, progress, _go)
+    try:
+        _with_self_update_retry(bin_path, progress, _go)
+    finally:
+        if _needs_youtube_provider(source_url):
+            _stop_operation_provider()
     if not out_path.exists():
         # yt-dlp may add an extension when the template lacks one
         candidates = list(out_path.parent.glob(out_path.name + ".*"))

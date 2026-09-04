@@ -53,11 +53,40 @@ def _stderr_tail(root: Path, path: Path | None, limit: int = 3_000) -> str | Non
     except OSError:
         return None
 
-from . import config, runtime
+
+from . import config, hardware, runtime
 
 
 class LocalRuntimeError(RuntimeError):
     """The managed local runtime cannot be started or verified."""
+
+
+def select_runtime_asset_key(
+    *,
+    platform_key: str,
+    nvidia_available: bool,
+    vulkan_available: bool,
+    cuda_available: bool = False,
+    available_keys: set[str],
+) -> str:
+    """Choose CUDA first, then Vulkan, with CPU fallback.
+
+    CUDA requires both verified CTranslate2 CUDA support and the managed CUDA
+    runtime. Vulkan remains the Windows GPU fallback. A verified NVIDIA device
+    is sufficient to prefer either GPU backend; llama-server health checks remain
+    the final runtime verification boundary.
+    """
+    cuda_key = f"{platform_key}-cuda"
+    if platform_key == "windows-x86_64" and cuda_key in available_keys and cuda_available and nvidia_available:
+        return cuda_key
+    gpu_key = f"{platform_key}-vulkan"
+    if (
+        platform_key == "windows-x86_64"
+        and gpu_key in available_keys
+        and (nvidia_available or vulkan_available)
+    ):
+        return gpu_key
+    return platform_key
 
 
 @dataclass(frozen=True)
@@ -118,6 +147,7 @@ class LocalRuntime:
         self.root.mkdir(parents=True, exist_ok=True)
         self.manifest = manifest or self._load_manifest()
         self.handle: LocalServerHandle | None = None
+        self._runtime_asset_key_cache: str | None = None
 
     def _load_manifest(self) -> dict[str, Any]:
         path = Path(__file__).parents[1] / "runtime-manifest.json"
@@ -133,15 +163,72 @@ class LocalRuntime:
             return "macos-arm64" if machine in {"arm64", "aarch64"} else "macos-x86_64"
         return "linux-x86_64" if machine in {"x86_64", "amd64"} else "linux-arm64"
 
+    def runtime_asset_key(self) -> str:
+        if self._runtime_asset_key_cache is not None:
+            return self._runtime_asset_key_cache
+        platform_key = self._platform_key()
+        assets = self.manifest.get("runtimes", {}).get("llama-server", {}).get("assets", {})
+        if platform_key not in assets:
+            raise LocalRuntimeError("ClipGauge Local is not available for this platform yet.")
+        nvidia_available = False
+        vulkan_available = False
+        cuda_available = False
+        if platform_key == "windows-x86_64":
+            try:
+                capabilities = hardware.snapshot(self.root)
+                nvidia_available = bool((capabilities.get("nvidia") or {}).get("verified"))
+                vulkan_available = bool((capabilities.get("vulkan") or {}).get("verified"))
+                if self.root == config.home_dir().resolve():
+                    from .models import managed
+
+                    cuda_available = managed.cuda_runtime_ready() and bool(
+                        (capabilities.get("cuda_ctranslate2") or {}).get("verified")
+                    )
+            except Exception:  # noqa: BLE001 - capability probing must never remove CPU fallback
+                pass
+        selected = select_runtime_asset_key(
+            platform_key=platform_key,
+            nvidia_available=nvidia_available,
+            vulkan_available=vulkan_available,
+            cuda_available=cuda_available,
+            available_keys=set(assets),
+        )
+        self._runtime_asset_key_cache = selected
+        return selected
+
     def runtime_asset(self) -> dict[str, Any]:
         try:
-            return self.manifest["runtimes"]["llama-server"]["assets"][self._platform_key()]
+            return self.manifest["runtimes"]["llama-server"]["assets"][self.runtime_asset_key()]
         except KeyError as exc:
             raise LocalRuntimeError("ClipGauge Local is not available for this platform yet.") from exc
 
+    def runtime_backend(self) -> str:
+        return str(self.runtime_asset().get("backend", "cpu"))
+
+    def runtime_library_dir(self) -> Path | None:
+        """Return verified local CUDA libraries for the child runtime."""
+        if self.runtime_backend() != "cuda":
+            return None
+        if self.root != config.home_dir().resolve():
+            return None
+        from .models import managed
+
+        return managed.CUDA_RUNTIME_DIR if managed.cuda_runtime_ready() else None
+
+    def _runtime_destination(self) -> Path:
+        version = str(self.manifest["runtimes"]["llama-server"]["version"])
+        base = self.root / "runtimes" / "llama-server" / version
+        key = self.runtime_asset_key()
+        # Preserve the existing CPU path for compatibility. GPU variants live in
+        # their own directory so an old CPU executable can never masquerade as
+        # an accelerated installation.
+        if key == self._platform_key():
+            return base
+        return base / key
+
     def binary_path(self) -> Path:
         asset = self.runtime_asset()
-        destination = self.root / "runtimes" / "llama-server" / self.manifest["runtimes"]["llama-server"]["version"]
+        destination = self._runtime_destination()
         binary = Path(asset["binary"])
         path = (destination / binary).resolve()
         if path != self.root and self.root not in path.parents:
@@ -178,7 +265,7 @@ class LocalRuntime:
         asset = self.runtime_asset()
         if runtime.sha256_file(archive).lower() != str(asset["sha256"]).lower():
             raise LocalRuntimeError("The llama.cpp runtime archive failed SHA-256 verification.")
-        destination = self.root / "runtimes" / "llama-server" / self.manifest["runtimes"]["llama-server"]["version"]
+        destination = self._runtime_destination()
         runtime.extract_archive_verified(archive, destination, archive_type=str(asset["archive_type"]))
         binary = self.binary_path()
         if not binary.is_file():
@@ -210,7 +297,7 @@ class LocalRuntime:
             raise LocalRuntimeError(
                 "The selected ClipGauge Local model failed verification. Delete it and retry the verified download."
             ) from exc
-        return [
+        command = [
             str(binary),
             "--model",
             str(model),
@@ -226,6 +313,50 @@ class LocalRuntime:
             "--reasoning",
             "off",
         ]
+        if self.runtime_backend() in {"vulkan", "cuda", "metal"}:
+            command.extend(["--n-gpu-layers", "999"])
+        return command
+
+    def probe_inference(self, endpoint: str, model_id: str, *, backend: str) -> dict[str, Any]:
+        """Verify one bounded local inference without recording its content."""
+        started_at = time.monotonic()
+        try:
+            response = httpx.post(
+                endpoint.rstrip("/") + "/chat/completions",
+                json={
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": "Reply with exactly OK."}],
+                    "max_tokens": 1,
+                    "temperature": 0,
+                    "stream": False,
+                },
+                timeout=15.0,
+                follow_redirects=False,
+            )
+            payload = response.json()
+            choices = payload.get("choices") if isinstance(payload, dict) else None
+            message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+            reply = message.get("content") if isinstance(message, dict) else None
+            usage = payload.get("usage") if isinstance(payload, dict) else None
+            generated_tokens = usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0
+            ok = response.status_code == 200 and reply.strip() == "OK" if isinstance(reply, str) else False
+            result = {
+                "ok": ok,
+                "backend": backend,
+                "generated_tokens": int(generated_tokens or 0),
+                "duration_sec": round(time.monotonic() - started_at, 3),
+            }
+            if not ok:
+                result["reason"] = "Local inference returned an invalid response."
+            return result
+        except (httpx.HTTPError, ValueError, TypeError, KeyError):
+            return {
+                "ok": False,
+                "backend": backend,
+                "generated_tokens": 0,
+                "duration_sec": round(time.monotonic() - started_at, 3),
+                "reason": "Local inference verification failed.",
+            }
 
     def start(self, model_id: str, endpoint: str | None = None) -> str:
         if self.handle and self.handle.process.poll() is None:
@@ -234,20 +365,24 @@ class LocalRuntime:
         port = self._port(endpoint)
         command = self.command(model_id, port)
         model = self.model_path(model_id)
+        backend = self.runtime_backend()
         started_at = time.monotonic()
         stderr_path = self.root / "diagnostics" / "local-runtime.stderr.log" if _qa_trace_enabled() else None
         if stderr_path:
             stderr_path.parent.mkdir(parents=True, exist_ok=True)
         stderr_handle = stderr_path.open("w", encoding="utf-8") if stderr_path else None
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name != "nt" else 0
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
         _qa_trace(
             self.root,
             "runtime_start",
             runtime_version=self.manifest["runtimes"]["llama-server"]["version"],
+            runtime_asset_key=self.runtime_asset_key(),
+            backend=backend,
             model_id=model_id,
             model_size_bytes=model.stat().st_size,
             context_size=4096,
             parallel=1,
+            gpu_layers=999 if backend in {"vulkan", "cuda", "metal"} else 0,
             reasoning="off",
             cpu_threads_configured=None,
             endpoint_kind="loopback",
@@ -259,6 +394,11 @@ class LocalRuntime:
             "stderr": stderr_handle or subprocess.DEVNULL,
             "creationflags": creationflags,
         }
+        library_dir = self.runtime_library_dir()
+        if library_dir is not None:
+            child_env = os.environ.copy()
+            child_env["PATH"] = str(library_dir) + os.pathsep + child_env.get("PATH", "")
+            popen_kwargs["env"] = child_env
         if os.name != "nt":
             popen_kwargs["start_new_session"] = True
         try:
@@ -288,14 +428,32 @@ class LocalRuntime:
                     except (httpx.HTTPError, ValueError, TypeError, KeyError):
                         slots_keys = []
                         slots_status = None
+                    inference = self.probe_inference(api, model_id, backend=backend)
+                    _qa_trace(
+                        self.root,
+                        "inference_probe",
+                        ok=inference["ok"],
+                        backend=backend,
+                        generated_tokens=inference["generated_tokens"],
+                        duration_sec=inference["duration_sec"],
+                    )
+                    if not inference["ok"]:
+                        self.stop_process(process)
+                        raise LocalRuntimeError(
+                            "ClipGauge Local runtime started, but its bounded inference check failed."
+                        )
                     _qa_trace(
                         self.root,
                         "ready",
                         health_status=response.status_code,
                         ready_seconds=round(time.monotonic() - started_at, 3),
                         process_pid=process.pid,
+                        backend=backend,
                         slots_status=slots_status,
                         slots_keys=slots_keys,
+                        inference_verified=True,
+                        inference_duration_sec=inference["duration_sec"],
+                        generated_tokens=inference["generated_tokens"],
                     )
                     self.handle = LocalServerHandle(process=process, endpoint=api, model_id=model_id)
                     return api

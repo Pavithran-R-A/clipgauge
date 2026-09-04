@@ -64,20 +64,31 @@ def test_youtube_readiness_reports_install_and_build_boundaries(monkeypatch, tmp
     assert result['ready'] is False
 
 
-def test_youtube_readiness_requires_healthy_loopback_provider(monkeypatch, tmp_path):
+def test_youtube_setup_group_includes_pinned_ytdlp_asset():
+    asset_ids = {asset.asset_id for asset in youtube_compat.assets()}
+    assert any(asset_id.startswith('runtime:yt-dlp:') for asset_id in asset_ids)
+
+
+def test_youtube_readiness_does_not_block_on_dormant_provider(monkeypatch, tmp_path):
+    self_tests = []
     monkeypatch.setattr(youtube_compat.config, 'home_dir', lambda: tmp_path)
     monkeypatch.setattr(youtube_compat, '_yt_dlp_ready', lambda: True)
     monkeypatch.setattr(youtube_compat.DownloadManager, 'inventory', lambda self, assets: [
         {'asset_id': asset.asset_id, 'installed': True, 'status': 'ready'} for asset in assets
     ])
     monkeypatch.setattr(youtube_compat, '_server_ready', lambda: True)
-    monkeypatch.setattr(youtube_compat.ProviderSupervisor, 'self_test', lambda self: {
+    monkeypatch.setattr(youtube_compat, '_provider_plugin_ready', lambda: True)
+    monkeypatch.setattr(youtube_compat.ProviderSupervisor, 'self_test', lambda self: (self_tests.append(True) or {
         'plugin_discoverable': True, 'server_installed': True,
         'health': {'healthy': False, 'running': False}, 'loopback_only': True, 'ok': False,
-    })
+    }))
     result = youtube_compat.readiness()
-    assert result['state'] == 'UNHEALTHY'
-    assert result['ready'] is False
+    assert result['state'] == 'DEPENDENCIES_READY'
+    assert result['dependency_state'] == 'DEPENDENCIES_READY'
+    assert result['ready'] is True
+    assert result['provider_state'] == 'DORMANT'
+    assert result['public_download_verified'] is False
+    assert self_tests == []
 
 
 def test_youtube_test_refreshes_loopback_health_on_success(monkeypatch, tmp_path):
@@ -139,6 +150,7 @@ def test_youtube_readiness_distinguishes_dependencies_from_public_download(monke
         {'asset_id': asset.asset_id, 'installed': True, 'status': 'ready'} for asset in assets
     ])
     monkeypatch.setattr(youtube_compat, '_server_ready', lambda: True)
+    monkeypatch.setattr(youtube_compat, '_provider_plugin_ready', lambda: True)
     monkeypatch.setattr(youtube_compat.ProviderSupervisor, 'self_test', lambda self: {
         'plugin_discoverable': True, 'server_installed': True,
         'health': {'healthy': True, 'running': True, 'version': '1.3.2'}, 'loopback_only': True, 'ok': True,
@@ -240,6 +252,7 @@ def test_readiness_exposes_wpc_as_optional_metadata_only(monkeypatch, tmp_path):
         {'asset_id': asset.asset_id, 'installed': True, 'status': 'ready'} for asset in assets
     ])
     monkeypatch.setattr(youtube_compat, '_server_ready', lambda: True)
+    monkeypatch.setattr(youtube_compat, '_provider_plugin_ready', lambda: True)
     monkeypatch.setattr(youtube_compat.ProviderSupervisor, 'self_test', lambda self: {
         'plugin_discoverable': True, 'server_installed': True,
         'health': {'healthy': True, 'running': True, 'version': '1.3.2'}, 'loopback_only': True, 'ok': True,
@@ -259,10 +272,67 @@ def test_mweb_fallback_uses_supported_automatic_format_selection():
     assert 'height<=' in selected
 
 
+def test_youtube_guest_defaults_to_mweb_client():
+    from clipgauge_pipeline.ingest import ytdlp
+
+    class StubSupervisor:
+        def start(self):
+            return 'http://127.0.0.1:4416'
+
+        def self_test(self):
+            return {'ok': True}
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(ytdlp, '_provider_supervisor', StubSupervisor())
+        args = ytdlp._youtube_provider_args('https://www.youtube.com/watch?v=aqz-KE-bpKQ')
+    finally:
+        monkeypatch.undo()
+
+    assert 'youtube:player_client=mweb' in ' '.join(args)
+
+
+def test_youtube_metadata_failure_stops_operation_scoped_provider(monkeypatch, tmp_path):
+    from clipgauge_pipeline.ingest import ytdlp
+
+    class StubSupervisor:
+        def __init__(self):
+            self.stopped = False
+
+        def start(self):
+            return 'http://127.0.0.1:4416'
+
+        def self_test(self):
+            return {'ok': True}
+
+        def stop(self):
+            self.stopped = True
+
+    supervisor = StubSupervisor()
+    monkeypatch.setattr(ytdlp, '_provider_supervisor', supervisor)
+    monkeypatch.setattr(ytdlp, 'ensure_ytdlp', lambda progress: tmp_path / 'yt-dlp.exe')
+    monkeypatch.setattr(ytdlp, '_run', lambda *args, **kwargs: (_ for _ in ()).throw(ytdlp.YtDlpError('blocked', code='YTDLP_ATTESTATION_REQUIRED')))
+
+    with pytest.raises(ytdlp.YtDlpError):
+        ytdlp.fetch_meta('https://www.youtube.com/watch?v=aqz-KE-bpKQ', lambda *_: None)
+
+    assert supervisor.stopped is True
+
+
 def test_local_file_fallback_bypasses_all_youtube_providers():
     from clipgauge_pipeline.ingest import ytdlp
     assert ytdlp._youtube_provider_args('/managed/jobs/example/media.mp4') == []
     assert ytdlp._needs_youtube_provider('/managed/jobs/example/media.mp4') is False
+
+
+def test_youtube_share_urls_normalize_without_timestamp_parameter():
+    from clipgauge_pipeline.ingest import ytdlp
+
+    canonical = 'https://www.youtube.com/watch?v=_AbFXuGDRTs'
+
+    assert ytdlp.normalize_youtube_url('https://www.youtube.com/watch?v=_AbFXuGDRTs&t=41s') == canonical
+    assert ytdlp.normalize_youtube_url('https://youtu.be/_AbFXuGDRTs?t=41') == canonical
+    assert ytdlp.normalize_youtube_url('https://www.youtube-nocookie.com/watch?v=_AbFXuGDRTs&feature=share') == canonical
 
 
 def test_ytdlp_classifies_provider_startup_failure(monkeypatch):

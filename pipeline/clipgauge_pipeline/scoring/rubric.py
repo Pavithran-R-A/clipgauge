@@ -43,12 +43,118 @@ T1_SCHEMA: dict[str, Any] = {
             "description": "engagement-bait phrases present (like/subscribe/comment below); NEGATIVE signal",
         },
         "summary": {"type": "string", "description": "one sentence: what happens in this moment"},
+        "hook_strength": {"type": "integer", "minimum": 0, "maximum": 10},
+        "hook_reason": {
+            "type": "string",
+            "enum": ["question", "claim", "conflict", "specific_reveal", "reaction", "none"],
+        },
+        "standalone_comprehension": {"type": "integer", "minimum": 0, "maximum": 10},
+        "setup_strength": {"type": "integer", "minimum": 0, "maximum": 10},
+        "escalation_strength": {"type": "integer", "minimum": 0, "maximum": 10},
+        "payoff_strength": {"type": "integer", "minimum": 0, "maximum": 10},
+        "payoff_location": {"type": "string", "enum": ["early", "middle", "late", "none"]},
+        "ending_completeness": {"type": "integer", "minimum": 0, "maximum": 10},
+        "story_shape": {
+            "type": "string",
+            "enum": ["hook_setup_payoff", "question_answer", "conflict_reaction", "reveal", "open_ended", "none"],
+        },
+        "information_density": {"type": "integer", "minimum": 0, "maximum": 10},
+        "reaction_strength": {"type": "integer", "minimum": 0, "maximum": 10},
+        "recommended_start_offset": {"type": "number", "minimum": 0, "maximum": 10},
+        "recommended_end_offset": {"type": "number", "minimum": 0, "maximum": 120},
     },
     "required": [
         "hook", "hook_type", "funniness", "punchline_index", "shock",
         "curiosity_gap", "value", "self_contained", "bait_phrases", "summary",
+        "hook_strength", "hook_reason", "standalone_comprehension", "setup_strength",
+        "escalation_strength", "payoff_strength", "payoff_location", "ending_completeness",
+        "story_shape", "information_density", "reaction_strength",
+        "recommended_start_offset", "recommended_end_offset",
     ],
 }
+
+BALANCED_REQUIRED_FIELDS = (
+    "central_premise",
+    "payoff_sentence_id",
+    "payoff_relevance_to_premise",
+    "topic_coherence",
+    "topic_shift_count",
+    "late_new_topic",
+    "syntactic_complete",
+    "semantic_closure",
+    "open_loop_at_end",
+    "quality_tier",
+)
+
+BALANCED_BASE_REQUIRED_FIELDS = (
+    "hook",
+    "funniness",
+    "shock",
+    "curiosity_gap",
+    "value",
+    "bait_phrases",
+    "summary",
+    "hook_strength",
+    "hook_reason",
+    "standalone_comprehension",
+    "setup_strength",
+    "escalation_strength",
+    "payoff_strength",
+    "payoff_location",
+    "ending_completeness",
+    "story_shape",
+    "recommended_start_offset",
+    "recommended_end_offset",
+)
+
+
+BALANCED_T1_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        **{
+            name: T1_SCHEMA["properties"][name]
+            for name in BALANCED_BASE_REQUIRED_FIELDS
+        },
+        "central_premise": {"type": "string"},
+        "payoff_sentence_id": {"type": ["string", "null"]},
+        "payoff_relevance_to_premise": {"type": "number", "minimum": 0, "maximum": 10},
+        "topic_coherence": {"type": "number", "minimum": 0, "maximum": 10},
+        "topic_shift_count": {"type": "integer", "minimum": 0},
+        "late_new_topic": {"type": "boolean"},
+        "syntactic_complete": {"type": "boolean"},
+        "semantic_closure": {"type": "number", "minimum": 0, "maximum": 10},
+        "open_loop_at_end": {"type": "boolean"},
+        "quality_tier": {
+            "type": "string",
+            "enum": ["REJECTED", "STRUCTURALLY_VALID", "GOOD", "STRONG"],
+        },
+    },
+    "required": [*BALANCED_BASE_REQUIRED_FIELDS, *BALANCED_REQUIRED_FIELDS],
+}
+
+
+def schema_for_model(model_id: str) -> dict[str, Any]:
+    """Use the richer contract only for the managed balanced model."""
+    return BALANCED_T1_SCHEMA if model_id == "clipgauge-local/qwen3-4b-q4_k_m" else T1_SCHEMA
+
+
+def normalize_balanced_output(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize the model's explicit no-payoff sentinel without mutation."""
+    normalized = dict(payload)
+    payoff_id = normalized.get("payoff_sentence_id")
+    if isinstance(payoff_id, str) and payoff_id.strip().lower() in {"", "none", "null"}:
+        normalized["payoff_sentence_id"] = None
+    return normalized
+
+
+def validate_balanced_output(payload: dict[str, Any], allowed_sentence_ids: set[str]) -> None:
+    """Reject balanced judgments that invent a payoff sentence identity."""
+    missing = [field for field in BALANCED_REQUIRED_FIELDS if field not in payload]
+    if missing:
+        raise ValueError(f"balanced output is missing required fields: {', '.join(missing)}")
+    payoff_id = payload.get("payoff_sentence_id")
+    if payoff_id is not None and str(payoff_id) not in allowed_sentence_ids:
+        raise ValueError("balanced output payoff_sentence_id is not in the supplied transcript")
 
 T2_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -79,7 +185,21 @@ def t1_prompt(transcript_text: str, context: dict) -> str:
         "dimension should be rare. hook rates ONLY the first ~3 seconds. "
         "shock is about content (surprising/taboo), independent of hook. "
         "punchline_index is the 0-based index (counting every word in order) "
-        "of the word where the biggest laugh lands, or -1."
+        "of the word where the biggest laugh lands, or -1.\n"
+        "Also return the bounded short-form fields. Use only facts visible in "
+        "the transcript and listed events. Each transcript line begins with its "
+        "source sentence ID. Use only those IDs for payoff_sentence_id. Offsets "
+        "are seconds relative to this candidate. Choose payoff_location=none "
+        "when no payoff exists. Return central_premise, payoff_sentence_id, "
+        "payoff_relevance_to_premise, topic_coherence, topic_shift_count, "
+        "late_new_topic, syntactic_complete, semantic_closure, "
+        "open_loop_at_end, and quality_tier when requested by the schema. "
+        "Use 0 only when a dimension is genuinely absent. "
+        "Use the supplied sentence ID for a visible payoff. "
+        "Set payoff_sentence_id to null when no payoff exists. "
+        "quality_tier must agree with the numeric fields. "
+        "Treat a final question or newly introduced topic as weak semantic "
+        "closure, even when grammatically complete."
     )
 
 
