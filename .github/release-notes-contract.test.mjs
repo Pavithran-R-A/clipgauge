@@ -65,3 +65,14 @@ test('uploads model failure diagnostics without masking failures', () => {
   }
   assert.match(modelJob, /failure-summary\.txt/)
 })
+
+test('uses a deterministic multi-segment genuine speech acceptance input', () => {
+  const start = workflow.indexOf('  model-e2e-release:')
+  const end = workflow.indexOf('  release-metadata:', start)
+  const modelJob = workflow.slice(start, end)
+  assert.match(modelJob, /anullsrc=r=16000:cl=mono:d=1/)
+  assert.match(modelJob, /concat=n=5:v=0:a=1/)
+  assert.match(modelJob, /asplit=3\[speech1\]\[speech2\]\[speech3\]/)
+  assert.match(modelJob, /acceptance\.flac/)
+  assert.doesNotMatch(modelJob, /-stream_loop -1 -i tests\/fixtures\/v041-jfk\.flac/)
+})
