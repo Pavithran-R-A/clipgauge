@@ -349,19 +349,38 @@ jobs:
       - name: Resolve full pipeline environment
         working-directory: pipeline
         run: uv sync --dev
-      - name: Install managed ASR assets with explicit setup consent
+      - name: Install verified model assets with bounded retries
         working-directory: pipeline
+        shell: bash
         run: |
-          uv run clipgauge --jsonl setup install-group --group core:asr | tee "$GITHUB_WORKSPACE/setup-asr.jsonl"
-      - name: Install managed analysis assets with explicit setup consent
-        working-directory: pipeline
-        run: |
-          uv run clipgauge --jsonl setup install-group --group core:analysis | tee "$GITHUB_WORKSPACE/setup-analysis.jsonl"
-      - name: Install managed local runtime and model with explicit setup consent
-        working-directory: pipeline
-        run: |
-          uv run clipgauge --jsonl setup install-runtime | tee "$GITHUB_WORKSPACE/setup-runtime.jsonl"
-          uv run clipgauge --jsonl setup download-model clipgauge-local/qwen3-1.7b-q8_0 | tee "$GITHUB_WORKSPACE/setup-model.jsonl"
+          set -euo pipefail
+          install_verified() {
+            local label="$1"
+            local log_path="$2"
+            shift 2
+            local delay=15
+            for attempt in 1 2 3 4; do
+              echo "Installing verified $label (attempt $attempt/4)"
+              if "$@" | tee "$GITHUB_WORKSPACE/$log_path"; then
+                return 0
+              fi
+              if [ "$attempt" -eq 4 ]; then
+                return 1
+              fi
+              echo "Retrying $label in ${delay}s"
+              sleep "$delay"
+              delay=$((delay * 2))
+            done
+          }
+
+          install_verified "ASR assets" setup-asr.jsonl \
+            uv run clipgauge --jsonl setup install-group --group core:asr
+          install_verified "analysis assets" setup-analysis.jsonl \
+            uv run clipgauge --jsonl setup install-group --group core:analysis
+          install_verified "local runtime" setup-runtime.jsonl \
+            uv run clipgauge --jsonl setup install-runtime
+          install_verified "local model" setup-model.jsonl \
+            uv run clipgauge --jsonl setup download-model clipgauge-local/qwen3-1.7b-q8_0
       - name: Build the genuine speech acceptance input
         working-directory: pipeline
         run: |

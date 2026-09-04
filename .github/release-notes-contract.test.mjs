@@ -29,3 +29,20 @@ test('preserves literal Markdown filenames in generated notes', () => {
   }
   assert.doesNotMatch(notes, /its summary is attached as \./)
 })
+
+test('keeps production model setup retries bounded and verified', () => {
+  const start = workflow.indexOf('  model-e2e-release:')
+  const end = workflow.indexOf('  release-metadata:', start)
+  assert.notEqual(start, -1, 'model E2E job is missing')
+  assert.notEqual(end, -1, 'release metadata job is missing')
+  const modelJob = workflow.slice(start, end)
+  assert.match(modelJob, /for attempt in 1 2 3 4;/)
+  for (const label of ['ASR assets', 'analysis assets', 'local runtime', 'local model']) {
+    assert.match(modelJob, new RegExp(`install_verified "${label}"`))
+  }
+  assert.match(modelJob, /setup install-group --group core:asr/)
+  assert.match(modelJob, /setup install-group --group core:analysis/)
+  assert.match(modelJob, /setup install-runtime/)
+  assert.match(modelJob, /setup download-model clipgauge-local\/qwen3-1\.7b-q8_0/)
+  assert.doesNotMatch(modelJob, /while true|for \(;;\)/)
+})

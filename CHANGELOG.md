@@ -2,6 +2,39 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.5] — 2026-09-04
+
+ClipGauge v0.5.5 improves the Windows creator path, export reliability, local processing, and short-form selection quality.
+
+### Improved
+
+- Made local runtime and GPU-aware processing more reliable on Windows.
+- Added bounded processing paths for editorial candidate scoring.
+- Improved story-aware selection and the Balanced local scoring path.
+- Strengthened YouTube source handling and verified creator-asset setup.
+
+### Fixed
+
+- Added native Save As export destinations with managed-artifact checks.
+- Improved Windows process lifetime and encoder fallback behavior.
+- Required exact valid responses from local runtime health checks.
+- Standardized ASR degraded-state reporting across platforms.
+- Added bounded retries for transient verified asset downloads.
+
+### Validation
+
+- Python, frontend, and Rust suites passed with 324, 65, and 62 tests.
+- Exact-head CI, Windows, macOS, and Secret Scan gates passed.
+- Packaged Windows UI qualification passed after merge.
+- Controlled Balanced editorial scoring evidence passed its quality contract.
+
+### Known limitations
+
+- Linux and Windows artifacts remain unsigned.
+- macOS qualification does not imply signing or notarization.
+- Provider quotas and YouTube availability remain environment dependent.
+- Local AI speed depends on hardware and selected model.
+
 ## [0.5.4] — 2026-08-30
 
 ClipGauge v0.5.4 closes the Windows release-candidate repair and qualification work.
