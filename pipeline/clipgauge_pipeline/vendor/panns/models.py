@@ -169,8 +169,8 @@ class Cnn14_DecisionLevelMax(nn.Module):
 
 
 def load_model(checkpoint_path: str, device: torch.device) -> Cnn14_DecisionLevelMax:
-    model = Cnn14_DecisionLevelMax()
     verified_path = registry.require_verified_model(specs.PANNS_CNN14_MAX, checkpoint_path)
+    model = Cnn14_DecisionLevelMax()
     checkpoint = torch.load(verified_path, map_location=device, weights_only=True)
     model.load_state_dict(checkpoint["model"], strict=False)
     model.to(device)

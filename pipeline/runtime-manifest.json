@@ -44,16 +44,16 @@
       }
     },
     "ffmpeg": {
-      "version": "autobuild-2026-08-18-15-03-N-126207-g21bbd98e7b",
-      "provenance": "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-08-18-15-03",
-      "license": "GPL build; see BtbN archive and FFmpeg licensing notices",
+      "version": "9.0.1-essentials",
+      "provenance": "https://github.com/GyanD/codexffmpeg/releases/tag/9.0.1",
+      "license": "GPL build; see Gyan archive and FFmpeg licensing notices",
       "assets": {
         "win64-gpl": {
           "platform": "windows",
           "architecture": "x86_64",
-          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-18-15-03/ffmpeg-N-126207-g21bbd98e7b-win64-gpl.zip",
-          "sha256": "0dfc1c04a5b8c15e56e3e2245d3b0a1fb5f22242591e1b2c4a1cb6fa0cd0230b",
-          "size": 170656398
+          "url": "https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-essentials_build.zip",
+          "sha256": "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9",
+          "size": 111253802
         }
       },
       "macos": {
