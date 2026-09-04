@@ -30,7 +30,7 @@ export default function About({ onBack }: Props) {
           <span className="about-mark" aria-hidden="true"><span /></span>
           <h2>ClipGauge</h2>
           <p>Turn long videos into vertical clips worth sharing.</p>
-          <div className="about-meta"><span>Version</span><strong>ClipGauge v0.5.7</strong><span>Platform</span><strong>{platform}</strong></div>
+          <div className="about-meta"><span>Version</span><strong>ClipGauge v0.5.8</strong><span>Platform</span><strong>{platform}</strong></div>
         </section>
         <section className="about-section card-surface"><div className="about-section-icon"><Scale size={19} aria-hidden="true" /></div><div><h2>License</h2><p>ClipGauge is distributed under the <strong>GNU Affero General Public License, version 3 or later</strong>.</p><a className="text-link" href="https://github.com/Pavithran-R-A/clipgauge/blob/main/LICENSE" target="_blank" rel="noreferrer">Read the license <ExternalLink size={14} aria-hidden="true" /></a></div></section>
         <section className="about-section card-surface"><div className="about-section-icon"><Github size={19} aria-hidden="true" /></div><div><h2>Source and attribution</h2><p>ClipGauge is maintained as an independent open-source project and preserves attribution to its upstream project, <strong>Blueturboguy07/publikclip</strong>.</p><div className="about-links"><a className="text-link" href="https://github.com/Pavithran-R-A/clipgauge" target="_blank" rel="noreferrer">Source code <ExternalLink size={14} aria-hidden="true" /></a><a className="text-link" href="https://github.com/Blueturboguy07/publikclip" target="_blank" rel="noreferrer">Upstream project <ExternalLink size={14} aria-hidden="true" /></a></div></div></section>
