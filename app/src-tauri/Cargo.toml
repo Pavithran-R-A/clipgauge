@@ -1,6 +1,6 @@
 [package]
 name = "clipgauge-app"
-version = "0.5.8"
+version = "0.5.9"
 description = "ClipGauge — local AI video clipper"
 license = "AGPL-3.0-or-later"
 edition = "2021"
