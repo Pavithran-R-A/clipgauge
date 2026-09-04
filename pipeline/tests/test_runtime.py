@@ -266,6 +266,67 @@ def test_local_runtime_inference_probe_reports_only_safe_metrics(monkeypatch, tm
     assert "content" not in result
 
 
+def test_local_runtime_inference_probe_rejects_wrong_reply(monkeypatch, tmp_path):
+    instance = local_runtime.LocalRuntime(root=tmp_path, manifest={})
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "not OK"}}], "usage": {"completion_tokens": 1}}
+
+    monkeypatch.setattr(local_runtime.httpx, "post", lambda *args, **kwargs: Response())
+    result = instance.probe_inference("http://127.0.0.1:18089/v1", "qwen", backend="vulkan")
+
+    assert result["ok"] is False
+    assert result["reason"] == "Local inference returned an invalid response."
+
+
+def test_local_runtime_uses_new_process_group_on_windows(monkeypatch, tmp_path):
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"verified-model")
+    instance = local_runtime.LocalRuntime(root=tmp_path, manifest={})
+    monkeypatch.setattr(instance, "command", lambda _model_id, _port: ["llama-server"])
+    monkeypatch.setattr(instance, "model_path", lambda _model_id: model)
+    monkeypatch.setattr(instance, "runtime_backend", lambda: "cpu")
+    monkeypatch.setattr(instance, "_port", lambda _endpoint=None: 18089)
+    monkeypatch.setattr(local_runtime.os, "name", "nt")
+    monkeypatch.setattr(local_runtime.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, raising=False)
+
+    class DummyProcess:
+        pid = 1234
+
+        @staticmethod
+        def poll():
+            return None
+
+    popen_kwargs = {}
+    monkeypatch.setattr(
+        local_runtime.subprocess,
+        "Popen",
+        lambda *args, **kwargs: (popen_kwargs.update(kwargs) or DummyProcess()),
+    )
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return []
+
+    monkeypatch.setattr(local_runtime.httpx, "get", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(
+        instance,
+        "probe_inference",
+        lambda *args, **kwargs: {"ok": True, "generated_tokens": 1, "duration_sec": 0.001},
+    )
+
+    assert instance.start("qwen") == "http://127.0.0.1:18089/v1"
+    assert popen_kwargs["creationflags"] == 512
+    assert "start_new_session" not in popen_kwargs
+
+
 def test_valid_staged_archive_installation(tmp_path):
     archive = tmp_path / "good.zip"
     _archive(archive, ["bin/tool"])

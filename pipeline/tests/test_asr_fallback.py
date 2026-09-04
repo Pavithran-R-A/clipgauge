@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from clipgauge_pipeline.asr import stage as asr_stage
 from clipgauge_pipeline.asr.stage import _transcribe_with_fallback
 from clipgauge_pipeline.jobs.queue import StageError
 
@@ -53,3 +54,7 @@ def test_long_accelerator_failure_requires_explicit_cpu_approval():
         )
 
     assert caught.value.code == "ASR_GPU_FALLBACK_REQUIRES_APPROVAL"
+
+
+def test_degraded_acceleration_state_uses_canonical_label():
+    assert asr_stage.DEGRADED_ACCELERATION_STATE == "GPU PRESENT — RUNTIME DEGRADED"

@@ -29,6 +29,7 @@ ASR_MODEL = "large-v3-turbo"
 COMPUTE_TYPE = "int8"
 BATCH_SIZE = 8
 LONG_ASR_APPROVAL_SECONDS = 60.0
+DEGRADED_ACCELERATION_STATE = "GPU PRESENT — RUNTIME DEGRADED"
 
 
 def _point_caches_at_home() -> None:
@@ -152,7 +153,7 @@ class AsrStage(Stage):
                 device, compute_type = "cpu", "int8"
                 acceleration = {
                     **acceleration,
-                    "state": "GPU PRESENT — RUNTIME DEGRADED",
+                    "state": DEGRADED_ACCELERATION_STATE,
                     "device": device,
                     "compute_type": compute_type,
                     "reason": fallback_reason,
@@ -205,7 +206,7 @@ class AsrStage(Stage):
             fallback_reason = fallback_reason or "CUDA speech execution failed during transcription."
             acceleration = {
                 **acceleration,
-                "state": "GPU PRESENT — RUNTIME DEGRADED",
+                "state": DEGRADED_ACCELERATION_STATE,
                 "device": "cpu",
                 "compute_type": compute_type,
                 "reason": fallback_reason,
@@ -248,7 +249,7 @@ class AsrStage(Stage):
                 device, compute_type = "cpu", "int8"
                 acceleration = {
                     **acceleration,
-                    "state": "GPU PRESENT — RUNTIME DEGRADED",
+                    "state": DEGRADED_ACCELERATION_STATE,
                     "device": device,
                     "compute_type": compute_type,
                     "reason": fallback_reason,
@@ -323,7 +324,7 @@ class AsrStage(Stage):
         elif selected_device == "cuda":
             acceleration = {
                 **acceleration,
-                "state": "GPU PRESENT - RUNTIME DEGRADED",
+                "state": DEGRADED_ACCELERATION_STATE,
                 "device": device,
                 "compute_type": compute_type,
             }

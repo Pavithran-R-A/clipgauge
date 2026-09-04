@@ -334,9 +334,12 @@ class LocalRuntime:
                 follow_redirects=False,
             )
             payload = response.json()
+            choices = payload.get("choices") if isinstance(payload, dict) else None
+            message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+            reply = message.get("content") if isinstance(message, dict) else None
             usage = payload.get("usage") if isinstance(payload, dict) else None
             generated_tokens = usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0
-            ok = response.status_code == 200 and isinstance(payload, dict) and bool(payload.get("choices"))
+            ok = response.status_code == 200 and reply.strip() == "OK" if isinstance(reply, str) else False
             result = {
                 "ok": ok,
                 "backend": backend,
@@ -368,7 +371,7 @@ class LocalRuntime:
         if stderr_path:
             stderr_path.parent.mkdir(parents=True, exist_ok=True)
         stderr_handle = stderr_path.open("w", encoding="utf-8") if stderr_path else None
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name != "nt" else 0
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
         _qa_trace(
             self.root,
             "runtime_start",
