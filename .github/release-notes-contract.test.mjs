@@ -76,6 +76,8 @@ test('uses a deterministic multi-segment genuine speech acceptance input', () =>
   assert.match(modelJob, /atrim=duration=3/)
   assert.match(modelJob, /concat=n=5:v=0:a=1/)
   assert.match(modelJob, /asplit=3\[speech1\]\[speech2\]\[speech3\]/)
+  assert.match(modelJob, /asplit=2\[silence1\]\[silence2\]/)
+  assert.match(modelJob, /\[speech1\]\[silence1\]\[mixed2\]\[silence2\]\[speech3\]concat/)
   assert.match(modelJob, /acceptance\.flac/)
   assert.doesNotMatch(modelJob, /-stream_loop -1 -i tests\/fixtures\/v041-jfk\.flac/)
 })
