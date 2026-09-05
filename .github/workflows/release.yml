@@ -380,16 +380,17 @@ jobs:
           install_verified "local runtime" setup-runtime.jsonl \
             uv run clipgauge --jsonl setup install-runtime
           install_verified "local model" setup-model.jsonl \
-            uv run clipgauge --jsonl setup download-model clipgauge-local/qwen3-1.7b-q8_0
-      - name: Build the genuine speech acceptance input
+            uv run clipgauge --jsonl setup download-model clipgauge-local/qwen3-4b-q4_k_m
+      - name: Build the controlled speech acceptance input
         working-directory: pipeline
         run: |
           mkdir -p "$GITHUB_WORKSPACE/e2e-input"
           ffmpeg -hide_banner -loglevel error -y \
-            -i "$GITHUB_WORKSPACE/pipeline/tests/fixtures/v041-jfk.flac" \
-            -i "$GITHUB_WORKSPACE/pipeline/tests/fixtures/laughing-esc50.wav" \
             -f lavfi -i anullsrc=r=16000:cl=mono:d=1 \
-            -filter_complex "[0:a]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono,asplit=3[speech1][speech2][speech3];[1:a]atrim=duration=3,asetpts=PTS-STARTPTS,aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono[laugh];[2:a]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono,asplit=2[silence1][silence2];[speech2][laugh]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mixed2];[speech1][silence1][mixed2][silence2][speech3]concat=n=5:v=0:a=1[out]" \
+            -f lavfi -i "flite=text='Why did our payment launch fail moments before release? Every customer order was rejected, placing the entire company at risk.':voice=slt" \
+            -f lavfi -i "flite=text='Engineers traced the outage to one expired security certificate that silently blocked every payment.':voice=slt" \
+            -f lavfi -i "flite=text='After replacing the certificate and testing checkout, every order succeeded. The recovered launch saved the company, and the final fix worked.':voice=slt" \
+            -filter_complex "[0:a]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono,asplit=2[silence1][silence2];[1:a]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono[story1];[2:a]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono[story2];[3:a]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono[story3];[story1][silence1][story2][silence2][story3]concat=n=5:v=0:a=1[out]" \
             -map "[out]" -ar 16000 -ac 1 -c:a flac \
             "$GITHUB_WORKSPACE/e2e-input/acceptance.flac"
           ffmpeg -hide_banner -loglevel error -y \
@@ -402,7 +403,7 @@ jobs:
         run: |
           uv run clipgauge --jsonl run "$GITHUB_WORKSPACE/e2e-input/v041-controlled.mp4" \
             --provider clipgauge-local \
-            --model clipgauge-local/qwen3-1.7b-q8_0 \
+            --model clipgauge-local/qwen3-4b-q4_k_m \
             > "$GITHUB_WORKSPACE/model-e2e.jsonl" 2>&1
       - name: Validate terminal, stages, and production-default media contract
         working-directory: pipeline
