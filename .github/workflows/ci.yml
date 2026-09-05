@@ -51,6 +51,8 @@ jobs:
       - name: Run Vitest
         working-directory: app
         run: npm test
+      - name: Run release workflow contracts
+        run: node --test .github/release-notes-contract.test.mjs
 
   version-consistency:
     name: Version consistency
