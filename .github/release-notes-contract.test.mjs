@@ -46,6 +46,11 @@ test('keeps production model setup retries bounded and verified', () => {
   assert.match(modelJob, /setup download-model clipgauge-local\/qwen3-4b-q4_k_m/)
   assert.match(modelJob, /--model clipgauge-local\/qwen3-4b-q4_k_m/)
   assert.doesNotMatch(modelJob, /qwen3-1\.7b-q8_0/)
+  assert.match(modelJob, /Start deterministic managed scoring runtime/)
+  assert.match(modelJob, /--seed 42/)
+  assert.match(modelJob, /127\.0\.0\.1:8080\/health/)
+  assert.match(modelJob, /CLIPGAUGE_HOME.*runtimes.*llama-server/)
+  assert.match(modelJob, /CLIPGAUGE_HOME.*models.*Qwen3-4B-Q4_K_M\.gguf/)
   assert.doesNotMatch(modelJob, /while true|for \(;;\)/)
 })
 

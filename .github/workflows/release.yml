@@ -381,6 +381,37 @@ jobs:
             uv run clipgauge --jsonl setup install-runtime
           install_verified "local model" setup-model.jsonl \
             uv run clipgauge --jsonl setup download-model clipgauge-local/qwen3-4b-q4_k_m
+      - name: Start deterministic managed scoring runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime=$(find "$CLIPGAUGE_HOME/runtimes/llama-server" -type f -name llama-server -print -quit)
+          model=$(find "$CLIPGAUGE_HOME/models" -type f -name Qwen3-4B-Q4_K_M.gguf -print -quit)
+          test -x "$runtime"
+          test -s "$model"
+          "$runtime" \
+            --model "$model" \
+            --host 127.0.0.1 \
+            --port 8080 \
+            --no-webui \
+            --parallel 1 \
+            --ctx-size 4096 \
+            --reasoning off \
+            --seed 42 \
+            > "$GITHUB_WORKSPACE/llama-server.log" 2>&1 &
+          echo "$!" > "$GITHUB_WORKSPACE/llama-server.pid"
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8080/health > /dev/null; then
+              exit 0
+            fi
+            if ! kill -0 "$(cat "$GITHUB_WORKSPACE/llama-server.pid")" 2>/dev/null; then
+              cat "$GITHUB_WORKSPACE/llama-server.log"
+              exit 1
+            fi
+            sleep 2
+          done
+          cat "$GITHUB_WORKSPACE/llama-server.log"
+          exit 1
       - name: Build the controlled speech acceptance input
         working-directory: pipeline
         run: |
@@ -421,7 +452,7 @@ jobs:
           set +e
           diagnostics_dir="$GITHUB_WORKSPACE/model-e2e-diagnostics"
           mkdir -p "$diagnostics_dir"
-          for file in model-e2e.jsonl setup-asr.jsonl setup-analysis.jsonl setup-runtime.jsonl setup-model.jsonl; do
+          for file in model-e2e.jsonl setup-asr.jsonl setup-analysis.jsonl setup-runtime.jsonl setup-model.jsonl llama-server.log; do
             if [ -f "$GITHUB_WORKSPACE/$file" ]; then
               cp "$GITHUB_WORKSPACE/$file" "$diagnostics_dir/"
             fi
