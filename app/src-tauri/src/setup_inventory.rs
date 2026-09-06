@@ -40,7 +40,12 @@ fn number(value: Option<&Value>) -> u64 {
 }
 
 fn manifest(resources: &Path) -> Result<Value, String> {
-    let path = resources.join("runtime-manifest.json");
+    let direct_path = resources.join("runtime-manifest.json");
+    let path = if direct_path.is_file() {
+        direct_path
+    } else {
+        resources.join("pipeline/runtime-manifest.json")
+    };
     let contents = fs::read_to_string(&path)
         .map_err(|error| format!("runtime manifest could not be read: {error}"))?;
     serde_json::from_str(&contents)
