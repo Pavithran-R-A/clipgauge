@@ -28,6 +28,9 @@ const GROUP_COMMANDS: Record<string, string[]> = {
 function assetsFor(inventory: LocalSetupInventory | null, group: Group): ManagedAssetRow[] {
   const rows = (inventory?.managed_assets ?? []).filter((asset) => group.prefixes.some((prefix) => asset.asset_id.startsWith(prefix)))
   const videoTools = inventory?.video_tools
+  if (group.id === 'video' && videoTools && !videoTools.ready && rows.some((row) => row.installed)) {
+    return rows.map((row) => ({ ...row, installed: false, cached: false, status: 'needs-repair', state: 'NEEDS_REPAIR', reason: videoTools.reason }))
+  }
   if (group.id !== 'video' || !videoTools?.ready || videoTools.managed_download_needed) return rows
   const base = rows[0] ?? {
     asset_id: 'runtime:ffmpeg:capability',

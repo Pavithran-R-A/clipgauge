@@ -502,6 +502,23 @@ fn row_installed(row: &Value) -> bool {
         .unwrap_or(false)
 }
 
+fn row_is_ready(spec: &AssetSpec, row: &Value, video_ready: bool) -> bool {
+    if spec.asset_id.starts_with("runtime:ffmpeg:") {
+        video_ready
+    } else {
+        row_installed(row)
+    }
+}
+
+fn is_core_required(spec: &AssetSpec) -> bool {
+    spec.required
+        && !spec.asset_id.starts_with("runtime:node:")
+        && !spec.asset_id.starts_with("youtube:")
+        && !spec.asset_id.starts_with("runtime:yt-dlp:")
+        && !spec.asset_id.starts_with("runtime:cuda:")
+        && !spec.asset_id.starts_with("runtime:cudnn:")
+}
+
 fn path_executable(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for directory in std::env::split_paths(&path) {
@@ -532,7 +549,7 @@ fn probe_executable(name: &str, args: &[&str]) -> bool {
 }
 
 fn native_runtime_selection(
-    home: &Path,
+    _home: &Path,
     manifest: &Value,
     specs: &[AssetSpec],
 ) -> (String, String) {
@@ -547,20 +564,9 @@ fn native_runtime_selection(
     let nvidia_verified =
         probe_executable("nvidia-smi", &["--query-gpu=name", "--format=csv,noheader"]);
     let vulkan_verified = probe_executable("vulkaninfo", &["--summary"]);
-    let cuda_runtime_present = home
-        .join("runtimes/pipeline/Lib/site-packages/ctranslate2")
-        .exists()
-        && home.join("runtimes/cuda/12.4/cudnn64_9.dll").is_file();
-    if available.contains(&"windows-x86_64-cuda")
-        && nvidia_verified
-        && cuda_runtime_present
-        && manifest_asset(manifest, "llama-server", "windows-x86_64-cuda").is_some()
-    {
-        return (
-            "windows-x86_64-cuda".to_string(),
-            "NVIDIA and initialized CUDA runtime evidence found.".to_string(),
-        );
-    }
+    // CUDA selection remains owned by the Python hardware probe. Native
+    // inventory cannot import CTranslate2 safely without reintroducing the
+    // startup dependency that this path deliberately avoids.
     if available.contains(&"windows-x86_64-vulkan")
         && (nvidia_verified || vulkan_verified)
         && manifest_asset(manifest, "llama-server", "windows-x86_64-vulkan").is_some()
@@ -1012,11 +1018,34 @@ pub fn native_inventory(
     }
     specs.push(youtube_provider_spec());
 
+    let (video_ready, video_source, video_path, video_version, video_capabilities, video_reason) = configured_ffmpeg(home, &manifest)
+        .map(|(source, path)| {
+            let (ready, version, capabilities, reason) = probe_ffmpeg(&path);
+            (ready, source, Some(path), version, capabilities, reason)
+        })
+        .unwrap_or_else(|| (false, "missing".to_string(), None, None, HashMap::new(), "No FFmpeg executable was found in the configured, managed, bundled, or system locations.".to_string()));
     let mut installed_cache = HashMap::new();
-    let rows = specs
+    let mut rows = specs
         .iter()
         .map(|spec| asset_row(home, &states, spec, &mut installed_cache))
         .collect::<Vec<_>>();
+    if !video_ready {
+        for row in &mut rows {
+            if row
+                .get("asset_id")
+                .and_then(Value::as_str)
+                .map(|id| id.starts_with("runtime:ffmpeg:"))
+                .unwrap_or(false)
+                && row_installed(row)
+            {
+                row["installed"] = Value::Bool(false);
+                row["cached"] = Value::Bool(false);
+                row["status"] = Value::String("needs-repair".to_string());
+                row["state"] = Value::String("NEEDS_REPAIR".to_string());
+                row["reason"] = Value::String(video_reason.clone());
+            }
+        }
+    }
     let (selected_runtime_key, runtime_selection_reason) =
         native_runtime_selection(home, &manifest, &runtime_specs);
     let runtime_spec = runtime_specs
@@ -1060,23 +1089,16 @@ pub fn native_inventory(
     } else {
         "runtime-install-required"
     };
-    let (video_ready, video_source, video_path, video_version, video_capabilities, video_reason) = configured_ffmpeg(home, &manifest)
-        .map(|(source, path)| {
-            let (ready, version, capabilities, reason) = probe_ffmpeg(&path);
-            (ready, source, Some(path), version, capabilities, reason)
-        })
-        .unwrap_or_else(|| (false, "missing".to_string(), None, None, HashMap::new(), "No FFmpeg executable was found in the configured, managed, bundled, or system locations.".to_string()));
     let managed_ffmpeg_needed =
         !video_ready && manifest_asset(&manifest, "ffmpeg", "win64-gpl").is_some();
     let mut required_bytes = 0_u64;
     let mut optional_bytes = 0_u64;
     let mut installed_bytes = 0_u64;
     for (spec, row) in specs.iter().zip(rows.iter()) {
-        let ready =
-            row_installed(row) || (spec.asset_id.starts_with("runtime:ffmpeg:") && video_ready);
+        let ready = row_is_ready(spec, row, video_ready);
         if ready {
             installed_bytes += spec.installed_size_bytes.unwrap_or(spec.size_bytes);
-        } else if spec.required && !(spec.asset_id.starts_with("runtime:ffmpeg:") && video_ready) {
+        } else if is_core_required(spec) {
             required_bytes += spec.size_bytes;
         } else {
             optional_bytes += spec.size_bytes;
@@ -1085,17 +1107,8 @@ pub fn native_inventory(
     let required_ready = specs
         .iter()
         .zip(rows.iter())
-        .filter(|(spec, _)| {
-            spec.required
-                && !spec.asset_id.starts_with("runtime:node:")
-                && !spec.asset_id.starts_with("youtube:")
-                && !spec.asset_id.starts_with("runtime:yt-dlp:")
-                && !spec.asset_id.starts_with("runtime:cuda:")
-                && !spec.asset_id.starts_with("runtime:cudnn:")
-        })
-        .all(|(spec, row)| {
-            row_installed(row) || (spec.asset_id.starts_with("runtime:ffmpeg:") && video_ready)
-        });
+        .filter(|(spec, _)| is_core_required(spec))
+        .all(|(spec, row)| row_is_ready(spec, row, video_ready));
     let core_assets = rows
         .iter()
         .filter(|row| {
@@ -1277,6 +1290,46 @@ mod tests {
         assert_eq!(row["installed"], false);
         assert!(row["installed_sha256"].as_str().is_some());
         fs::remove_dir_all(home).expect("temporary inventory home must be removable");
+    }
+
+    #[test]
+    fn ffmpeg_asset_requires_a_successful_capability_probe() {
+        let spec = super::static_spec(
+            "runtime:ffmpeg:test",
+            "Test FFmpeg",
+            "Capability test",
+            "downloads/ffmpeg.zip",
+            "ffmpeg.exe",
+            "https://example.com/ffmpeg.zip",
+            1,
+            "",
+            "Test",
+            "https://example.com",
+            "core",
+            None,
+        );
+        let row = serde_json::json!({"installed": true});
+        assert!(!super::row_is_ready(&spec, &row, false));
+        assert!(super::row_is_ready(&spec, &row, true));
+    }
+
+    #[test]
+    fn optional_setup_assets_do_not_inflate_core_storage() {
+        let spec = super::static_spec(
+            "runtime:node:test",
+            "Test Node",
+            "Optional test runtime",
+            "downloads/node.zip",
+            "node.exe",
+            "https://example.com/node.zip",
+            1,
+            "",
+            "Test",
+            "https://example.com",
+            "core:youtube",
+            None,
+        );
+        assert!(!super::is_core_required(&spec));
     }
 
     #[test]
