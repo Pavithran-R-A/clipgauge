@@ -274,19 +274,18 @@ def _find_browser() -> str | None:
         found = shutil.which(name)
         if found:
             candidates.append(Path(found))
-    if os.name == "nt":
-        roots = [
-            os.environ.get("PROGRAMFILES"),
-            os.environ.get("PROGRAMFILES(X86)"),
-            os.environ.get("LOCALAPPDATA"),
-        ]
-        relative_paths = [
-            Path("Google/Chrome/Application/chrome.exe"),
-            Path("Microsoft/Edge/Application/msedge.exe"),
-            Path("Chromium/Application/chrome.exe"),
-            Path("Mozilla Firefox/firefox.exe"),
-        ]
-        candidates.extend(Path(root) / relative for root in roots if root for relative in relative_paths)
+    roots = [
+        os.environ.get("PROGRAMFILES"),
+        os.environ.get("PROGRAMFILES(X86)"),
+        os.environ.get("LOCALAPPDATA"),
+    ]
+    relative_paths = [
+        Path("Google/Chrome/Application/chrome.exe"),
+        Path("Microsoft/Edge/Application/msedge.exe"),
+        Path("Chromium/Application/chrome.exe"),
+        Path("Mozilla Firefox/firefox.exe"),
+    ]
+    candidates.extend(Path(root) / relative for root in roots if root for relative in relative_paths)
     for candidate in candidates:
         try:
             if candidate.is_file():
