@@ -555,7 +555,12 @@ fn native_runtime_selection(
 ) -> (String, String) {
     let base = platform_key().to_string();
     if !cfg!(target_os = "windows") {
-        return (base, "Platform default selected.".to_string());
+        let reason = if manifest_asset(manifest, "llama-server", &base).is_some() {
+            "Platform default selected."
+        } else {
+            "No managed local runtime is published for this platform."
+        };
+        return (base, reason.to_string());
     }
     let available = specs
         .iter()
@@ -911,8 +916,7 @@ pub fn native_inventory(
     let base_runtime_spec = runtime_specs
         .iter()
         .find(|spec| spec.asset_id == format!("runtime:llama-server:{}", platform_key()))
-        .cloned()
-        .ok_or_else(|| "ClipGauge Local is unavailable for this platform.".to_string())?;
+        .cloned();
     specs.extend(runtime_specs.iter().cloned());
     let local_models = [
         model_spec(
@@ -1052,7 +1056,7 @@ pub fn native_inventory(
     let runtime_spec = runtime_specs
         .iter()
         .find(|spec| spec.asset_id == format!("runtime:llama-server:{selected_runtime_key}"))
-        .unwrap_or(&base_runtime_spec);
+        .or(base_runtime_spec.as_ref());
     let runtime_rows = rows
         .iter()
         .filter(|row| {
@@ -1071,8 +1075,8 @@ pub fn native_inventory(
     let selected_id = selected
         .map(|model| model.asset_id.clone())
         .unwrap_or(selected_id);
-    let runtime_ready = installed_cache
-        .get(&runtime_spec.asset_id)
+    let runtime_ready = runtime_spec
+        .and_then(|spec| installed_cache.get(&spec.asset_id))
         .map(|(ready, _)| *ready)
         .unwrap_or(false);
     let model_ready = selected
@@ -1083,7 +1087,9 @@ pub fn native_inventory(
                 .unwrap_or(false)
         })
         .unwrap_or(false);
-    let local_state = if runtime_ready && model_ready {
+    let local_state = if runtime_spec.is_none() {
+        "unavailable"
+    } else if runtime_ready && model_ready {
         "ready"
     } else if runtime_ready {
         "model-download-required"
@@ -1137,9 +1143,11 @@ pub fn native_inventory(
                 .unwrap_or(false)
         })
         .collect::<Vec<_>>();
-    let runtime_row = rows
-        .iter()
-        .find(|row| row.get("asset_id") == Some(&json!(runtime_spec.asset_id)))
+    let runtime_row = runtime_spec
+        .and_then(|spec| {
+            rows.iter()
+                .find(|row| row.get("asset_id") == Some(&json!(spec.asset_id)))
+        })
         .cloned()
         .unwrap_or_else(|| json!({}));
     Ok(json!({
@@ -1169,8 +1177,8 @@ pub fn native_inventory(
             "runtime_ready": runtime_ready,
             "model_ready": model_ready,
             "selected_model_id": selected_id,
-            "required_bytes": (if runtime_ready { 0 } else { runtime_spec.size_bytes }) + (if model_ready { 0 } else { selected.map(|model| model.size_bytes).unwrap_or_default() }),
-            "action": if runtime_ready && model_ready { "Ready" } else if runtime_ready { "Download selected model" } else { "Install ClipGauge Local" },
+            "required_bytes": (if runtime_ready { 0 } else { runtime_spec.map(|spec| spec.size_bytes).unwrap_or_default() }) + (if model_ready { 0 } else { selected.map(|model| model.size_bytes).unwrap_or_default() }),
+            "action": if runtime_spec.is_none() { "Unavailable on this platform" } else if runtime_ready && model_ready { "Ready" } else if runtime_ready { "Download selected model" } else { "Install ClipGauge Local" },
         },
         "managed_assets": rows,
         "storage": {
@@ -1345,9 +1353,14 @@ mod tests {
             .filter_map(|row| row["asset_id"].as_str())
             .collect::<Vec<_>>();
 
-        assert!(ids.iter().any(|id| id.ends_with("windows-x86_64")
-            || id.ends_with("macos-arm64")
-            || id.ends_with("linux-x86_64")));
+        if ids.is_empty() {
+            assert_eq!(inventory["runtime_selection"]["key"], "macos-x86_64");
+            assert_eq!(inventory["local_ai"]["state"], "unavailable");
+        } else {
+            assert!(ids.iter().any(|id| id.ends_with("windows-x86_64")
+                || id.ends_with("macos-arm64")
+                || id.ends_with("linux-x86_64")));
+        }
         #[cfg(target_os = "windows")]
         {
             assert!(ids.iter().any(|id| id.ends_with("windows-x86_64-vulkan")));
