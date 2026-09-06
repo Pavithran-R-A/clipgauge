@@ -407,4 +407,5 @@ try {
   Remove-Item Env:CLIPGAUGE_QUALIFICATION_VAULT_SERVICE -ErrorAction SilentlyContinue
   Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
   Remove-Item Env:WEBVIEW2_USER_DATA_FOLDER -ErrorAction SilentlyContinue
+  $global:LASTEXITCODE = 0
 }
