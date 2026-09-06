@@ -799,7 +799,7 @@ fn available_bytes(path: &Path) -> Option<u64> {
     let result = unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) };
     if result == 0 {
         let stats = unsafe { stats.assume_init() };
-        return Some(stats.f_bavail as u64 * stats.f_frsize as u64);
+        return Some(stats.f_bavail * stats.f_frsize);
     }
     None
 }
