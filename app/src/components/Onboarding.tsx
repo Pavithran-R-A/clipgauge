@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { ArrowRight, Check, Cloud, Cpu, Download, LockKeyhole, ShieldCheck, Square } from 'lucide-react'
 import { listen } from '@tauri-apps/api/event'
-import { api } from '../api'
+import { api as rawApi } from '../api'
 import type { LocalSetupInventory, SetupProgressEvent } from '../types'
 import { formatBytes, formatDuration, formatRate, meaningfulEta, progressPercent } from '../setupFormatting'
-import { summarizeSetupQueue, type SetupQueueSummary } from '../setupState'
+import { isLocalAiUnavailable, shouldAdvanceSetupQueue, summarizeSetupQueue, type SetupQueueSummary } from '../setupState'
 
 interface Props { onDone: () => void }
 
@@ -21,6 +21,7 @@ export default function Onboarding({ onDone }: Props) {
   const [, setQueueSummary] = useState<SetupQueueSummary>({ state: 'pending', completed: 0, failed: 0, cancelled: false })
   const queueRef = useRef<string[][]>([])
   const outcomesRef = useRef<Array<'success' | 'failed' | 'cancelled'>>([])
+  const api = { ...rawApi, cancelSetup: (id: string) => { queueRef.current = []; return rawApi.cancelSetup(id) } }
 
   const refresh = () => api.setupInventory().then((value) => setInventory(value as unknown as LocalSetupInventory)).catch(() => setInventory(null))
 
@@ -32,7 +33,8 @@ export default function Onboarding({ onDone }: Props) {
       if (payload.event === 'terminal') {
         setOperationId(null)
         outcomesRef.current.push(payload.code === 'CANCELLED' ? 'cancelled' : payload.ok ? 'success' : 'failed')
-        const next = queueRef.current.shift()
+        const next = shouldAdvanceSetupQueue(payload) ? queueRef.current.shift() : undefined
+        if (!next) queueRef.current = []
         if (next) void begin(next, 'Moving to the next local component.')
         else {
           setBusy(false)
@@ -57,7 +59,8 @@ export default function Onboarding({ onDone }: Props) {
   const runtimeReady = Boolean(inventory?.runtime?.installed)
   const balanced = inventory?.models?.find((model) => String(model.display_name ?? '').toLowerCase().includes('balanced')) ?? inventory?.models?.[0]
   const modelReady = Boolean(balanced?.installed)
-  const remaining = [!runtimeReady, !modelReady].filter(Boolean).length
+  const localUnavailable = isLocalAiUnavailable(inventory)
+  const remaining = localUnavailable ? 0 : [!runtimeReady, !modelReady].filter(Boolean).length
   const percent = progressPercent(progress)
   const eta = meaningfulEta(progress)
   const elapsed = progress?.elapsed_seconds ?? (startedAt ? Math.max(0, Math.floor((now - startedAt) / 1000)) : 0)
@@ -71,6 +74,7 @@ export default function Onboarding({ onDone }: Props) {
   }
 
   async function installLocal() {
+    if (localUnavailable) { setMessage('ClipGauge Local is unavailable on this platform. Choose another provider.'); return }
     if (!approved) { setMessage('Approve the one-time download plan first.'); return }
     const args: string[][] = []
     if (!runtimeReady) args.push(['install-runtime'])

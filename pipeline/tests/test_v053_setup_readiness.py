@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from clipgauge_pipeline import setup_models
+from clipgauge_pipeline import cli, setup_models
 from clipgauge_pipeline.ingest import youtube_compat
 
 
@@ -15,6 +15,14 @@ def _row(asset_id, *, installed=False, status='not-installed'):
         'size_bytes': 12,
         'installed_size_bytes': 12 if installed else 0,
     }
+
+
+def test_cli_storage_predicate_excludes_optional_runtime_assets():
+    assert cli._is_core_required_asset_id('model:asr:test', True)
+    assert not cli._is_core_required_asset_id('runtime:node:win64', True)
+    assert not cli._is_core_required_asset_id('runtime:yt-dlp:win64', True)
+    assert not cli._is_core_required_asset_id('youtube:bgutil-provider', True)
+    assert not cli._is_core_required_asset_id('runtime:llama-server:cpu', False)
 
 
 def test_selection_prefers_persisted_valid_installed_model():

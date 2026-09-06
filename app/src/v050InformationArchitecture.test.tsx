@@ -224,4 +224,21 @@ describe('v0.5 information architecture', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('preparing its local runtime')
     expect(screen.getByRole('button', { name: 'Retry setup check' })).toBeInTheDocument()
   })
+
+  it('disables local installation when the platform lacks support', async () => {
+    mocks.setupInventory.mockResolvedValue({
+      state: 'ready',
+      video_tools: { ready: true, source: 'system', managed_download_needed: false },
+      local_ai: { state: 'unavailable', runtime_ready: false, model_ready: false, selected_model_id: null, required_bytes: 0, action: 'Install ClipGauge Local' },
+      runtime: { installed: false },
+      models: [],
+      core_assets: [],
+      managed_assets: [],
+      storage: { required_bytes: 0, installed_bytes: 0, available_bytes: null, assets: [], consent_required: false },
+      catalog: []
+    })
+    render(<SetupCenter onBack={vi.fn()} />)
+    expect(await screen.findByText('Unavailable')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Install ClipGauge Local' })).toBeDisabled()
+  })
 })

@@ -4,7 +4,7 @@ import { listen } from '@tauri-apps/api/event'
 import { api } from '../api'
 import type { LocalSetupInventory, ManagedAssetRow, SetupProgressEvent, YouTubeReadiness } from '../types'
 import { assetLifecycleLabel, formatBytes, formatDuration, formatRate, meaningfulEta, progressPercent } from '../setupFormatting'
-import { resolveSelectedLocalModel, summarizeSetupQueue, type SetupQueueSummary } from '../setupState'
+import { isLocalAiUnavailable, resolveSelectedLocalModel, summarizeSetupQueue, type SetupQueueSummary } from '../setupState'
 import { loadErrorMessage, setupPhaseLabel, type SetupLoadState } from '../setupLifecycle'
 
 interface Props { onBack: () => void; onUseLocal?: (modelId?: string) => void }
@@ -218,16 +218,17 @@ export default function SetupCenter({ onBack, onUseLocal }: Props) {
   const optionalLabel = selectedLifecycle === 'VERIFIED' ? 'Installed · 0 B additional' : selectedLifecycle === 'NEEDS_REPAIR' ? 'Needs repair' : selectedModelSize > 0 ? `${formatBytes(selectedModelSize)} additional` : 'Size calculated during setup'
   const allReady = inventoryLoad.phase === 'ready' && requiredGroups.length === 0
   const localReady = Boolean(inventory?.local_ai?.runtime_ready && inventory?.local_ai?.model_ready)
+  const localUnavailable = isLocalAiUnavailable(inventory)
   const localRuntimeReady = Boolean(inventory?.local_ai?.runtime_ready)
   const localModelReady = Boolean(inventory?.local_ai?.model_ready)
-  const localStateLabel = localReady ? 'Ready' : inventory?.local_ai?.state === 'repair-required' ? 'Repair needed' : !localRuntimeReady ? 'Runtime needed' : 'Model needed'
+  const localStateLabel = localUnavailable ? 'Unavailable' : localReady ? 'Ready' : inventory?.local_ai?.state === 'repair-required' ? 'Repair needed' : !localRuntimeReady ? 'Runtime needed' : 'Model needed'
   const setupPercent = progressPercent(progress)
   const setupEta = meaningfulEta(progress)
   const elapsed = progress?.elapsed_seconds ?? (startedAt ? Math.max(0, Math.floor((now - startedAt) / 1000)) : 0)
   const currentTotal = progress?.bytes_total ?? 0
   const currentDone = progress?.bytes_done ?? 0
   const canInstall = approved && !busy && inventoryLoad.phase === 'ready' && !allReady
-  const canInstallLocal = localApproved && !busy && inventoryLoad.phase === 'ready' && !localReady
+  const canInstallLocal = !localUnavailable && localApproved && !busy && inventoryLoad.phase === 'ready' && !localReady
   const youtubeNeedsInstall = Boolean(youtubeLoad.phase === 'ready' && youtubeStatus?.actions.some((action) => action === 'Install' || action === 'Repair'))
   const canInstallYouTube = youtubeApproved && !busy && youtubeNeedsInstall
 

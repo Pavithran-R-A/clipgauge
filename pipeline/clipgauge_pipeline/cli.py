@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from . import __version__, config, downloads, local_runtime, protocol, runtime, setup_models
@@ -186,6 +187,23 @@ def _managed_asset_objects() -> list[downloads.ManagedAsset]:
     return assets
 
 
+def _is_core_required_asset_id(asset_id: str, required: bool) -> bool:
+    if not required:
+        return False
+    return not asset_id.startswith((
+        'runtime:node:',
+        'runtime:yt-dlp:',
+        'youtube:',
+        'core:yt-dlp',
+        'runtime:cuda:',
+        'runtime:cudnn:',
+    ))
+
+
+def _is_core_required_asset(asset: downloads.ManagedAsset) -> bool:
+    return _is_core_required_asset_id(asset.asset_id, asset.required)
+
+
 def _managed_asset_inventory(extra: list[downloads.ManagedAsset] | None = None) -> list[dict[str, object]]:
     from .ingest import ytdlp
     from .models import managed
@@ -320,7 +338,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
             managed_assets = _managed_asset_objects()
             if ffmpeg_decision.ready and ffmpeg_decision.source not in {"managed", "legacy-managed"}:
                 managed_assets = [asset for asset in managed_assets if not asset.asset_id.startswith("runtime:ffmpeg:")]
-            storage_assets = [asset for asset in managed_assets]
+            storage_assets = [replace(asset, required=_is_core_required_asset(asset)) for asset in managed_assets]
             if selected_model is not None:
                 storage_assets.extend([runtime_asset, selected_model])
             managed_rows = _managed_asset_inventory([runtime_asset, *model_assets])
@@ -360,8 +378,13 @@ def cmd_setup(args: argparse.Namespace) -> int:
                     "reason": ffmpeg_decision.reason,
                     "capabilities": ffmpeg_decision.capabilities,
                 })
+            core_rows = [
+                row for row in managed_rows
+                if _is_core_required_asset_id(str(row.get('asset_id', '')), bool(row.get('required')))
+            ]
+            core_ready = bool(core_rows) and all(bool(row.get('installed')) for row in core_rows)
             payload = {
-                "state": "ready" if runtime_ready else "setup-required",
+                "state": "ready" if core_ready else "setup-required",
                 "runtime": {
                     **runtime_asset.to_json(),
                     "installed": runtime_ready,
