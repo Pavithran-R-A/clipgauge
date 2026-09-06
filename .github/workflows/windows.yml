@@ -66,7 +66,7 @@ jobs:
           npm ci
           npm run build
           npm test
-          npx tauri build --bundles nsis --features qualification-vault
+          npx tauri build --bundles nsis --features qualification-vault --config src-tauri/tauri.qualification.conf.json
 
       - name: Install silently and run deterministic packaged Windows UI qualification
         shell: pwsh
