@@ -16,7 +16,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from . import __version__, config, downloads, local_runtime, protocol, runtime, setup_models
+from . import __version__, config, downloads, local_runtime, protocol, readiness, runtime, setup_models, storage
 from .jobs import queue
 from .render import ffmpeg_bin
 from .scoring import providers as providers_mod
@@ -47,7 +47,7 @@ def _stages() -> list[queue.Stage]:
     ]
 
 
-def _progress_printer(jsonl: bool):
+def _progress_printer(jsonl: bool, job_id: str | None = None, attempt_id: str | None = None):
     started_at = time.monotonic()
     stage_started: dict[str, float] = {}
 
@@ -65,6 +65,8 @@ def _progress_printer(jsonl: bool):
             event = {
                 "event": "progress",
                 "protocol_version": protocol.PROTOCOL_VERSION,
+                "job_id": job_id,
+                "attempt_id": attempt_id,
                 "stage": stage,
                 "stage_id": stage,
                 "display_stage": protocol.DISPLAY_STAGES.get(stage, stage.replace("_", " ").title()),
@@ -204,7 +206,7 @@ def _is_core_required_asset(asset: downloads.ManagedAsset) -> bool:
     return _is_core_required_asset_id(asset.asset_id, asset.required)
 
 
-def _managed_asset_inventory(extra: list[downloads.ManagedAsset] | None = None) -> list[dict[str, object]]:
+def _managed_asset_inventory(extra: list[downloads.ManagedAsset] | None = None, *, verify: bool = True) -> list[dict[str, object]]:
     from .ingest import ytdlp
     from .models import managed
     from .render import ffmpeg_bin
@@ -213,7 +215,7 @@ def _managed_asset_inventory(extra: list[downloads.ManagedAsset] | None = None) 
     if extra:
         assets.extend(extra)
     manager = downloads.DownloadManager()
-    return manager.inventory(assets)
+    return manager.inventory(assets, verify=verify)
 
 
 def _core_setup_inventory(manager: local_runtime.LocalRuntime) -> list[dict[str, object]]:
@@ -307,6 +309,18 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
     downloads_manager = downloads.DownloadManager(event=setup_event)
     try:
+        if args.setup_cmd in {"storage-preview", "storage-cleanup"}:
+            if args.setup_cmd == "storage-preview":
+                result = storage.preview(config.home_dir(), args.storage_target, args.job_id)
+            else:
+                result = storage.cleanup(
+                    config.home_dir(),
+                    args.storage_target,
+                    args.job_id,
+                    confirmed=args.confirm,
+                )
+            print(json.dumps(result))
+            return 0
         if args.setup_cmd == "cuda-probe":
             from .asr.probe import run_cuda_probe
 
@@ -322,7 +336,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
             return 0
         if args.setup_cmd == "inventory":
             runtime_binary = manager.binary_path()
-            rows = [setup_models.enrich_model_row(row) for row in downloads_manager.inventory(model_assets)]
+            rows = [setup_models.enrich_model_row(row) for row in downloads_manager.inventory(model_assets, verify=False)]
             persisted_id = setup_models.load_selected_model(config.home_dir())
             if args.selected_model_id:
                 selected_id = args.selected_model_id
@@ -331,9 +345,10 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 selected_id = setup_models.select_model_id(rows, persisted_id=persisted_id)
             selected_model = next((asset for asset in model_assets if asset.asset_id == selected_id), None)
             selected_row = next((row for row in rows if str(row.get("asset_id")) == selected_id), None)
-            runtime_ready = runtime_binary.is_file()
+            runtime_readiness = manager.readiness()
+            runtime_ready = bool(runtime_readiness.get("usable"))
             model_ready = bool(selected_row and selected_row.get("installed"))
-            local_state = "ready" if runtime_ready and model_ready else "repair-required" if runtime_ready and selected_row and selected_row.get("lifecycle_state") == "NEEDS_REPAIR" else "model-download-required" if runtime_ready else "runtime-install-required"
+            local_state = "ready" if runtime_ready and model_ready else "repair-required" if runtime_readiness.get("repair") or (runtime_ready and selected_row and selected_row.get("lifecycle_state") == "NEEDS_REPAIR") else "model-download-required" if runtime_ready else "runtime-install-required"
             ffmpeg_decision = ffmpeg_bin.readiness()
             managed_assets = _managed_asset_objects()
             if ffmpeg_decision.ready and ffmpeg_decision.source not in {"managed", "legacy-managed"}:
@@ -341,7 +356,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
             storage_assets = [replace(asset, required=_is_core_required_asset(asset)) for asset in managed_assets]
             if selected_model is not None:
                 storage_assets.extend([runtime_asset, selected_model])
-            managed_rows = _managed_asset_inventory([runtime_asset, *model_assets])
+            managed_rows = _managed_asset_inventory([runtime_asset, *model_assets], verify=False)
             ffmpeg_rows = [row for row in managed_rows if str(row.get("asset_id", "")).startswith("runtime:ffmpeg:")]
             if ffmpeg_decision.ready and ffmpeg_decision.source not in {"managed", "legacy-managed"}:
                 for row in ffmpeg_rows:
@@ -390,6 +405,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
                     "installed": runtime_ready,
                     "managed_path": str(runtime_binary),
                     "version": manager.manifest["runtimes"]["llama-server"]["version"],
+                    **runtime_readiness,
                 },
                 "models": rows,
                 "core_assets": _core_setup_inventory(manager),
@@ -401,9 +417,19 @@ def cmd_setup(args: argparse.Namespace) -> int:
                     "selected_model_id": selected_id,
                     "required_bytes": (0 if runtime_ready else runtime_asset.size_bytes) + (0 if model_ready or selected_model is None else selected_model.size_bytes),
                     "action": "Ready" if runtime_ready and model_ready else "Repair selected model" if local_state == "repair-required" else "Download " + str(selected_model.display_name if selected_model else "selected model") if runtime_ready else "Install ClipGauge Local",
+                    **readiness.contract(
+                        asset_id="provider:clipgauge-local",
+                        installed=runtime_ready and model_ready,
+                        verified=runtime_readiness.get("verified", False) and model_ready,
+                        usable=runtime_ready and model_ready,
+                        repair=bool(runtime_readiness.get("repair")) or (selected_row is not None and selected_row.get("lifecycle_state") == "NEEDS_REPAIR"),
+                        selected_runtime=str(runtime_readiness.get("selected_runtime") or "cpu"),
+                        selected_model=selected_id,
+                        actual_additional_bytes=(0 if runtime_ready else runtime_asset.size_bytes) + (0 if model_ready or selected_model is None else selected_model.size_bytes),
+                    ),
                 },
                 "managed_assets": managed_rows,
-                "storage": downloads_manager.estimate(storage_assets),
+                "storage": downloads_manager.estimate(storage_assets, verify=False),
                 "catalog": [
                     {
                         "model_id": model.model_id,
@@ -416,6 +442,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
                     for model in local_runtime.MODEL_CATALOG.values()
                 ],
             }
+            payload["storage"]["breakdown"] = storage.breakdown(config.home_dir())
             print(json.dumps(payload))
             return 0
         if args.setup_cmd == "install-runtime":
@@ -599,13 +626,15 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
 
 def _execute(job: queue.Job, jsonl: bool) -> int:
-    emit = _progress_printer(jsonl)
+    attempt_id = protocol.diagnostic_id()
+    emit = _progress_printer(jsonl, job.id, attempt_id)
     terminal = protocol.TerminalEmitter(
         emit=lambda event: print(json.dumps(event), flush=True),
         job_id=job.id,
+        attempt_id=attempt_id,
     )
     if jsonl:
-        print(json.dumps({"event": "job", "job_id": job.id}), flush=True)
+        print(json.dumps({"event": "job", "job_id": job.id, "attempt_id": attempt_id}), flush=True)
     else:
         print(f"job {job.id} → {job.dir}", file=sys.stderr)
     try:
@@ -875,6 +904,15 @@ def main(argv: list[str] | None = None) -> int:
     p_install_asset.add_argument("asset_id")
     p_download_model = setup_sub.add_parser("download-model", help="download a verified local model")
     p_download_model.add_argument("model_id", choices=sorted(local_runtime.MODEL_CATALOG))
+    for command, help_text in (
+        ("storage-preview", "preview an allow-listed cleanup operation"),
+        ("storage-cleanup", "remove an allow-listed target after confirmation"),
+    ):
+        p_storage = setup_sub.add_parser(command, help=help_text)
+        p_storage.add_argument("storage_target", choices=["session", "failed-session", "safe-cache", "obsolete-runtime-archives"])
+        p_storage.add_argument("job_id", nargs="?", default=None)
+        if command == "storage-cleanup":
+            p_storage.add_argument("--confirm", action="store_true", help="confirm the exact previewed cleanup")
     p_setup.set_defaults(fn=cmd_setup)
 
     p_test = sub.add_parser("provider-test", help="test a configured provider connection")

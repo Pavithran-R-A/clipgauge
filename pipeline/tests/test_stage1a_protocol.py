@@ -106,7 +106,7 @@ def _assert_one_terminal(events):
 
 
 def test_progress_protocol_v2_exposes_creator_fields(capsys):
-    emit = cli._progress_printer(True)
+    emit = cli._progress_printer(True, "job-1", "attempt-1")
     emit("diarize", -1.0, "Downloading speaker model…")
     event = json.loads(capsys.readouterr().out)
     assert event["event"] == "progress"
@@ -117,6 +117,8 @@ def test_progress_protocol_v2_exposes_creator_fields(capsys):
     assert event["one_time_download"] is True
     assert event["elapsed_seconds"] >= 0
     assert event["stage_elapsed_seconds"] >= 0
+    assert event["job_id"] == "job-1"
+    assert event["attempt_id"] == "attempt-1"
 
 
 def test_missing_local_source_is_structured_terminal(monkeypatch, capsys):
@@ -129,6 +131,7 @@ def test_missing_local_source_is_structured_terminal(monkeypatch, capsys):
     assert terminal["stage"] == "ingest"
     assert terminal["code"] == "INPUT_FILE_NOT_FOUND"
     assert terminal["retryable"] is False
+    assert terminal["attempt_id"].startswith("diag-")
     assert terminal["message"] == "File not found: /tmp/input.mp4"
 
 

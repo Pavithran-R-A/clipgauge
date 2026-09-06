@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 
 from .. import config, downloads, runtime
+from ..render import ffmpeg_bin
 from . import youtube_compat
 
 _MANIFEST = Path(__file__).resolve().parents[2] / "runtime-manifest.json"
@@ -69,7 +70,7 @@ def normalize_youtube_url(url: str) -> str:
 
 
 # Keep the desktop fallback limited to browsers covered by this path.
-SUPPORTED_BROWSER_SESSIONS = {"chrome", "chromium", "firefox"}
+SUPPORTED_BROWSER_SESSIONS = {"chrome", "edge", "chromium", "firefox"}
 
 
 def _browser_auth_args(browser: str | None) -> list[str]:
@@ -433,7 +434,7 @@ _PCT_RE = re.compile(r"\[download\]\s+([\d.]+)%")
 def download(url: str, out_path: Path, progress: ProgressFn, cookies_from_browser: str | None = None, compatibility_method: str = "mweb") -> None:
     bin_path = ensure_ytdlp(progress)
     source_url = normalize_youtube_url(url) if _needs_youtube_provider(url) else url
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = ffmpeg_bin.ffmpeg() if ffmpeg_bin.readiness().ready else None
     args = [
         *_youtube_provider_args(source_url, compatibility_method=compatibility_method),
         *_browser_auth_args(cookies_from_browser),

@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
-import type { JobResults, JobSummary, LocalSetupInventory, LoopOverview, PreflightResult, PrivacySummary, SaveClipEditsInput, SetupState, SyncSummary, ProviderTestResult } from './types'
+import type { JobResults, JobSummary, LocalSetupInventory, LoopOverview, PreflightResult, PrivacySummary, SaveClipEditsInput, SetupState, StorageCleanupPreview, StorageCleanupResult, SyncSummary, ProviderTestResult } from './types'
 
 function legacyMode(provider: string): string | undefined {
   return provider === 'gemini' || provider === 'ollama' ? provider : undefined
@@ -41,6 +41,8 @@ export const api = {
   saveLocalModel: (modelId: string) => invoke<void>('save_local_model', { modelId }),
   checkOllama: () => invoke<{ state: 'service-stopped' | 'model-missing' | 'service-healthy'; running: boolean; models: string[]; message?: string }>('check_ollama'),
   setupInventory: (modelId?: string) => invoke<LocalSetupInventory>('setup_tool', { args: ['inventory', ...(modelId ? ['--model', modelId] : []) ] }),
+  storagePreview: (target: string, jobId?: string) => invoke<StorageCleanupPreview>('setup_tool', { args: ['storage-preview', target, ...(jobId ? [jobId] : [])] }),
+  storageCleanup: (target: string, jobId?: string) => invoke<StorageCleanupResult>('setup_tool', { args: ['storage-cleanup', target, ...(jobId ? [jobId] : []), '--confirm'] }),
   youtubeReadiness: () => invoke<import('./types').YouTubeReadiness>('setup_tool', { args: ['youtube-status'] }),
   setupToolYouTubeTest: () => invoke<import('./types').YouTubeReadiness>('setup_tool', { args: ['youtube-test'] }),
   installLocalRuntime: () => invoke<Record<string, unknown>>('setup_tool', { args: ['install-runtime'] }),

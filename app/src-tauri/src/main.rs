@@ -72,12 +72,12 @@ struct RunJobRequest {
 fn validate_browser_session(value: Option<&str>) -> Result<Option<String>, String> {
     match value {
         None => Ok(None),
-        Some(browser) if matches!(browser, "chrome" | "chromium" | "firefox") => {
+        Some(browser) if matches!(browser, "chrome" | "edge" | "chromium" | "firefox") => {
             Ok(Some(browser.to_string()))
         }
-        Some(_) => {
-            Err("Unsupported browser session. Choose Chrome, Chromium, or Firefox.".to_string())
-        }
+        Some(_) => Err(
+            "Unsupported browser session. Choose Chrome, Edge, Chromium, or Firefox.".to_string(),
+        ),
     }
 }
 
@@ -1686,13 +1686,49 @@ fn setup_tool_blocking(
     args: Vec<String>,
     initialization: Arc<sidecar::InitializationCoordinator>,
 ) -> Result<Value, String> {
-    let valid = matches!(args.as_slice(), [command] if command == "inventory" || command == "youtube-status" || command == "youtube-test" || command == "install-runtime" || command == "install-ffmpeg")
+    let storage_target = |value: &str| {
+        matches!(
+            value,
+            "session" | "failed-session" | "safe-cache" | "obsolete-runtime-archives"
+        )
+    };
+    let valid_storage_preview = matches!(args.as_slice(), [command, target] if command == "storage-preview" && storage_target(target))
+        || matches!(args.as_slice(), [command, target, job_id] if command == "storage-preview" && storage_target(target) && path_security::valid_job_id(job_id));
+    let valid_storage_cleanup = matches!(args.as_slice(), [command, target, confirm] if command == "storage-cleanup" && storage_target(target) && confirm == "--confirm")
+        || matches!(args.as_slice(), [command, target, job_id, confirm] if command == "storage-cleanup" && storage_target(target) && path_security::valid_job_id(job_id) && confirm == "--confirm");
+    let valid = valid_storage_preview
+        || valid_storage_cleanup
+        || matches!(args.as_slice(), [command] if command == "inventory" || command == "youtube-status" || command == "youtube-test" || command == "install-runtime" || command == "install-ffmpeg")
         || matches!(args.as_slice(), [command, flag, model] if command == "inventory" && flag == "--model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
         || matches!(args.as_slice(), [command, group, value] if command == "install-group" && group == "--group" && matches!(value.as_str(), "core:asr" | "core:analysis" | "core:youtube"))
         || matches!(args.as_slice(), [command, asset] if command == "install-asset" && asset.len() <= 180 && asset.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '_' | '/' | '.')))
         || matches!(args.as_slice(), [command, model] if command == "download-model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')));
     if !valid {
         return Err("unsupported setup operation".to_string());
+    }
+    if args.first().map(String::as_str) == Some("storage-preview")
+        || args.first().map(String::as_str) == Some("storage-cleanup")
+    {
+        let mode = if args[0] == "storage-preview" {
+            sidecar::PipelineMode::ReadOnly
+        } else {
+            sidecar::PipelineMode::ManagedOperation
+        };
+        if mode == sidecar::PipelineMode::ManagedOperation {
+            initialization.ensure_initialized(initialize_pipeline)?;
+        }
+        let (program, base_args) = pipeline_invocation_for(mode);
+        let mut full = base_args;
+        full.push("--jsonl".to_string());
+        full.push("setup".to_string());
+        full.extend(args);
+        let mut command = quiet_command(&program);
+        secrets::apply_operation_env(&mut command);
+        command.env("CLIPGAUGE_HOME", home_dir()).args(&full);
+        let out = sidecar::run_bounded(command, sidecar::RunPolicy::status())
+            .map_err(|error| format!("storage operation failed: {error:?}"))?;
+        return serde_json::from_str(&out.stdout)
+            .map_err(|error| format!("storage operation returned invalid JSON: {error}"));
     }
     if args.first().map(String::as_str) == Some("inventory") {
         let requested_model = args.get(2).map(String::as_str);
@@ -2321,7 +2357,7 @@ mod tests {
                 .as_deref(),
             Some("firefox")
         );
-        assert!(validate_browser_session(Some("edge")).is_err());
+        assert!(validate_browser_session(Some("safari")).is_err());
     }
 
     #[test]

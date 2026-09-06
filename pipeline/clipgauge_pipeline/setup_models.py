@@ -7,6 +7,8 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from .readiness import contract
+
 RECOMMENDED_MODEL_ID = "clipgauge-local/qwen3-4b-q4_k_m"
 SELECTION_FILENAME = "local-ai-settings.json"
 
@@ -70,5 +72,17 @@ def enrich_model_row(row: Mapping[str, Any]) -> dict[str, Any]:
             "required_download_bytes": 0 if installed else size,
             "installed_size_bytes": int(result.get("installed_size_bytes") or (size if installed else 0)),
         }
+    )
+    result.update(
+        contract(
+            asset_id=str(result.get("asset_id") or "model:unknown"),
+            installed=installed,
+            verified=installed,
+            usable=installed,
+            repair=lifecycle == "NEEDS_REPAIR",
+            selected_model=str(result.get("asset_id")) if result.get("asset_id") else None,
+            actual_additional_bytes=0 if installed else size,
+            repair_reason="The installed model failed verification." if lifecycle == "NEEDS_REPAIR" else None,
+        )
     )
     return result

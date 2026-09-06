@@ -28,7 +28,7 @@ const FRIENDLY_FAILURES: Record<string, string> = {
   SPEAKER_ANALYSIS_FAILED: 'Speaker analysis could not complete. Retry the job or continue without speaker-aware reframing.',
   SPEAKER_CLUSTER_FAILED: 'Speaker grouping could not complete. Retry the job or continue without speaker-aware reframing.',
   PROVIDER_UNAVAILABLE: 'The selected AI is unavailable. Open AI Providers or choose another provider.',
-  YTDLP_ATTESTATION_REQUIRED: 'YouTube rejected this download during playback verification. ClipGauge itself is ready; retry later, try optional browser-assisted compatibility with explicit approval, or import the video file directly.',
+  YTDLP_ATTESTATION_REQUIRED: 'YouTube rejected this download during playback verification. ClipGauge itself is ready; retry later or import the video file directly.',
   YTDLP_LOGIN_REQUIRED: 'This video requires a signed-in YouTube session. Use a browser session only if you explicitly consent.',
   ASR_GPU_FALLBACK_REQUIRES_APPROVAL: 'GPU speech acceleration failed. Repair GPU acceleration, or explicitly continue in slower CPU mode.'
 }
@@ -52,6 +52,7 @@ export default function App() {
   const [selectedLocalModelId, setSelectedLocalModelId] = useState<string | null>(null)
   const unlistenRef = useRef<(() => void) | null>(null)
   const activeJobRef = useRef<string | null>(null)
+  const activeAttemptRef = useRef<string | null>(null)
   activeJobRef.current = activeJob
 
   const refreshJobs = useCallback(() => { api.listJobs().then(setJobs).catch(() => setJobs([])) }, [])
@@ -87,7 +88,13 @@ export default function App() {
   useEffect(() => {
     let disposed = false
     listen<PipelineEvent>('pipeline-event', ({ payload }) => {
+      // Sidecar events can arrive late after a resumed or retried job.
+      // Once a job is active, unrelated events must not mutate its UI.
+      if (payload.job_id && activeJobRef.current && payload.job_id !== activeJobRef.current) return
+      if (payload.attempt_id && activeAttemptRef.current && payload.attempt_id !== activeAttemptRef.current) return
       if (payload.event === 'job' && payload.job_id) {
+        activeJobRef.current = payload.job_id
+        activeAttemptRef.current = payload.attempt_id ?? null
         setActiveJob(payload.job_id)
         setResults(null)
       } else if (payload.event === 'progress' && payload.stage) {
@@ -143,6 +150,8 @@ export default function App() {
     setStages({})
     setResults(null)
     setActiveJob(null)
+    activeJobRef.current = null
+    activeAttemptRef.current = null
     try {
       const resolvedModel = model ?? (provider === 'clipgauge-local' ? resolveSelectedLocalModel(await api.setupInventory()) : undefined)
       const preflight = await api.preflight(provider, resolvedModel, endpoint, auth, secretHeader, sourceKind(source) === 'youtube' ? source : undefined)

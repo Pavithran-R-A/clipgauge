@@ -8,6 +8,7 @@ cuts and audio events support boundaries; neither can split a story alone.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -19,7 +20,7 @@ SHORTLIST_LIMIT = 24
 MAX_CANDIDATES_PER_TIME_BUCKET = 4
 TOPIC_BOUNDARY_THRESHOLD = 0.62
 MIN_TOPIC_UNITS = 5
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_TOKEN_RE = re.compile(r"[\w]+", re.UNICODE)
 _STOPWORDS = {
     "a", "about", "after", "all", "an", "and", "are", "as", "at", "be",
     "because", "but", "by", "can", "do", "does", "for", "from", "get",
@@ -84,10 +85,18 @@ class BoundaryProposal:
 
 
 def _tokens(text: str) -> frozenset[str]:
-    return frozenset(
-        token for token in _TOKEN_RE.findall(text.lower())
-        if token not in _STOPWORDS and len(token) > 2
-    )
+    tokens: set[str] = set()
+    for raw in text.lower().split():
+        token = "".join(
+            character
+            for character in raw
+            if character == "'"
+            or character.isalnum()
+            or unicodedata.category(character).startswith("M")
+        )
+        if token and token not in _STOPWORDS and len(token) > 2:
+            tokens.add(token)
+    return frozenset(tokens)
 
 
 def _scene_id(start: float, scene_times: list[float]) -> int:

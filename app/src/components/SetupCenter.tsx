@@ -81,8 +81,7 @@ function youtubeStatusCopy(status: YouTubeReadiness | null): string {
   if (!status) return 'Checking YouTube tools…'
   if (status.state === 'PUBLIC_DOWNLOAD_VERIFIED') return 'Live public download verified.'
   if (status.state === 'DEPENDENCIES_READY' || status.state === 'READY') {
-    const wpc = status.wpc?.available ? ' Optional browser-assisted compatibility is available only after explicit approval.' : ' Optional browser-assisted compatibility is not installed; ClipGauge will not install or launch a browser automatically.'
-    return `YouTube tools installed; live public download is not verified. Local-file import always remains available.${wpc}`
+    return 'YouTube tools installed; live public download is not verified. Local-file import always remains available.'
   }
   return status.reason
 }
@@ -121,6 +120,8 @@ export default function SetupCenter({ onBack, onUseLocal }: Props) {
   const [youtubeLoad, setYoutubeLoad] = useState<SetupLoadState<YouTubeReadiness | null>>({ phase: 'loading' })
   const [youtubeBusy, setYoutubeBusy] = useState(false)
   const [youtubeApproved, setYoutubeApproved] = useState(false)
+  const [cleanupBusy, setCleanupBusy] = useState<string | null>(null)
+  const [sessionId, setSessionId] = useState('')
   const youtubeStatusCopy = (status: YouTubeReadiness | null) => youtubeLoadCopy(status, youtubeLoad)
   const queueRef = useRef<string[][]>([])
   const outcomesRef = useRef<Array<'success' | 'failed' | 'cancelled'>>([])
@@ -334,6 +335,32 @@ export default function SetupCenter({ onBack, onUseLocal }: Props) {
     await begin(GROUP_COMMANDS.youtube, 'Installing the approved YouTube support bundle.')
   }
 
+  async function cleanupStorage(target: 'safe-cache' | 'obsolete-runtime-archives' | 'session' | 'failed-session') {
+    const jobId = target === 'session' || target === 'failed-session' ? sessionId.trim() : undefined
+    if ((target === 'session' || target === 'failed-session') && !jobId) {
+      setMessage('Enter a session ID before cleanup.')
+      return
+    }
+    setCleanupBusy(target)
+    try {
+      const preview = await api.storagePreview(target, jobId)
+      if (!preview.paths.length) {
+        setMessage('Nothing matched that cleanup request.')
+        return
+      }
+      const scope = target === 'session' ? `session ${jobId}` : target === 'failed-session' ? `failed session ${jobId}` : target === 'safe-cache' ? 'safe temporary cache' : 'obsolete runtime archives'
+      if (!window.confirm(`Delete ${formatBytes(preview.bytes)} from ${scope}? User sessions and source media remain untouched.`)) return
+      const result = await api.storageCleanup(target, jobId)
+      setMessage(`Removed ${formatBytes(result.bytes)}. Verified components remain available.`)
+      if (target === 'session' || target === 'failed-session') setSessionId('')
+      await refresh()
+    } catch (error) {
+      setMessage(`Cleanup could not run: ${loadErrorMessage(error)}`)
+    } finally {
+      setCleanupBusy(null)
+    }
+  }
+
   return (
     <div className="page-frame setup-page">
       <header className="page-header setup-header">
@@ -341,13 +368,14 @@ export default function SetupCenter({ onBack, onUseLocal }: Props) {
         <button type="button" className="button button-quiet" onClick={onBack}><X size={16} aria-hidden="true" /> Close</button>
       </header>
       <section className="setup-overview card-surface">
-        <div className="setup-overview-main"><div className="setup-ready-icon"><Check size={20} aria-hidden="true" /></div><div><strong>{inventoryLoad.phase === 'loading' ? 'Checking local components.' : inventoryLoad.phase === 'error' ? 'Setup check needs attention.' : allReady ? 'Core components are ready.' : 'Core components need setup.'}</strong><p>Downloads are verified, resumable, and kept on this computer. Optional capabilities have their own status below.</p></div></div>
+        <div className="setup-overview-main"><div className="setup-ready-icon"><Check size={20} aria-hidden="true" /></div><div><strong>{inventoryLoad.phase === 'loading' ? 'Checking local components.' : inventoryLoad.phase === 'error' ? 'Setup check needs attention.' : allReady ? 'Core components are ready.' : 'Core components need setup.'}</strong><p>Downloads are verified, resumable, and kept on this computer. Selected provider: ClipGauge Local — {localStateLabel}.</p></div></div>
         <div className="storage-stats"><div><span>Required now</span><strong>{inventoryLoad.phase === 'loading' ? 'Checking…' : inventoryLoad.phase === 'error' ? 'Unavailable' : allReady ? 'Ready' : missingGroupTotal > 0 ? formatBytes(missingGroupTotal) : 'Size calculated during setup'}</strong></div><div><span>Already installed</span><strong>{inventoryLoad.phase === 'loading' ? 'Checking…' : inventoryLoad.phase === 'error' ? 'Unavailable' : formatBytes(inventory?.storage?.installed_bytes ?? inventory?.storage?.required_bytes)}</strong></div><div><span>Available disk</span><strong>{inventoryLoad.phase === 'loading' ? 'Checking…' : inventoryLoad.phase === 'error' ? 'Unavailable' : formatBytes(inventory?.storage?.available_bytes)}</strong></div></div>
         {!allReady && <div className="setup-install-row"><label className="consent-line" htmlFor="setup-approval"><input id="setup-approval" type="checkbox" checked={approved} onChange={(event) => setApproved(event.target.checked)} /><span>I approve these one-time downloads to this computer.</span></label><button type="button" className="button button-primary" onClick={installRequired} disabled={!canInstall}>{busy ? 'Installing…' : `Install required components · ${missingGroupTotal > 0 ? formatBytes(missingGroupTotal) : 'size calculated during setup'}`}</button></div>}
         {inventoryLoad.phase === 'loading' && <p className="inline-message" role="status">{setupPhaseLabel('loading')}</p>}
         {inventoryLoad.phase === 'error' && <p className="inline-message" role="alert">{inventoryLoad.message} <button type="button" className="button button-secondary" onClick={() => void refresh()}>Retry setup check</button></p>}
         {message && <p className="inline-message" role="status">{message}</p>}
       </section>
+      <section className="card-surface storage-breakdown-section"><div className="section-heading"><div><p className="section-eyebrow">Storage breakdown</p><h2>What uses disk space</h2><p className="section-caption">Sessions and source media stay untouched. Cleanup requires an explicit action and confirmation.</p></div></div><div className="storage-breakdown-grid">{(inventory?.storage?.breakdown ?? []).map((row) => <div className="summary-row" key={row.category}><span>{row.display_name}</span><strong>{formatBytes(row.bytes)}</strong></div>)}</div><div className="detail-actions storage-cleanup-actions"><button type="button" className="button button-secondary" onClick={() => void cleanupStorage('safe-cache')} disabled={cleanupBusy !== null}>{cleanupBusy === 'safe-cache' ? 'Checking…' : 'Clear safe cache'}</button><button type="button" className="button button-secondary" onClick={() => void cleanupStorage('obsolete-runtime-archives')} disabled={cleanupBusy !== null}>{cleanupBusy === 'obsolete-runtime-archives' ? 'Checking…' : 'Remove obsolete runtime archives'}</button><label className="storage-session-input">Session ID<input value={sessionId} onChange={(event) => setSessionId(event.target.value)} placeholder="20260818-155237-c6b118" spellCheck={false} /></label><button type="button" className="button button-secondary" onClick={() => void cleanupStorage('session')} disabled={cleanupBusy !== null || !sessionId.trim()}>{cleanupBusy === 'session' ? 'Checking…' : 'Delete session'}</button><button type="button" className="button button-secondary" onClick={() => void cleanupStorage('failed-session')} disabled={cleanupBusy !== null || !sessionId.trim()}>{cleanupBusy === 'failed-session' ? 'Checking…' : 'Delete failed session'}</button></div></section>
       <section className="component-section"><div className="section-heading"><div><p className="section-eyebrow">What ClipGauge uses</p><h2>One clear list</h2></div><span className="section-caption">{queueSummary.state === 'complete' ? 'Setup complete' : 'No hidden downloads'}</span></div><div className="component-grid">{groups.map((group) => <article className="component-card" key={group.id}><div className="component-card-heading"><span className="component-icon"><HardDrive size={17} aria-hidden="true" /></span><div><h3>{group.title}</h3><p>{group.description}</p></div><span className={`status-pill tone-${group.state.tone}`}><span className="status-dot" aria-hidden="true" />{group.state.label}</span></div><div className="component-card-footer"><span>{group.size ? formatBytes(group.size) : 'Size calculated during setup'}</span>{group.state.ready && <span className="reuse-note"><Check size={14} aria-hidden="true" /> {group.state.label.includes('System') ? 'System component reused' : 'Reused for future videos'}</span>}</div>{group.id === 'youtube' && <div className="component-card-actions"><span className="component-card-action-copy">{youtubeStatusCopy(youtubeStatus)}</span>{youtubeNeedsInstall && <label className="consent-line" htmlFor="youtube-approval"><input id="youtube-approval" type="checkbox" checked={youtubeApproved} onChange={(event) => setYoutubeApproved(event.target.checked)} /><span>I approve YouTube support installation.</span></label>}<div className="detail-actions">{youtubeNeedsInstall && <button type="button" className="button button-primary" onClick={installYouTube} disabled={!canInstallYouTube}>{statusHasRepair(youtubeStatus) ? 'Repair YouTube support' : 'Install YouTube support'}</button>}<button type="button" className="button button-secondary" onClick={testYouTube} disabled={youtubeBusy}>{youtubeBusy ? 'Testing…' : 'Test YouTube support'}</button></div></div>}</article>)}</div></section>
       <section className="card-surface local-model-section"><div className="section-heading"><div><p className="section-eyebrow">Optional local AI</p><h2>Choose one model</h2><p className="section-caption">Score clips completely on this computer. Only the model you choose counts toward this estimate.</p></div><span className="soft-badge">{optionalLabel}</span></div><div className="model-choice-grid">{models.length ? models.map((model, index) => { const id = String(model.asset_id); const selected = id === String(selectedModel?.asset_id); return <label className={`model-choice ${selected ? 'is-selected' : ''}`} key={id}><input type="radio" name="local-model" value={id} checked={selected} onChange={() => selectModel(id)} /><span><strong>{modelLabel(model, index)}{index === 1 && <em>Recommended</em>}</strong><small>{model.purpose ?? 'A local model for clip scoring.'}</small><b>{(model as { lifecycle_label?: string }).lifecycle_label ?? 'Download required'}</b><span className="model-download-note">{Number((model as { required_download_bytes?: number }).required_download_bytes ?? model.size_bytes) > 0 ? `${formatBytes(Number((model as { required_download_bytes?: number }).required_download_bytes ?? model.size_bytes))} additional download` : 'No additional download required'}</span></span><span className="choice-check"><Check size={15} aria-hidden="true" /></span></label> }) : <p className="empty-state">Local model choices will appear after the component catalog loads.</p>}</div></section>
       <section className="card-surface local-install-action"><div className="section-heading"><div><p className="section-eyebrow">Local scoring</p><h2>{localReady ? 'ClipGauge Local is ready' : 'Run scoring locally'}</h2><p className="section-caption">Runs completely on this computer. No API key. Install the engine and the one model you choose.</p></div><span className={`status-pill tone-${localReady ? 'ready' : 'warning'}`}><span className="status-dot" aria-hidden="true" />{localStateLabel}</span></div>{localReady ? <button type="button" className="button button-secondary" onClick={() => onUseLocal?.(selectedModelId ?? String(selectedModel?.asset_id ?? ''))}>Use ClipGauge Local</button> : <div className="setup-install-row"><label className="consent-line" htmlFor="local-approval"><input id="local-approval" type="checkbox" checked={localApproved} onChange={(event) => setLocalApproved(event.target.checked)} /><span>I approve this optional local-AI download.</span></label><button type="button" className="button button-primary" onClick={installLocal} disabled={!canInstallLocal}>{busy ? 'Installing…' : inventory?.local_ai?.action ?? 'Install ClipGauge Local'}</button></div>}</section>

@@ -71,7 +71,7 @@ def _managed_dir() -> Path | None:
 
 
 def _probe(binary: str) -> tuple[str | None, dict[str, bool], str]:
-    capabilities = {"starts": False, "subtitles": False}
+    capabilities = {"starts": False, "subtitles": False, "ass": False}
     try:
         version = subprocess.run(
             [binary, "-hide_banner", "-version"],
@@ -94,11 +94,14 @@ def _probe(binary: str) -> tuple[str | None, dict[str, bool], str]:
         capabilities["subtitles"] = filters.returncode == 0 and any(
             "subtitles" in line.strip().split() for line in filter_text.splitlines()
         )
-        if capabilities["starts"] and capabilities["subtitles"]:
+        capabilities["ass"] = filters.returncode == 0 and any(
+            "ass" in line.strip().split() for line in filter_text.splitlines()
+        )
+        if capabilities["starts"] and capabilities["subtitles"] and capabilities["ass"]:
             return version_line, capabilities, "Compatible caption-capable FFmpeg."
         if not capabilities["starts"]:
             return version_line, capabilities, "FFmpeg did not start successfully."
-        return version_line, capabilities, "FFmpeg is missing the subtitles filter required for caption rendering."
+        return version_line, capabilities, "FFmpeg is missing the subtitles or ass filter required for caption rendering."
     except subprocess.TimeoutExpired:
         return None, capabilities, "FFmpeg capability probe timed out."
     except OSError as exc:
@@ -107,6 +110,11 @@ def _probe(binary: str) -> tuple[str | None, dict[str, bool], str]:
 
 def _has_subtitles_filter(binary: str) -> bool:
     return _probe(binary)[1]["subtitles"]
+
+
+def _has_caption_filters(binary: str) -> bool:
+    capabilities = _probe(binary)[1]
+    return capabilities["subtitles"] and capabilities["ass"]
 
 
 def _candidates() -> list[tuple[str, str]]:
@@ -138,7 +146,7 @@ def readiness() -> FFmpegReadiness:
         if not Path(candidate).is_file():
             continue
         version, capabilities, reason = _probe(candidate)
-        if capabilities["starts"] and capabilities["subtitles"]:
+        if capabilities["starts"] and capabilities["subtitles"] and capabilities["ass"]:
             return FFmpegReadiness(
                 ready=True,
                 source=source,
@@ -165,7 +173,7 @@ def readiness() -> FFmpegReadiness:
         source="missing",
         executable=None,
         version=None,
-        capabilities={"starts": False, "subtitles": False},
+        capabilities={"starts": False, "subtitles": False, "ass": False},
         managed_download_needed=managed_available,
         reason="No FFmpeg executable was found in the configured, managed, bundled, or system locations.",
     )
@@ -233,8 +241,8 @@ def _atomic_install_windows(archive: Path) -> bool:
             member_modes={name: 0o755 for name in wanted},
         )
         ffmpeg_path = staging / "ffmpeg.exe"
-        if not _has_subtitles_filter(str(ffmpeg_path)):
-            raise runtime.RuntimeIntegrityError("managed FFmpeg lacks the required subtitles/libass filter")
+        if not _has_caption_filters(str(ffmpeg_path)):
+            raise runtime.RuntimeIntegrityError("managed FFmpeg lacks the required subtitles/libass filters")
         managed.parent.mkdir(parents=True, exist_ok=True)
         backup = managed.with_name(f".{managed.name}.{time.time_ns()}.previous")
         if managed.exists():

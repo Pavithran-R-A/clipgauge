@@ -2,6 +2,21 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.11] — 2026-09-06
+
+ClipGauge v0.5.11 completes real-device stabilization on Windows.
+
+### Fixed
+
+- Tamil and other non-English speech no longer hard-blocks on missing word-alignment assets; deterministic bounded fallback timings remain explicit.
+- Setup, preflight, and local runtime now share a versioned readiness contract and selected runtime policy.
+- Extracted llama.cpp runtimes remain ready after their download archives are cleared.
+- YouTube status and pipeline events are scoped to the current job attempt; browser-assisted compatibility is not advertised.
+- FFmpeg readiness verifies both `subtitles` and `ass` caption filters.
+- Setup reports storage categories and confirmation-gated cleanup for sessions, safe cache, and obsolete runtime archives.
+- Tamil caption text retains Unicode glyphs across caption presets.
+- Preserves the v0.5.3 local-media fallback guidance.
+
 ## [0.5.10] — 2026-09-05
 
 ClipGauge v0.5.10 stabilizes fresh setup and packaged runtime readiness.

@@ -249,7 +249,7 @@ def test_windows_system_ffmpeg_with_spaces_is_capable_and_needs_no_managed_downl
     monkeypatch.setattr(ffmpeg_bin.platform, "machine", lambda: "AMD64")
     monkeypatch.setenv("CLIPGAUGE_FFMPEG", str(binary))
     monkeypatch.setattr(ffmpeg_bin, "_platform_asset", lambda: None)
-    monkeypatch.setattr(ffmpeg_bin, "_probe", lambda path: ("ffmpeg version test", {"starts": True, "subtitles": True}, "ok") if path == str(binary) else (None, {"starts": False, "subtitles": False}, "unused"))
+    monkeypatch.setattr(ffmpeg_bin, "_probe", lambda path: ("ffmpeg version test", {"starts": True, "subtitles": True, "ass": True}, "ok") if path == str(binary) else (None, {"starts": False, "subtitles": False, "ass": False}, "unused"))
     ffmpeg_bin.readiness.cache_clear()
     ffmpeg_bin.resolve.cache_clear()
     try:
@@ -273,7 +273,7 @@ def test_windows_managed_ffmpeg_is_used_when_it_is_the_first_capable_candidate(m
     monkeypatch.setattr(ffmpeg_bin, "_managed_dir", lambda: binary.parent)
     monkeypatch.delenv("CLIPGAUGE_FFMPEG", raising=False)
     monkeypatch.setattr(ffmpeg_bin, "_platform_asset", lambda: {"key": "win64-gpl", "version": "test", "size": 163})
-    monkeypatch.setattr(ffmpeg_bin, "_probe", lambda _path: ("ffmpeg version managed", {"starts": True, "subtitles": True}, "ok"))
+    monkeypatch.setattr(ffmpeg_bin, "_probe", lambda _path: ("ffmpeg version managed", {"starts": True, "subtitles": True, "ass": True}, "ok"))
     ffmpeg_bin.readiness.cache_clear()
     try:
         result = ffmpeg_bin.readiness()
@@ -293,7 +293,7 @@ def test_windows_incompatible_system_ffmpeg_offers_managed_fallback(monkeypatch,
     monkeypatch.setattr(ffmpeg_bin.platform, "machine", lambda: "AMD64")
     monkeypatch.setenv("CLIPGAUGE_FFMPEG", str(binary))
     monkeypatch.setattr(ffmpeg_bin, "_platform_asset", lambda: {"key": "win64-gpl", "version": "test", "size": 163})
-    monkeypatch.setattr(ffmpeg_bin, "_probe", lambda _path: ("ffmpeg version old", {"starts": True, "subtitles": False}, "missing subtitles"))
+    monkeypatch.setattr(ffmpeg_bin, "_probe", lambda _path: ("ffmpeg version old", {"starts": True, "subtitles": False, "ass": False}, "missing subtitles"))
     ffmpeg_bin.readiness.cache_clear()
     try:
         result = ffmpeg_bin.readiness()

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import httpx
 
-from . import config, hardware, local_runtime, protocol, runtime
+from . import config, hardware, local_runtime, protocol, readiness, runtime
 from .ingest import ytdlp
 from .models import registry, specs  # noqa: F401 - register concrete models
 from .render import ffmpeg_bin
@@ -281,6 +281,23 @@ def run(selected_llm: providers_mod.ProviderProfile | str = "gemini", source: st
     states = {item["state"] for item in checks}
     overall = "blocked" if "blocked" in states else "warning" if "warning" in states else "ready"
     capabilities = hardware.snapshot(config.home_dir())
+    provider_ready = not any(check.get("state") == "blocked" and check.get("name") in {"provider", "clipgauge-local", "clipgauge-local-runtime", "clipgauge-local-model", "provider-credential"} for check in checks)
+    selected_runtime = profile.kind
+    runtime_ready = provider_ready
+    if profile.kind == "clipgauge-local":
+        runtime_status = local_runtime.LocalRuntime().readiness()
+        selected_runtime = str(runtime_status.get("selected_runtime") or "cpu")
+        runtime_ready = bool(runtime_status.get("usable"))
+    provider_contract = readiness.contract(
+        asset_id=f"provider:{profile.kind}",
+        installed=provider_ready,
+        verified=provider_ready,
+        usable=provider_ready and (runtime_ready if profile.kind == "clipgauge-local" else True),
+        repair=bool(any(check.get("state") == "blocked" for check in checks if check.get("name", "").startswith("clipgauge-local"))),
+        selected_runtime=selected_runtime,
+        selected_model=profile.model,
+        actual_additional_bytes=int((_storage_estimate(checks, free_bytes).get("required_bytes") or 0)),
+    )
     return {
         "state": overall,
         "checks": checks,
@@ -296,4 +313,5 @@ def run(selected_llm: providers_mod.ProviderProfile | str = "gemini", source: st
             "capabilities": profile.capabilities.to_dict(),
             "locality": profile.locality,
         },
+        "readiness": provider_contract,
     }

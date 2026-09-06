@@ -157,3 +157,27 @@ def asr_readiness(capabilities: dict[str, Any]) -> dict[str, Any]:
         "compute_type": compute_type,
         "reason": "No verified speech accelerator is available.",
     }
+
+
+def local_runtime_snapshot(data_root: Path | None = None) -> dict[str, Any]:
+    """Probe only launch-time GPU backends.
+
+    Local llama.cpp selection must stay responsive.  CTranslate2 loading is
+    reserved for ASR qualification and is not needed to select a llama.cpp
+    binary that already has its managed companion libraries.
+    """
+    system = platform.system()
+    machine = platform.machine()
+    free_bytes = None
+    if data_root is not None:
+        try:
+            free_bytes = shutil.disk_usage(data_root).free
+        except OSError:
+            free_bytes = None
+    return {
+        "os": system,
+        "architecture": machine,
+        "nvidia": _nvidia(),
+        "vulkan": _vulkan(),
+        "disk_free_bytes": free_bytes,
+    }

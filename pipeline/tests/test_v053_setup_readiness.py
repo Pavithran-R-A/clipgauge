@@ -194,6 +194,20 @@ def test_wpc_availability_does_not_launch_browser_and_requires_explicit_use(monk
     assert launches == []
 
 
+def test_windows_browser_discovery_checks_installed_paths_without_profiles(monkeypatch, tmp_path):
+    from clipgauge_pipeline.ingest import youtube_compat
+
+    chrome = tmp_path / "Google" / "Chrome" / "Application" / "chrome.exe"
+    chrome.parent.mkdir(parents=True)
+    chrome.write_bytes(b"browser")
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path))
+    monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path / "missing-x86"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "missing-local"))
+    monkeypatch.setattr(youtube_compat.shutil, "which", lambda _name: None)
+
+    assert youtube_compat._find_browser() == str(chrome.resolve())
+
+
 def test_wpc_user_declines_without_browser_side_effect(monkeypatch):
     launches = []
     monkeypatch.setattr(youtube_compat, '_launch_wpc_browser', lambda *args, **kwargs: launches.append(True))

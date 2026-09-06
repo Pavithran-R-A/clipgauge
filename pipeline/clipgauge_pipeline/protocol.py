@@ -99,6 +99,7 @@ class TerminalEmitter:
 
     emit: Callable[[dict[str, Any]], None]
     job_id: str | None = None
+    attempt_id: str | None = None
     emitted: bool = False
 
     def terminal(
@@ -119,6 +120,7 @@ class TerminalEmitter:
             "protocol_version": PROTOCOL_VERSION,
             "ok": bool(ok),
             "job_id": self.job_id,
+            "attempt_id": self.attempt_id,
             "stage": stage,
             "code": code,
             "message": safe_message(message),
