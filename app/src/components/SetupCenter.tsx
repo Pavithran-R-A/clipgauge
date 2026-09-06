@@ -4,7 +4,8 @@ import { listen } from '@tauri-apps/api/event'
 import { api } from '../api'
 import type { LocalSetupInventory, ManagedAssetRow, SetupProgressEvent, YouTubeReadiness } from '../types'
 import { assetLifecycleLabel, formatBytes, formatDuration, formatRate, meaningfulEta, progressPercent } from '../setupFormatting'
-import { resolveSelectedLocalModel, summarizeSetupQueue, type SetupQueueSummary } from '../setupState'
+import { isLocalAiUnavailable, resolveSelectedLocalModel, summarizeSetupQueue, type SetupQueueSummary } from '../setupState'
+import { loadErrorMessage, setupPhaseLabel, type SetupLoadState } from '../setupLifecycle'
 
 interface Props { onBack: () => void; onUseLocal?: (modelId?: string) => void }
 
@@ -12,7 +13,7 @@ type Group = { id: string; title: string; description: string; prefixes: string[
 
 const GROUPS: Group[] = [
   { id: 'video', title: 'Video tools', description: 'Read and render video with captions.', prefixes: ['runtime:ffmpeg:'], required: true },
-  { id: 'speech', title: 'Speech recognition', description: 'Transcription and word timing.', prefixes: ['model:asr:', 'model:alignment:', 'data:nltk:', 'model:silero:'], required: true },
+  { id: 'speech', title: 'Speech recognition', description: 'Transcription and word timing.', prefixes: ['model:asr:', 'model:alignment:', 'data:nltk:', 'model:vad:', 'model:silero:'], required: true },
   { id: 'analysis', title: 'Speaker & audio analysis', description: 'Speaker detection, laughter, audio events, and smart camera signals.', prefixes: ['model:laughter:', 'model:panns:', 'model:campplus:', 'model:ultraface:', 'model:lr-asd:'], required: true },
   { id: 'youtube', title: 'YouTube support', description: 'Best-effort public YouTube import; availability depends on YouTube.', prefixes: ['runtime:yt-dlp:', 'runtime:node:', 'youtube:bgutil-provider:'], required: false }
 ]
@@ -27,6 +28,9 @@ const GROUP_COMMANDS: Record<string, string[]> = {
 function assetsFor(inventory: LocalSetupInventory | null, group: Group): ManagedAssetRow[] {
   const rows = (inventory?.managed_assets ?? []).filter((asset) => group.prefixes.some((prefix) => asset.asset_id.startsWith(prefix)))
   const videoTools = inventory?.video_tools
+  if (group.id === 'video' && videoTools && !videoTools.ready && rows.some((row) => row.installed)) {
+    return rows.map((row) => ({ ...row, installed: false, cached: false, status: 'needs-repair', state: 'NEEDS_REPAIR', reason: videoTools.reason }))
+  }
   if (group.id !== 'video' || !videoTools?.ready || videoTools.managed_download_needed) return rows
   const base = rows[0] ?? {
     asset_id: 'runtime:ffmpeg:capability',
@@ -45,7 +49,7 @@ function assetsFor(inventory: LocalSetupInventory | null, group: Group): Managed
     ...base,
     installed: true,
     cached: true,
-    size_bytes: 0,
+    size_bytes: base.size_bytes,
     installed_size_bytes: 0,
     status: videoTools.source === 'system' ? 'reused-system' : 'ready',
     state: 'READY',
@@ -83,6 +87,12 @@ function youtubeStatusCopy(status: YouTubeReadiness | null): string {
   return status.reason
 }
 
+function youtubeLoadCopy(status: YouTubeReadiness | null, load: SetupLoadState<YouTubeReadiness | null>): string {
+  if (load.phase === 'loading') return 'Checking YouTube tools…'
+  if (load.phase === 'error') return load.message ?? 'YouTube status is unavailable. Retry the check.'
+  return status ? youtubeStatusCopy(status) : 'YouTube status is unavailable. Retry the check.'
+}
+
 function statusHasRepair(status: YouTubeReadiness | null): boolean {
   return Boolean(status?.actions.includes('Repair'))
 }
@@ -94,6 +104,7 @@ function modelLabel(model: Record<string, unknown>, index: number): string {
 
 export default function SetupCenter({ onBack, onUseLocal }: Props) {
   const [inventory, setInventory] = useState<LocalSetupInventory | null>(null)
+  const [inventoryLoad, setInventoryLoad] = useState<SetupLoadState<LocalSetupInventory>>({ phase: 'loading' })
   const [approved, setApproved] = useState(false)
   const [localApproved, setLocalApproved] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -107,30 +118,49 @@ export default function SetupCenter({ onBack, onUseLocal }: Props) {
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null)
   const [queueSummary, setQueueSummary] = useState<SetupQueueSummary>({ state: 'pending', completed: 0, failed: 0, cancelled: false })
   const [youtubeStatus, setYoutubeStatus] = useState<YouTubeReadiness | null>(null)
+  const [youtubeLoad, setYoutubeLoad] = useState<SetupLoadState<YouTubeReadiness | null>>({ phase: 'loading' })
   const [youtubeBusy, setYoutubeBusy] = useState(false)
   const [youtubeApproved, setYoutubeApproved] = useState(false)
+  const youtubeStatusCopy = (status: YouTubeReadiness | null) => youtubeLoadCopy(status, youtubeLoad)
   const queueRef = useRef<string[][]>([])
   const outcomesRef = useRef<Array<'success' | 'failed' | 'cancelled'>>([])
   const currentArgsRef = useRef<string[] | null>(null)
   const failedArgsRef = useRef<string[] | null>(null)
   const failedLabelsRef = useRef<string[]>([])
   const inventoryRequestRef = useRef(0)
+  const mountedRef = useRef(true)
 
-  const refreshYouTube = () => (api.youtubeReadiness?.() ?? Promise.resolve(null)).then((value) => setYoutubeStatus(value as YouTubeReadiness | null)).catch(() => setYoutubeStatus(null))
+  const refreshYouTube = () => {
+    setYoutubeLoad({ phase: 'loading' })
+    return (api.youtubeReadiness?.() ?? Promise.resolve(null)).then((value) => {
+      if (!mountedRef.current) return
+      const next = value as YouTubeReadiness | null
+      setYoutubeStatus(next)
+      setYoutubeLoad({ phase: 'ready', value: next })
+    }).catch((error) => {
+      if (!mountedRef.current) return
+      setYoutubeStatus(null)
+      setYoutubeLoad({ phase: 'error', message: loadErrorMessage(error) })
+    })
+  }
 
   const refresh = (modelId?: string) => {
     const requestId = ++inventoryRequestRef.current
+    if (!inventory) setInventoryLoad({ phase: 'loading' })
     return api.setupInventory(modelId).then((value) => {
-      if (requestId !== inventoryRequestRef.current) return
-      const next = value as unknown as LocalSetupInventory
+      if (!mountedRef.current || requestId !== inventoryRequestRef.current) return
+      const next = value
       setInventory(next)
+      setInventoryLoad({ phase: 'ready', value: next })
       setSelectedModelId((current) => resolveSelectedLocalModel(next, current) ?? null)
-    }).catch(() => {
-      if (requestId === inventoryRequestRef.current) setMessage('Setup information is temporarily unavailable.')
+    }).catch((error) => {
+      if (mountedRef.current && requestId === inventoryRequestRef.current) setInventoryLoad({ phase: 'error', message: loadErrorMessage(error) })
     })
   }
 
   useEffect(() => {
+    mountedRef.current = true
+    let disposed = false
     void refresh()
     void refreshYouTube()
     let stop: (() => void) | undefined
@@ -160,8 +190,15 @@ export default function SetupCenter({ onBack, onUseLocal }: Props) {
           void refreshYouTube()
         }
       }
-    }).then((unlisten) => { stop = unlisten })
-    return () => stop?.()
+    }).then((unlisten) => {
+      if (disposed) unlisten()
+      else stop = unlisten
+    })
+    return () => {
+      disposed = true
+      mountedRef.current = false
+      stop?.()
+    }
   }, [])
 
   useEffect(() => {
@@ -179,24 +216,33 @@ export default function SetupCenter({ onBack, onUseLocal }: Props) {
   const selectedModelSize = Number(selectedModel?.size_bytes ?? 0)
   const selectedLifecycle = String(selectedModel?.lifecycle_state ?? '')
   const optionalLabel = selectedLifecycle === 'VERIFIED' ? 'Installed · 0 B additional' : selectedLifecycle === 'NEEDS_REPAIR' ? 'Needs repair' : selectedModelSize > 0 ? `${formatBytes(selectedModelSize)} additional` : 'Size calculated during setup'
-  const allReady = requiredGroups.length === 0
+  const allReady = inventoryLoad.phase === 'ready' && requiredGroups.length === 0
   const localReady = Boolean(inventory?.local_ai?.runtime_ready && inventory?.local_ai?.model_ready)
+  const localUnavailable = isLocalAiUnavailable(inventory)
   const localRuntimeReady = Boolean(inventory?.local_ai?.runtime_ready)
   const localModelReady = Boolean(inventory?.local_ai?.model_ready)
-  const localStateLabel = localReady ? 'Ready' : inventory?.local_ai?.state === 'repair-required' ? 'Repair needed' : !localRuntimeReady ? 'Runtime needed' : 'Model needed'
+  const localStateLabel = localUnavailable ? 'Unavailable' : localReady ? 'Ready' : inventory?.local_ai?.state === 'repair-required' ? 'Repair needed' : !localRuntimeReady ? 'Runtime needed' : 'Model needed'
   const setupPercent = progressPercent(progress)
   const setupEta = meaningfulEta(progress)
   const elapsed = progress?.elapsed_seconds ?? (startedAt ? Math.max(0, Math.floor((now - startedAt) / 1000)) : 0)
   const currentTotal = progress?.bytes_total ?? 0
   const currentDone = progress?.bytes_done ?? 0
-  const canInstall = approved && !busy && !allReady
-  const canInstallLocal = localApproved && !busy && !localReady
-  const youtubeNeedsInstall = Boolean(youtubeStatus?.actions.some((action) => action === 'Install' || action === 'Repair'))
+  const canInstall = approved && !busy && inventoryLoad.phase === 'ready' && !allReady
+  const canInstallLocal = !localUnavailable && localApproved && !busy && inventoryLoad.phase === 'ready' && !localReady
+  const youtubeNeedsInstall = Boolean(youtubeLoad.phase === 'ready' && youtubeStatus?.actions.some((action) => action === 'Install' || action === 'Repair'))
   const canInstallYouTube = youtubeApproved && !busy && youtubeNeedsInstall
 
   async function testYouTube() {
     setYoutubeBusy(true)
-    try { setYoutubeStatus(api.setupToolYouTubeTest ? await api.setupToolYouTubeTest() : null) } catch { setYoutubeStatus(null) }
+    setYoutubeLoad({ phase: 'loading' })
+    try {
+      const next = api.setupToolYouTubeTest ? await api.setupToolYouTubeTest() : null
+      setYoutubeStatus(next)
+      setYoutubeLoad({ phase: 'ready', value: next })
+    } catch (error) {
+      setYoutubeStatus(null)
+      setYoutubeLoad({ phase: 'error', message: loadErrorMessage(error) })
+    }
     finally { setYoutubeBusy(false) }
   }
 
@@ -274,6 +320,7 @@ export default function SetupCenter({ onBack, onUseLocal }: Props) {
 
   function selectModel(modelId: string) {
     setSelectedModelId(modelId)
+    void Promise.resolve(api.saveLocalModel?.(modelId)).catch(() => undefined)
     void refresh(modelId)
   }
 
@@ -290,13 +337,15 @@ export default function SetupCenter({ onBack, onUseLocal }: Props) {
   return (
     <div className="page-frame setup-page">
       <header className="page-header setup-header">
-        <div><p className="section-eyebrow">Setup & Storage</p><h1>{allReady ? 'Ready to create clips' : 'Core setup needed'}</h1><p className="page-lede">{allReady ? 'Local files and configured providers can create clips. Optional local AI and best-effort YouTube import are shown separately below.' : `ClipGauge needs ${missingGroupTotal > 0 ? formatBytes(missingGroupTotal) : 'a few components'} of one-time downloads before core creation is ready.`}</p></div>
+        <div><p className="section-eyebrow">Setup & Storage</p><h1>{inventoryLoad.phase === 'loading' ? 'Loading setup information…' : inventoryLoad.phase === 'error' ? 'Setup information unavailable' : allReady ? 'Ready to create clips' : 'Core setup needed'}</h1><p className="page-lede">{inventoryLoad.phase === 'loading' ? 'Checking local components and available storage.' : inventoryLoad.phase === 'error' ? inventoryLoad.message : allReady ? 'Local files and configured providers can create clips. Optional local AI and best-effort YouTube import are shown separately below.' : `ClipGauge needs ${missingGroupTotal > 0 ? formatBytes(missingGroupTotal) : 'a few components'} of one-time downloads before core creation is ready.`}</p></div>
         <button type="button" className="button button-quiet" onClick={onBack}><X size={16} aria-hidden="true" /> Close</button>
       </header>
       <section className="setup-overview card-surface">
-        <div className="setup-overview-main"><div className="setup-ready-icon"><Check size={20} aria-hidden="true" /></div><div><strong>{allReady ? 'Core components are ready.' : 'Core components need setup.'}</strong><p>Downloads are verified, resumable, and kept on this computer. Optional capabilities have their own status below.</p></div></div>
-        <div className="storage-stats"><div><span>Required now</span><strong>{allReady ? 'Ready' : missingGroupTotal > 0 ? formatBytes(missingGroupTotal) : 'Size calculated during setup'}</strong></div><div><span>Already installed</span><strong>{formatBytes(inventory?.storage?.installed_bytes ?? inventory?.storage?.required_bytes)}</strong></div><div><span>Available disk</span><strong>{formatBytes(inventory?.storage?.available_bytes)}</strong></div></div>
+        <div className="setup-overview-main"><div className="setup-ready-icon"><Check size={20} aria-hidden="true" /></div><div><strong>{inventoryLoad.phase === 'loading' ? 'Checking local components.' : inventoryLoad.phase === 'error' ? 'Setup check needs attention.' : allReady ? 'Core components are ready.' : 'Core components need setup.'}</strong><p>Downloads are verified, resumable, and kept on this computer. Optional capabilities have their own status below.</p></div></div>
+        <div className="storage-stats"><div><span>Required now</span><strong>{inventoryLoad.phase === 'loading' ? 'Checking…' : inventoryLoad.phase === 'error' ? 'Unavailable' : allReady ? 'Ready' : missingGroupTotal > 0 ? formatBytes(missingGroupTotal) : 'Size calculated during setup'}</strong></div><div><span>Already installed</span><strong>{inventoryLoad.phase === 'loading' ? 'Checking…' : inventoryLoad.phase === 'error' ? 'Unavailable' : formatBytes(inventory?.storage?.installed_bytes ?? inventory?.storage?.required_bytes)}</strong></div><div><span>Available disk</span><strong>{inventoryLoad.phase === 'loading' ? 'Checking…' : inventoryLoad.phase === 'error' ? 'Unavailable' : formatBytes(inventory?.storage?.available_bytes)}</strong></div></div>
         {!allReady && <div className="setup-install-row"><label className="consent-line" htmlFor="setup-approval"><input id="setup-approval" type="checkbox" checked={approved} onChange={(event) => setApproved(event.target.checked)} /><span>I approve these one-time downloads to this computer.</span></label><button type="button" className="button button-primary" onClick={installRequired} disabled={!canInstall}>{busy ? 'Installing…' : `Install required components · ${missingGroupTotal > 0 ? formatBytes(missingGroupTotal) : 'size calculated during setup'}`}</button></div>}
+        {inventoryLoad.phase === 'loading' && <p className="inline-message" role="status">{setupPhaseLabel('loading')}</p>}
+        {inventoryLoad.phase === 'error' && <p className="inline-message" role="alert">{inventoryLoad.message} <button type="button" className="button button-secondary" onClick={() => void refresh()}>Retry setup check</button></p>}
         {message && <p className="inline-message" role="status">{message}</p>}
       </section>
       <section className="component-section"><div className="section-heading"><div><p className="section-eyebrow">What ClipGauge uses</p><h2>One clear list</h2></div><span className="section-caption">{queueSummary.state === 'complete' ? 'Setup complete' : 'No hidden downloads'}</span></div><div className="component-grid">{groups.map((group) => <article className="component-card" key={group.id}><div className="component-card-heading"><span className="component-icon"><HardDrive size={17} aria-hidden="true" /></span><div><h3>{group.title}</h3><p>{group.description}</p></div><span className={`status-pill tone-${group.state.tone}`}><span className="status-dot" aria-hidden="true" />{group.state.label}</span></div><div className="component-card-footer"><span>{group.size ? formatBytes(group.size) : 'Size calculated during setup'}</span>{group.state.ready && <span className="reuse-note"><Check size={14} aria-hidden="true" /> {group.state.label.includes('System') ? 'System component reused' : 'Reused for future videos'}</span>}</div>{group.id === 'youtube' && <div className="component-card-actions"><span className="component-card-action-copy">{youtubeStatusCopy(youtubeStatus)}</span>{youtubeNeedsInstall && <label className="consent-line" htmlFor="youtube-approval"><input id="youtube-approval" type="checkbox" checked={youtubeApproved} onChange={(event) => setYoutubeApproved(event.target.checked)} /><span>I approve YouTube support installation.</span></label>}<div className="detail-actions">{youtubeNeedsInstall && <button type="button" className="button button-primary" onClick={installYouTube} disabled={!canInstallYouTube}>{statusHasRepair(youtubeStatus) ? 'Repair YouTube support' : 'Install YouTube support'}</button>}<button type="button" className="button button-secondary" onClick={testYouTube} disabled={youtubeBusy}>{youtubeBusy ? 'Testing…' : 'Test YouTube support'}</button></div></div>}</article>)}</div></section>

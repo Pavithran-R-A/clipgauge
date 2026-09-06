@@ -7,6 +7,7 @@ import SetupCenter from './components/SetupCenter'
 const mocks = vi.hoisted(() => ({
   setupState: vi.fn(),
   setupInventory: vi.fn(),
+  saveLocalModel: vi.fn(),
   youtubeReadiness: vi.fn(),
   startSetup: vi.fn(),
   cancelSetup: vi.fn(),
@@ -204,5 +205,40 @@ describe('v0.5 information architecture', () => {
     mocks.setupInventory.mockResolvedValue(mixedInventory)
     render(<ProviderCenter selectedProvider="clipgauge-local" onSelectProvider={vi.fn()} onBack={vi.fn()} onOpenSetup={vi.fn()} />)
     expect((await screen.findAllByText('Ready')).length).toBeGreaterThan(0)
+  })
+
+  it('shows an explicit loading state before inventory resolves', async () => {
+    let resolveInventory: (value: Record<string, unknown>) => void = () => undefined
+    mocks.setupInventory.mockImplementation(() => new Promise((resolve) => { resolveInventory = resolve }))
+    render(<SetupCenter onBack={vi.fn()} />)
+    expect(screen.getByRole('heading', { name: 'Loading setup information…' })).toBeInTheDocument()
+    expect(screen.getAllByText('Checking…').length).toBeGreaterThan(0)
+    resolveInventory({ state: 'ready', models: [], core_assets: [], managed_assets: [], runtime: {}, storage: {}, catalog: [] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Core setup needed' })).toBeInTheDocument())
+  })
+
+  it('shows a retryable error state when inventory fails', async () => {
+    mocks.setupInventory.mockRejectedValue({ code: 'PIPELINE_NOT_INITIALIZED' })
+    render(<SetupCenter onBack={vi.fn()} />)
+    expect(await screen.findByRole('heading', { name: 'Setup information unavailable' })).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('preparing its local runtime')
+    expect(screen.getByRole('button', { name: 'Retry setup check' })).toBeInTheDocument()
+  })
+
+  it('disables local installation when the platform lacks support', async () => {
+    mocks.setupInventory.mockResolvedValue({
+      state: 'ready',
+      video_tools: { ready: true, source: 'system', managed_download_needed: false },
+      local_ai: { state: 'unavailable', runtime_ready: false, model_ready: false, selected_model_id: null, required_bytes: 0, action: 'Install ClipGauge Local' },
+      runtime: { installed: false },
+      models: [],
+      core_assets: [],
+      managed_assets: [],
+      storage: { required_bytes: 0, installed_bytes: 0, available_bytes: null, assets: [], consent_required: false },
+      catalog: []
+    })
+    render(<SetupCenter onBack={vi.fn()} />)
+    expect(await screen.findByText('Unavailable')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Install ClipGauge Local' })).toBeDisabled()
   })
 })

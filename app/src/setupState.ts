@@ -7,6 +7,17 @@ export interface SetupQueueSummary {
   cancelled: boolean
 }
 
+export function isLocalAiUnavailable(inventory: unknown): boolean {
+  if (!inventory || typeof inventory !== 'object') return false
+  const localAI = (inventory as { local_ai?: unknown }).local_ai
+  if (!localAI || typeof localAI !== 'object') return false
+  return (localAI as { state?: unknown }).state === 'unavailable'
+}
+
+export function shouldAdvanceSetupQueue(payload: { event?: string; ok?: boolean }): boolean {
+  return payload.event === 'terminal' && payload.ok === true
+}
+
 export function summarizeSetupQueue(outcomes: Array<'success' | 'failed' | 'cancelled'>, pending: number): SetupQueueSummary {
   const completed = outcomes.filter((outcome) => outcome === 'success').length
   const failed = outcomes.filter((outcome) => outcome === 'failed').length

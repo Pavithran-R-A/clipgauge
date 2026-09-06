@@ -526,12 +526,13 @@ dependencies = [
 
 [[package]]
 name = "clipgauge-app"
-version = "0.5.9"
+version = "0.5.10"
 dependencies = [
  "keyring",
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

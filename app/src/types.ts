@@ -356,7 +356,7 @@ export interface VideoToolReadiness {
 export type LocalModelState = 'INSTALLED' | 'VERIFIED' | 'DOWNLOAD_REQUIRED' | 'NEEDS_REPAIR'
 
 export interface LocalAiReadiness {
-  state: 'ready' | 'runtime-install-required' | 'model-download-required' | string
+  state: 'ready' | 'runtime-install-required' | 'model-download-required' | 'unavailable' | string
   runtime_ready: boolean
   model_ready: boolean
   selected_model_id?: string | null

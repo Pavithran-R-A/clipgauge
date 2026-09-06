@@ -2,6 +2,18 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.10] — 2026-09-05
+
+ClipGauge v0.5.10 stabilizes fresh setup and packaged runtime readiness.
+
+### Fixed
+
+- Native setup inventory now loads the packaged manifest without starting Python, syncing dependencies, or downloading files.
+- Pipeline initialization is serialized, cancellable, bounded, and reported with explicit diagnostics.
+- Setup and YouTube readiness now expose loading, ready, retryable-error, and unavailable states.
+- Fresh Windows onboarding, system FFmpeg reuse, reinstall continuity, and native macOS builds are qualified remotely.
+- Keeps v0.5.9 immutable.
+
 ## [0.5.9] — 2026-09-04
 
 ClipGauge v0.5.9 repairs the production model acceptance fixture.

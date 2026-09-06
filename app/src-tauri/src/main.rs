@@ -10,12 +10,19 @@ mod media_server;
 mod path_security;
 mod process_manager;
 mod secrets;
+mod setup_inventory;
+mod sidecar;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -24,6 +31,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 #[derive(Clone)]
 struct AppState {
     processes: Arc<Mutex<process_manager::ProcessManager>>,
+    initialization: Arc<sidecar::InitializationCoordinator>,
     media: Arc<media_server::MediaServer>,
 }
 
@@ -31,6 +39,7 @@ impl AppState {
     fn new(media: Arc<media_server::MediaServer>) -> Self {
         Self {
             processes: Arc::new(Mutex::new(process_manager::ProcessManager::new())),
+            initialization: Arc::new(sidecar::InitializationCoordinator::new()),
             media,
         }
     }
@@ -267,19 +276,51 @@ fn packaged_resource_dir(exe_path: &std::path::Path, platform: &str, uv_name: &s
 }
 
 fn pipeline_invocation() -> (String, Vec<String>) {
+    pipeline_invocation_for(sidecar::PipelineMode::ManagedOperation)
+}
+
+fn pipeline_resources_dir() -> PathBuf {
     if cfg!(debug_assertions) {
-        let pipeline_dir: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../pipeline")
             .canonicalize()
-            .unwrap_or_else(|_| PathBuf::from("../pipeline"));
+            .unwrap_or_else(|_| PathBuf::from("../pipeline"))
+    } else {
+        let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
+        let uv_name = if cfg!(target_os = "windows") {
+            "uv.exe"
+        } else {
+            "uv"
+        };
+        packaged_resource_dir(&exe_path, std::env::consts::OS, uv_name)
+    }
+}
+
+fn pipeline_environment_dir() -> PathBuf {
+    if cfg!(debug_assertions) {
+        pipeline_resources_dir().join(".venv")
+    } else {
+        home_dir().join("runtimes").join("pipeline")
+    }
+}
+
+fn pipeline_environment_ready() -> bool {
+    let python = if cfg!(target_os = "windows") {
+        pipeline_environment_dir()
+            .join("Scripts")
+            .join("python.exe")
+    } else {
+        pipeline_environment_dir().join("bin").join("python")
+    };
+    python.is_file()
+}
+
+fn pipeline_invocation_for(mode: sidecar::PipelineMode) -> (String, Vec<String>) {
+    if cfg!(debug_assertions) {
+        let pipeline_dir = pipeline_resources_dir();
         (
             "uv".to_string(),
-            vec![
-                "--directory".to_string(),
-                pipeline_dir.to_string_lossy().to_string(),
-                "run".to_string(),
-                "clipgauge".to_string(),
-            ],
+            sidecar::pipeline_args(&pipeline_dir, mode),
         )
     } else {
         // Packaged: bundled uv + pipeline source under the platform's
@@ -287,13 +328,7 @@ fn pipeline_invocation() -> (String, Vec<String>) {
         // Windows (NSIS) lands them in resources\ next to the exe. The venv
         // bootstraps into CLIPGAUGE_HOME on first run (uv handles Python
         // 3.12 download + deps; the onboarding screen owns expectations).
-        let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
-        let uv_name = if cfg!(target_os = "windows") {
-            "uv.exe"
-        } else {
-            "uv"
-        };
-        let resources = packaged_resource_dir(&exe_path, std::env::consts::OS, uv_name);
+        let resources = pipeline_resources_dir();
         let uv = if cfg!(target_os = "windows") {
             "bin/uv.exe"
         } else {
@@ -301,13 +336,33 @@ fn pipeline_invocation() -> (String, Vec<String>) {
         };
         (
             resources.join(uv).to_string_lossy().to_string(),
-            vec![
-                "--directory".to_string(),
-                resources.join("pipeline").to_string_lossy().to_string(),
-                "run".to_string(),
-                "clipgauge".to_string(),
-            ],
+            sidecar::pipeline_args(&resources.join("pipeline"), mode),
         )
+    }
+}
+
+fn initialize_pipeline() -> Result<(), String> {
+    initialize_pipeline_with_registration(|_| {})
+}
+
+fn initialize_pipeline_with_registration<F>(on_spawn: F) -> Result<(), String>
+where
+    F: FnOnce(u32),
+{
+    let (program, args) = pipeline_invocation_for(sidecar::PipelineMode::Initialize);
+    let mut command = quiet_command(&program);
+    secrets::apply_operation_env(&mut command);
+    command.env("CLIPGAUGE_HOME", home_dir()).args(args);
+    let output =
+        sidecar::run_bounded_with_callback(command, sidecar::RunPolicy::initialization(), on_spawn)
+            .map_err(|error| format!("pipeline initialization failed: {error:?}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "pipeline initialization exited unsuccessfully: {}",
+            diagnostics::redact(&output.stderr_tail)
+        ))
     }
 }
 
@@ -634,18 +689,8 @@ async fn preflight(
         if let Some((env_name, profile_id)) = selected_provider_env(selected_provider.as_deref()) {
             secrets::apply_provider_operation_env(&mut command, &profile_id, env_name);
         }
-        let output = command
-            .env("CLIPGAUGE_HOME", home_dir())
-            .args(&args)
-            .output()
-            .map_err(|error| diagnostics::redact(&error.to_string()))?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let line = stdout
-            .lines()
-            .rev()
-            .find(|line| line.trim_start().starts_with('{'))
-            .ok_or_else(|| "preflight returned no JSON result".to_string())?;
-        serde_json::from_str(line).map_err(|error| diagnostics::redact(&error.to_string()))
+        command.env("CLIPGAUGE_HOME", home_dir()).args(&args);
+        run_json_sidecar(command, "preflight")
     })
     .await
 }
@@ -677,18 +722,8 @@ async fn test_connection(
         if let Some((env_name, profile_id)) = selected_provider_env(selected_provider.as_deref()) {
             secrets::apply_provider_operation_env(&mut command, &profile_id, env_name);
         }
-        let output = command
-            .env("CLIPGAUGE_HOME", home_dir())
-            .args(&args)
-            .output()
-            .map_err(|error| diagnostics::redact(&error.to_string()))?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let line = stdout
-            .lines()
-            .rev()
-            .find(|line| line.trim_start().starts_with('{'))
-            .ok_or_else(|| "provider test returned no JSON result".to_string())?;
-        serde_json::from_str(line).map_err(|error| diagnostics::redact(&error.to_string()))
+        command.env("CLIPGAUGE_HOME", home_dir()).args(&args);
+        run_json_sidecar(command, "provider test")
     })
     .await
 }
@@ -937,6 +972,84 @@ fn is_completion_payload(value: &Value) -> bool {
     )
 }
 
+fn read_bounded_line<R, F>(
+    reader: &mut R,
+    max_bytes: usize,
+    line: &mut Vec<u8>,
+    mut on_activity: F,
+) -> std::io::Result<Option<bool>>
+where
+    R: BufRead,
+    F: FnMut(),
+{
+    line.clear();
+    let mut accepted = true;
+    loop {
+        let chunk = reader.fill_buf()?;
+        if chunk.is_empty() {
+            if line.is_empty() && accepted {
+                return Ok(None);
+            }
+            return Ok(Some(accepted));
+        }
+        let newline = chunk.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(chunk.len(), |index| index + 1);
+        if accepted {
+            let content_len = newline.unwrap_or(chunk.len());
+            let remaining = max_bytes.saturating_sub(line.len());
+            if content_len <= remaining {
+                line.extend_from_slice(&chunk[..content_len]);
+            } else {
+                line.clear();
+                accepted = false;
+            }
+        }
+        reader.consume(consumed);
+        on_activity();
+        if newline.is_some() {
+            return Ok(Some(accepted));
+        }
+    }
+}
+
+fn run_json_sidecar(command: Command, operation: &str) -> Result<Value, String> {
+    let output =
+        sidecar::run_bounded(command, sidecar::RunPolicy::initialization()).map_err(|error| {
+            match error {
+                sidecar::RunError::Spawn(message) | sidecar::RunError::Wait(message) => {
+                    diagnostics::redact(&message)
+                }
+                sidecar::RunError::HardTimeout => {
+                    format!(
+                        "{operation} timed out; diagnostic {}",
+                        diagnostics::diagnostic_id()
+                    )
+                }
+                sidecar::RunError::IdleTimeout => format!(
+                    "{operation} stopped producing output; diagnostic {}",
+                    diagnostics::diagnostic_id()
+                ),
+            }
+        })?;
+    let stderr_tail = diagnostics::redact(&output.stderr_tail);
+    let line = output
+        .stdout
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with('{'));
+    match line.and_then(|line| serde_json::from_str::<Value>(line).ok()) {
+        Some(value) => Ok(value),
+        None if !output.status.success() => Err(format!(
+            "{operation} failed: {}",
+            stderr_tail.chars().take(400).collect::<String>()
+        )),
+        None => Err(format!(
+            "{operation} returned no JSON result: {}",
+            stderr_tail.chars().take(400).collect::<String>()
+        )),
+    }
+}
+
 fn stream_pipeline(
     app: &AppHandle,
     program: &str,
@@ -1002,8 +1115,16 @@ fn stream_pipeline(
     });
     let mut completion_payload: Option<Value> = None;
     if let Some(stdout) = child.stdout.take() {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+        let mut reader = BufReader::new(stdout);
+        let mut line = Vec::with_capacity(8192);
+        loop {
+            let result =
+                read_bounded_line(&mut reader, sidecar::MAX_DIAGNOSTIC_BYTES, &mut line, || {});
+            let Ok(Some(accepted)) = result else { break };
+            if !accepted {
+                continue;
+            }
+            if let Ok(value) = serde_json::from_slice::<Value>(&line) {
                 if is_completion_payload(&value) {
                     completion_payload = Some(value);
                     continue;
@@ -1215,6 +1336,12 @@ async fn mark_onboarded() -> Result<(), String> {
     spawn_blocking_result(|| mark_onboarded_at(&home_dir())).await
 }
 
+#[tauri::command]
+async fn save_local_model(model_id: String) -> Result<(), String> {
+    spawn_blocking_result(move || setup_inventory::save_selected_model(&home_dir(), &model_id))
+        .await
+}
+
 fn loopback_json(path: &str) -> Result<Value, String> {
     use std::net::{TcpStream, ToSocketAddrs};
     use std::time::Duration;
@@ -1316,36 +1443,132 @@ fn stream_setup(
             if let Ok(mut state) = processes.lock() {
                 let _ = state.finish(&key, false);
             }
-            let _ = app.emit("setup-event", json!({"event": "terminal", "ok": false, "code": "SETUP_START_FAILED", "message": diagnostics::redact(&error.to_string())}));
+            write_lifecycle_snapshot(&processes, &key);
+            let _ = app.emit(
+                "setup-event",
+                json!({
+                    "event": "terminal",
+                    "ok": false,
+                    "code": "SETUP_START_FAILED",
+                    "message": diagnostics::redact(&error.to_string()),
+                    "retryable": true,
+                    "diagnostic_id": diagnostics::diagnostic_id(),
+                }),
+            );
             return;
         }
     };
-    if let Ok(mut state) = processes.lock() {
-        let _ = state.adopt_job_id(&key, key.clone());
-        let _ = state.register_process(&key, child.id());
+    let cancelled_during_registration = match processes.lock() {
+        Ok(mut state) => {
+            let _ = state.adopt_job_id(&key, key.clone());
+            let _ = state.register_process(&key, child.id());
+            state.is_cancel_requested(&key)
+        }
+        Err(_) => true,
+    };
+    if cancelled_during_registration {
+        let _ = process_manager::terminate_owned(child.id());
     }
-    if let Some(stdout) = child.stdout.take() {
+    let started = Instant::now();
+    let last_output = Arc::new(AtomicU64::new(0));
+    let stdout_reader = if let Some(stdout) = child.stdout.take() {
         let app_clone = app.clone();
-        std::thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines().map_while(Result::ok) {
-                if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                    let _ = app_clone.emit("setup-event", value);
+        let activity = Arc::clone(&last_output);
+        Some(thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = Vec::with_capacity(8192);
+            loop {
+                line.clear();
+                let result = read_bounded_line(
+                    &mut reader,
+                    sidecar::MAX_DIAGNOSTIC_BYTES,
+                    &mut line,
+                    || activity.store(started.elapsed().as_millis() as u64, Ordering::Relaxed),
+                );
+                let Ok(Some(accepted)) = result else { break };
+                if accepted {
+                    if let Ok(value) = serde_json::from_slice::<Value>(&line) {
+                        let _ = app_clone.emit("setup-event", value);
+                    }
                 }
             }
-        });
-    }
-    let status = child.wait();
+        }))
+    } else {
+        None
+    };
+    let stderr_reader = child.stderr.take().map(|mut stderr| {
+        let activity = Arc::clone(&last_output);
+        thread::spawn(move || {
+            let mut tail = diagnostics::BoundedTail::new(sidecar::MAX_DIAGNOSTIC_BYTES);
+            let mut buffer = [0_u8; 8192];
+            loop {
+                match stderr.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => {
+                        activity.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                        tail.push(&buffer[..count]);
+                    }
+                }
+            }
+            tail.text()
+        })
+    });
+    let policy = sidecar::RunPolicy::initialization();
+    let mut timed_out = None;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {}
+            Err(error) => {
+                let _ = process_manager::terminate_owned(child.id());
+                let _ = child.wait();
+                timed_out = Some(format!("Setup process could not be monitored: {error}"));
+                break None;
+            }
+        }
+        if started.elapsed() >= policy.hard_timeout {
+            timed_out = Some("Setup exceeded its two-hour safety limit.".to_string());
+            let _ = process_manager::terminate_owned(child.id());
+            let _ = child.wait();
+            break None;
+        }
+        let last_activity = Duration::from_millis(last_output.load(Ordering::Relaxed));
+        if started.elapsed().saturating_sub(last_activity) >= policy.idle_timeout {
+            timed_out = Some("Setup stopped producing progress for five minutes.".to_string());
+            let _ = process_manager::terminate_owned(child.id());
+            let _ = child.wait();
+            break None;
+        }
+        thread::sleep(policy.poll_interval);
+    };
+    let _ = stdout_reader.and_then(|reader| reader.join().ok());
+    let stderr_tail = stderr_reader
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
     let success = status.map(|value| value.success()).unwrap_or(false);
     if let Ok(mut state) = processes.lock() {
         let cancelled = state.is_cancel_requested(&key);
         let _ = state.finish(&key, success && !cancelled);
-        if cancelled {
-            let _ = app.emit("setup-event", json!({"event": "terminal", "ok": false, "code": "CANCELLED", "message": "Setup was cancelled. Verified assets remain reusable."}));
+        let event = if cancelled {
+            json!({"event": "terminal", "ok": false, "code": "CANCELLED", "message": "Setup was cancelled. Verified assets remain reusable."})
+        } else if let Some(message) = timed_out {
+            json!({"event": "terminal", "ok": false, "code": "SETUP_TIMED_OUT", "message": message, "retryable": true, "diagnostic_id": diagnostics::diagnostic_id(), "stderr_tail": diagnostics::redact(&stderr_tail)})
+        } else if success {
+            json!({"event": "terminal", "ok": true, "code": "OK", "message": "Setup completed."})
         } else {
-            let _ = app.emit("setup-event", json!({"event": "terminal", "ok": success, "code": if success { "OK" } else { "SETUP_FAILED" }, "message": if success { "Setup completed." } else { "Setup failed; retry or repair the selected asset." }}));
-        }
+            json!({"event": "terminal", "ok": false, "code": "SETUP_FAILED", "message": "Setup failed; retry or repair the selected asset.", "retryable": true, "diagnostic_id": diagnostics::diagnostic_id(), "stderr_tail": diagnostics::redact(&stderr_tail)})
+        };
+        drop(state);
+        let _ = app.emit("setup-event", event);
+        write_lifecycle_snapshot(&processes, &key);
     }
+}
+
+fn valid_start_setup_args(args: &[String]) -> bool {
+    matches!(args, [command] if command == "install-runtime" || command == "install-ffmpeg")
+        || matches!(args, [command, group, value] if command == "install-group" && group == "--group" && matches!(value.as_str(), "core:asr" | "core:analysis" | "core:youtube"))
+        || matches!(args, [command, asset] if command == "install-asset" && asset.len() <= 180 && asset.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '_' | '/' | '.')))
+        || matches!(args, [command, model] if command == "download-model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
 }
 
 #[tauri::command]
@@ -1354,19 +1577,80 @@ fn start_setup(
     state: State<'_, AppState>,
     args: Vec<String>,
 ) -> Result<String, String> {
-    let valid = matches!(args.as_slice(), [command] if command == "inventory" || command == "youtube-status" || command == "youtube-test" || command == "install-runtime" || command == "install-ffmpeg")
-        || matches!(args.as_slice(), [command, group, value] if command == "install-group" && group == "--group" && matches!(value.as_str(), "core:asr" | "core:analysis" | "core:youtube"))
-        || matches!(args.as_slice(), [command, asset] if command == "install-asset" && asset.len() <= 180 && asset.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '_' | '/' | '.')))
-        || matches!(args.as_slice(), [command, model] if command == "download-model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')));
-    if !valid {
+    if !valid_start_setup_args(&args) {
         return Err("unsupported setup operation".to_string());
     }
     let (program, base_args) = pipeline_invocation();
     let key = format!("setup:{}", diagnostics::diagnostic_id());
     reserve_process(&state.processes, key.clone())?;
+    state
+        .processes
+        .lock()
+        .map_err(|_| "setup lifecycle state is unavailable".to_string())?
+        .adopt_job_id(&key, key.clone())?;
     let processes = state.processes.clone();
+    let initialization = state.initialization.clone();
     let worker_key = key.clone();
     std::thread::spawn(move || {
+        let init_processes = processes.clone();
+        let init_key = worker_key.clone();
+        if let Err(error) = initialization.ensure_initialized(|| {
+            initialize_pipeline_with_registration(|process_id| {
+                if let Ok(mut lifecycle) = init_processes.lock() {
+                    let _ = lifecycle.adopt_job_id(&init_key, init_key.clone());
+                    let _ = lifecycle.register_process(&init_key, process_id);
+                    if lifecycle.is_cancel_requested(&init_key) {
+                        let _ = process_manager::terminate_owned(process_id);
+                    }
+                }
+            })
+        }) {
+            let cancelled = processes
+                .lock()
+                .map(|state| state.is_cancel_requested(&worker_key))
+                .unwrap_or(false);
+            let message = if cancelled {
+                "Setup was cancelled. Verified assets remain reusable.".to_string()
+            } else {
+                diagnostics::redact(&error)
+            };
+            if let Ok(mut state) = processes.lock() {
+                let _ = state.finish(&worker_key, false);
+            }
+            write_lifecycle_snapshot(&processes, &worker_key);
+            let _ = app.emit(
+                "setup-event",
+                json!({
+                    "event": "terminal",
+                    "ok": false,
+                    "code": if cancelled { "CANCELLED" } else { "SETUP_INITIALIZATION_FAILED" },
+                    "message": message,
+                    "retryable": true,
+                    "diagnostic_id": diagnostics::diagnostic_id(),
+                }),
+            );
+            return;
+        }
+        let cancelled_during_initialization = processes
+            .lock()
+            .map(|state| state.is_cancel_requested(&worker_key))
+            .unwrap_or(true);
+        if cancelled_during_initialization {
+            if let Ok(mut state) = processes.lock() {
+                let _ = state.finish(&worker_key, false);
+            }
+            write_lifecycle_snapshot(&processes, &worker_key);
+            let _ = app.emit(
+                "setup-event",
+                json!({
+                    "event": "terminal",
+                    "ok": false,
+                    "code": "CANCELLED",
+                    "message": "Setup was cancelled. Verified assets remain reusable.",
+                }),
+            );
+            return;
+        }
         let mut full = base_args;
         full.push("--jsonl".to_string());
         full.push("setup".to_string());
@@ -1381,20 +1665,27 @@ fn cancel_setup(state: State<'_, AppState>, operation_id: String) -> Result<(), 
     if !operation_id.starts_with("setup:") || operation_id.len() > 120 {
         return Err("invalid setup operation id".to_string());
     }
-    let process_id = state
+    let mut lifecycle = state
         .processes
         .lock()
-        .map_err(|_| "setup lifecycle state is unavailable".to_string())?
-        .request_cancel(&operation_id)?;
-    process_manager::terminate_owned(process_id)
+        .map_err(|_| "setup lifecycle state is unavailable".to_string())?;
+    match lifecycle.request_cancel(&operation_id) {
+        Ok(process_id) => process_manager::terminate_owned(process_id),
+        Err(_error) if lifecycle.is_cancel_requested_for_job_id(&operation_id) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 #[tauri::command]
-async fn setup_tool(args: Vec<String>) -> Result<Value, String> {
-    spawn_blocking_result(move || setup_tool_blocking(args)).await
+async fn setup_tool(state: State<'_, AppState>, args: Vec<String>) -> Result<Value, String> {
+    let initialization = state.initialization.clone();
+    spawn_blocking_result(move || setup_tool_blocking(args, initialization)).await
 }
 
-fn setup_tool_blocking(args: Vec<String>) -> Result<Value, String> {
+fn setup_tool_blocking(
+    args: Vec<String>,
+    initialization: Arc<sidecar::InitializationCoordinator>,
+) -> Result<Value, String> {
     let valid = matches!(args.as_slice(), [command] if command == "inventory" || command == "youtube-status" || command == "youtube-test" || command == "install-runtime" || command == "install-ffmpeg")
         || matches!(args.as_slice(), [command, flag, model] if command == "inventory" && flag == "--model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
         || matches!(args.as_slice(), [command, group, value] if command == "install-group" && group == "--group" && matches!(value.as_str(), "core:asr" | "core:analysis" | "core:youtube"))
@@ -1403,7 +1694,26 @@ fn setup_tool_blocking(args: Vec<String>) -> Result<Value, String> {
     if !valid {
         return Err("unsupported setup operation".to_string());
     }
-    let (program, base_args) = pipeline_invocation();
+    if args.first().map(String::as_str) == Some("inventory") {
+        let requested_model = args.get(2).map(String::as_str);
+        return setup_inventory::native_inventory(
+            &pipeline_resources_dir(),
+            &home_dir(),
+            requested_model,
+        )
+        .map_err(|error| diagnostics::redact(&error));
+    }
+    let mode = match args.first().map(String::as_str) {
+        Some("inventory" | "youtube-status" | "youtube-test") => sidecar::PipelineMode::ReadOnly,
+        _ => sidecar::PipelineMode::ManagedOperation,
+    };
+    if mode == sidecar::PipelineMode::ReadOnly && !pipeline_environment_ready() {
+        return Err("PIPELINE_NOT_INITIALIZED".to_string());
+    }
+    if mode == sidecar::PipelineMode::ManagedOperation {
+        initialization.ensure_initialized(initialize_pipeline)?;
+    }
+    let (program, base_args) = pipeline_invocation_for(mode);
     let mut full = base_args;
     full.push("--jsonl".to_string());
     full.push("setup".to_string());
@@ -1420,12 +1730,32 @@ fn setup_tool_blocking(args: Vec<String>) -> Result<Value, String> {
     }
     #[cfg(target_os = "windows")]
     apply_qa_ffmpeg_env(&mut command);
-    let out = command
-        .env("CLIPGAUGE_HOME", home_dir())
-        .args(&full)
-        .output()
-        .map_err(|e| e.to_string())?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    command.env("CLIPGAUGE_HOME", home_dir()).args(&full);
+    let policy = if mode == sidecar::PipelineMode::ReadOnly {
+        sidecar::RunPolicy::status()
+    } else {
+        sidecar::RunPolicy::initialization()
+    };
+    let out = sidecar::run_bounded(command, policy).map_err(|error| match error {
+        sidecar::RunError::Spawn(message) | sidecar::RunError::Wait(message) => {
+            diagnostics::redact(&message)
+        }
+        sidecar::RunError::HardTimeout => format!(
+            "setup command timed out; diagnostic {}",
+            diagnostics::diagnostic_id()
+        ),
+        sidecar::RunError::IdleTimeout => format!(
+            "setup command stopped producing output; diagnostic {}",
+            diagnostics::diagnostic_id()
+        ),
+    })?;
+    if !out.status.success() {
+        return Err(format!(
+            "setup command failed: {}",
+            diagnostics::redact(&out.stderr_tail)
+        ));
+    }
+    let stdout = out.stdout;
     let line = stdout
         .lines()
         .rev()
@@ -1434,7 +1764,7 @@ fn setup_tool_blocking(args: Vec<String>) -> Result<Value, String> {
         Some(value) => Ok(value),
         None => Err(format!(
             "setup command produced no JSON: {}",
-            String::from_utf8_lossy(&out.stderr)
+            diagnostics::redact(&out.stderr_tail)
                 .chars()
                 .take(400)
                 .collect::<String>()
@@ -1457,27 +1787,8 @@ fn edit_tool_blocking(args: Vec<String>) -> Result<Value, String> {
     full.extend(args);
     let mut command = quiet_command(&program);
     secrets::apply_operation_env(&mut command);
-    let out = command
-        .env("CLIPGAUGE_HOME", home_dir())
-        .args(&full)
-        .output()
-        .map_err(|e| e.to_string())?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    // last JSON line is the payload (progress lines may precede it)
-    let line = stdout
-        .lines()
-        .rev()
-        .find(|l| l.trim_start().starts_with('{'));
-    match line.and_then(|l| serde_json::from_str::<Value>(l).ok()) {
-        Some(v) => Ok(v),
-        None => Err(format!(
-            "edit tool produced no JSON: {}",
-            String::from_utf8_lossy(&out.stderr)
-                .chars()
-                .take(400)
-                .collect::<String>()
-        )),
-    }
+    command.env("CLIPGAUGE_HOME", home_dir()).args(&full);
+    run_json_sidecar(command, "edit tool")
 }
 
 #[tauri::command]
@@ -1620,25 +1931,32 @@ fn ig_connect_blocking(app_id: String, app_secret: String) -> Result<String, Str
 
     let mut command = quiet_command(&program);
     secrets::apply_operation_env(&mut command);
-    let mut child = command
+    command
         .env("CLIPGAUGE_HOME", home_dir())
         .env("CLIPGAUGE_CONNECTION_OUTPUT", &connection_output)
-        .args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| diagnostics::redact(&e.to_string()))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(app_secret.as_bytes())
-            .map_err(|e| diagnostics::redact(&e.to_string()))?;
-    }
-    let out = child
-        .wait_with_output()
-        .map_err(|e| diagnostics::redact(&e.to_string()))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        .args(&args);
+    let out = sidecar::run_bounded_with_stdin(
+        command,
+        app_secret.as_bytes(),
+        sidecar::RunPolicy::interactive(),
+    )
+    .map_err(|error| match error {
+        sidecar::RunError::Spawn(message) | sidecar::RunError::Wait(message) => {
+            diagnostics::redact(&message)
+        }
+        sidecar::RunError::HardTimeout => {
+            format!(
+                "Instagram connection timed out; diagnostic {}",
+                diagnostics::diagnostic_id()
+            )
+        }
+        sidecar::RunError::IdleTimeout => format!(
+            "Instagram connection stopped producing output; diagnostic {}",
+            diagnostics::diagnostic_id()
+        ),
+    })?;
+    let stdout = out.stdout.trim().to_string();
+    let stderr = out.stderr_tail.trim().to_string();
     if out.status.success() {
         let persisted = fs::read_to_string(&connection_output)
             .map_err(|error| diagnostics::redact(&error.to_string()))?;
@@ -1665,26 +1983,8 @@ fn ig_tool_blocking(args: Vec<String>) -> Result<Value, String> {
     full.extend(args);
     let mut command = quiet_command(&program);
     secrets::apply_operation_env(&mut command);
-    let out = command
-        .env("CLIPGAUGE_HOME", home_dir())
-        .args(&full)
-        .output()
-        .map_err(|e| e.to_string())?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let line = stdout
-        .lines()
-        .rev()
-        .find(|l| l.trim_start().starts_with('{'));
-    match line.and_then(|l| serde_json::from_str::<Value>(l).ok()) {
-        Some(v) => Ok(v),
-        None => Err(format!(
-            "ig tool produced no JSON: {}",
-            String::from_utf8_lossy(&out.stderr)
-                .chars()
-                .take(400)
-                .collect::<String>()
-        )),
-    }
+    command.env("CLIPGAUGE_HOME", home_dir()).args(&full);
+    run_json_sidecar(command, "ig tool")
 }
 
 #[tauri::command]
@@ -1820,6 +2120,7 @@ fn main() {
             vault_scope,
             get_setup_state,
             mark_onboarded,
+            save_local_model,
             check_ollama,
             setup_tool,
             start_setup,
@@ -1852,17 +2153,50 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io::Read;
+    use std::io::{Cursor, Read};
     use std::thread;
 
     #[cfg(target_os = "linux")]
     use super::packaged_resource_dir;
     use super::{
         canonical_provider_id, generate_support_bundle_at, ig_connect_args, ig_failure_message,
-        is_completion_payload, migrate_legacy_data_from, selected_provider_env,
-        spawn_blocking_result, validate_browser_session, ResumeJobRequest, RunJobRequest,
+        is_completion_payload, migrate_legacy_data_from, read_bounded_line, selected_provider_env,
+        spawn_blocking_result, valid_start_setup_args, validate_browser_session, ResumeJobRequest,
+        RunJobRequest,
     };
     use serde_json::json;
+
+    #[test]
+    fn sidecar_json_lines_are_bounded_and_recover_after_oversize_input() {
+        let input = format!(
+            "{}\n{{\"event\":\"terminal\"}}\n",
+            "x".repeat(super::sidecar::MAX_DIAGNOSTIC_BYTES + 1)
+        );
+        let mut reader = std::io::BufReader::new(Cursor::new(input));
+        let mut line = Vec::new();
+
+        assert_eq!(
+            read_bounded_line(
+                &mut reader,
+                super::sidecar::MAX_DIAGNOSTIC_BYTES,
+                &mut line,
+                || {},
+            )
+            .unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            read_bounded_line(
+                &mut reader,
+                super::sidecar::MAX_DIAGNOSTIC_BYTES,
+                &mut line,
+                || {},
+            )
+            .unwrap(),
+            Some(true)
+        );
+        assert_eq!(line, br#"{"event":"terminal"}"#);
+    }
 
     #[cfg(target_os = "windows")]
     #[test]
@@ -1955,6 +2289,14 @@ mod tests {
         }));
 
         assert_eq!(result, Err("worker failed".to_string()));
+    }
+
+    #[test]
+    fn start_setup_rejects_read_only_commands() {
+        assert!(!valid_start_setup_args(&["inventory".to_string()]));
+        assert!(!valid_start_setup_args(&["youtube-status".to_string()]));
+        assert!(!valid_start_setup_args(&["youtube-test".to_string()]));
+        assert!(valid_start_setup_args(&["install-runtime".to_string()]));
     }
 
     #[test]

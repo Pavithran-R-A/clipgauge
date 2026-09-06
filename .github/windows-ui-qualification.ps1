@@ -1,7 +1,8 @@
 param(
   [Parameter(Mandatory = $true)] [string] $AppPath,
   [Parameter(Mandatory = $true)] [string] $OutputDir,
-  [Parameter(Mandatory = $true)] [string] $Sentinel
+  [Parameter(Mandatory = $true)] [string] $Sentinel,
+  [switch] $FreshOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -285,7 +286,7 @@ $realFfmpeg = Get-ChildItem -Path (Join-Path $chocoRoot 'lib\ffmpeg') -Filter 'f
 $realFfmpegPath = if ($realFfmpeg) { $realFfmpeg.FullName } else { (Get-Command ffmpeg -ErrorAction Stop).Source }
 $env:PATH = "$(Split-Path -Parent $realFfmpegPath);$env:PATH"
 Write-Host "qualification system FFmpeg: $realFfmpegPath"
-Seed-HostileSessions
+if (-not $FreshOnly) { Seed-HostileSessions }
 $proc = Start-Process -FilePath $AppPath -PassThru
 $deadline = (Get-Date).AddSeconds(30)
 while ((Get-Date) -lt $deadline) {
@@ -331,6 +332,10 @@ function Invoke-State {
 }
 
 try {
+  if ($FreshOnly) {
+    Invoke-State 'setup-fresh' 1366 768 '1366x768-fresh'
+    return
+  }
   Invoke-State 'setup' 1366 768 '1366x768'
   Invoke-State 'local-ai' 1366 768 '1366x768'
   Invoke-State 'providers' 1366 768 '1366x768'
@@ -402,4 +407,5 @@ try {
   Remove-Item Env:CLIPGAUGE_QUALIFICATION_VAULT_SERVICE -ErrorAction SilentlyContinue
   Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
   Remove-Item Env:WEBVIEW2_USER_DATA_FOLDER -ErrorAction SilentlyContinue
+  $global:LASTEXITCODE = 0
 }

@@ -1,5 +1,6 @@
 # The Windows smoke test: everything a Windows user's machine would do, on a
-# clean windows-latest runner — resolve the Python env, use a compatible
+# clean windows-latest runner — resolve the Python env after fresh
+# packaged-first-launch qualification, use a compatible
 # system-PATH ffmpeg without copying it into ClipGauge data, pass the full
 # pipeline test suite, build the NSIS installer, install it silently, and
 # launch the real installed app.
@@ -44,10 +45,6 @@ jobs:
         working-directory: .github
         run: npm install --no-save --no-package-lock playwright-core@1.62.1
 
-      - name: Resolve the pipeline env (uv sync on Windows)
-        working-directory: pipeline
-        run: uv sync
-
       - name: Provide compatible system FFmpeg on PATH
         working-directory: pipeline
         shell: pwsh
@@ -58,7 +55,6 @@ jobs:
             $ffmpeg = Get-Command ffmpeg -ErrorAction Stop
           }
           Write-Host "system FFmpeg: $($ffmpeg.Source)"
-          uv run python -c "from clipgauge_pipeline.render import ffmpeg_bin; d = ffmpeg_bin.readiness(); print(d.to_dict()); assert d.ready and d.source == 'system' and not d.managed_download_needed, 'system FFmpeg was not reused'"
 
       - name: Pipeline test suite on Windows
         working-directory: pipeline
@@ -70,51 +66,7 @@ jobs:
           npm ci
           npm run build
           npm test
-          npx tauri build --bundles nsis --features qualification-vault
-
-      - name: Install required creator assets for truthful Setup Ready state
-        working-directory: pipeline
-        shell: pwsh
-        run: |
-          $env:HOME = $env:USERPROFILE
-          $nativeHome = Join-Path $env:USERPROFILE ".clipgauge"
-          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $nativeHome
-          New-Item -ItemType Directory -Force $nativeHome | Out-Null
-          New-Item -ItemType File -Force (Join-Path $nativeHome "onboarded") | Out-Null
-          $env:CLIPGAUGE_HOME = $nativeHome
-
-          function Install-VerifiedSetupGroup {
-            param(
-              [Parameter(Mandatory = $true)][string]$Group,
-              [Parameter(Mandatory = $true)][string]$LogPath,
-              [int]$MaxAttempts = 4
-            )
-
-            Remove-Item -Force -ErrorAction SilentlyContinue $LogPath
-            for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-              Write-Host "Installing verified setup group $Group (attempt $attempt/$MaxAttempts)"
-              uv run clipgauge --jsonl setup install-group --group $Group | Tee-Object -FilePath $LogPath -Append
-              $exitCode = $LASTEXITCODE
-              if ($exitCode -eq 0) {
-                Write-Host "Verified setup group $Group completed on attempt $attempt."
-                return
-              }
-
-              if ($attempt -eq $MaxAttempts) {
-                throw "$Group setup failed after $MaxAttempts attempts; final exit code $exitCode"
-              }
-
-              # The managed downloader keeps verified assets and resumable .part
-              # files. Re-running the same consented group therefore retries only
-              # unfinished work without bypassing pinned size/SHA-256 checks.
-              $delaySeconds = 15 * [math]::Pow(2, $attempt - 1)
-              Write-Warning "$Group setup exited $exitCode; retrying in $delaySeconds seconds."
-              Start-Sleep -Seconds $delaySeconds
-            }
-          }
-
-          Install-VerifiedSetupGroup -Group "core:asr" -LogPath "$env:GITHUB_WORKSPACE\setup-asr.jsonl"
-          Install-VerifiedSetupGroup -Group "core:analysis" -LogPath "$env:GITHUB_WORKSPACE\setup-analysis.jsonl"
+          npx tauri build --bundles nsis --features qualification-vault --config src-tauri/tauri.qualification.conf.json
 
       - name: Install silently and run deterministic packaged Windows UI qualification
         shell: pwsh
@@ -122,11 +74,11 @@ jobs:
           $setup = Get-ChildItem app/src-tauri/target/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
           if (-not $setup) { throw "no NSIS installer produced" }
           Write-Host "installer: $($setup.Name)"
-          Start-Process -FilePath $setup.FullName -ArgumentList "/S" -Wait
           $env:HOME = $env:USERPROFILE
           $nativeHome = Join-Path $env:USERPROFILE ".clipgauge"
-          New-Item -ItemType Directory -Force $nativeHome | Out-Null
-          New-Item -ItemType File -Force (Join-Path $nativeHome "onboarded") | Out-Null
+          $env:CLIPGAUGE_HOME = $nativeHome
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $nativeHome
+          Start-Process -FilePath $setup.FullName -ArgumentList "/S" -Wait
           $dir = Join-Path $env:LOCALAPPDATA "ClipGauge"
           if (-not (Test-Path $dir)) { throw "install dir missing: $dir" }
           $resources = Join-Path $dir "resources"
@@ -139,8 +91,35 @@ jobs:
           $systemFfmpeg = (Get-Command ffmpeg -ErrorAction Stop).Source
           Write-Host "packaged GUI system FFmpeg: $systemFfmpeg"
           New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE\windows-screenshots" | Out-Null
+          $freshExe = Get-ChildItem $dir -Filter *.exe | Where-Object { $_.Name -notmatch "uninstall" } | Select-Object -First 1
+          if (-not $freshExe) { throw "no app exe under $dir" }
+          & "$env:GITHUB_WORKSPACE\.github\windows-ui-qualification.ps1" -AppPath $freshExe.FullName -OutputDir "$env:GITHUB_WORKSPACE\windows-screenshots-fresh" -Sentinel "clipgauge-fresh-sentinel-20260824" -FreshOnly
+          if ($LASTEXITCODE -ne 0) { throw "fresh packaged Setup qualification failed with exit code $LASTEXITCODE" }
+          Write-Host "Bootstrapping the explicitly approved qualification environment."
+          New-Item -ItemType Directory -Force $nativeHome | Out-Null
+          New-Item -ItemType File -Force (Join-Path $nativeHome "onboarded") | Out-Null
           & $uv --directory $pipeline sync --locked
           if ($LASTEXITCODE -ne 0) { throw "bundled pipeline bootstrap failed with exit code $LASTEXITCODE" }
+          function Install-VerifiedSetupGroup {
+            param(
+              [Parameter(Mandatory = $true)][string]$Group,
+              [Parameter(Mandatory = $true)][string]$LogPath,
+              [int]$MaxAttempts = 4
+            )
+            Remove-Item -Force -ErrorAction SilentlyContinue $LogPath
+            for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+              Write-Host "Installing verified setup group $Group (attempt $attempt/$MaxAttempts)"
+              & $uv --directory $pipeline run clipgauge --jsonl setup install-group --group $Group | Tee-Object -FilePath $LogPath -Append
+              $exitCode = $LASTEXITCODE
+              if ($exitCode -eq 0) { return }
+              if ($attempt -eq $MaxAttempts) { throw "$Group setup failed after $MaxAttempts attempts; final exit code $exitCode" }
+              $delaySeconds = 15 * [math]::Pow(2, $attempt - 1)
+              Write-Warning "$Group setup exited $exitCode; retrying in $delaySeconds seconds."
+              Start-Sleep -Seconds $delaySeconds
+            }
+          }
+          Install-VerifiedSetupGroup -Group "core:asr" -LogPath "$env:GITHUB_WORKSPACE\setup-asr.jsonl"
+          Install-VerifiedSetupGroup -Group "core:analysis" -LogPath "$env:GITHUB_WORKSPACE\setup-analysis.jsonl"
           $inventory = (& $uv --directory $pipeline run clipgauge setup inventory --model "clipgauge-local/qwen3-4b-q4_k_m" | Out-String | ConvertFrom-Json)
           if (-not $inventory.video_tools.ready) { throw "packaged Setup inventory did not report FFmpeg ready" }
           if ($inventory.video_tools.source -ne "system") { throw "packaged Setup inventory did not reuse system FFmpeg" }
@@ -164,6 +143,35 @@ jobs:
             Remove-Item Env:CLIPGAUGE_QA_OPENROUTER_ENDPOINT -ErrorAction SilentlyContinue
           }
 
+      - name: Reinstall and verify user-data continuity
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem app/src-tauri/target/release/bundle/nsis -Filter *-setup.exe | Select-Object -First 1
+          if (-not $setup) { throw "no NSIS installer produced for reinstall" }
+          $nativeHome = Join-Path $env:USERPROFILE ".clipgauge"
+          $marker = Join-Path $nativeHome "qualification-user-data-marker.txt"
+          Set-Content -LiteralPath $marker -Value "preserve-across-reinstall" -Encoding utf8
+          Start-Process -FilePath $setup.FullName -ArgumentList "/S" -Wait -WindowStyle Hidden
+          if ((Get-Content -Raw -LiteralPath $marker).Trim() -ne "preserve-across-reinstall") { throw "reinstall removed user-created ClipGauge data" }
+          $dir = Join-Path $env:LOCALAPPDATA "ClipGauge"
+          $exe = Get-ChildItem $dir -Filter *.exe | Where-Object { $_.Name -notmatch "uninstall" } | Select-Object -First 1
+          if (-not $exe) { throw "reinstall removed installed ClipGauge executable" }
+          $process = Start-Process -FilePath $exe.FullName -PassThru -WindowStyle Hidden
+          try {
+            $deadline = (Get-Date).AddSeconds(30)
+            while ((Get-Date) -lt $deadline) {
+              $process.Refresh()
+              if ($process.MainWindowHandle -ne [IntPtr]::Zero) { break }
+              Start-Sleep -Milliseconds 500
+            }
+            $process.Refresh()
+            if ($process.MainWindowHandle -eq [IntPtr]::Zero) { throw "reinstalled ClipGauge did not expose a window" }
+          } finally {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
+          Remove-Item -LiteralPath $marker -Force
+          Write-Host "REINSTALL_USER_DATA_CONTINUITY=PASS"
+
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
@@ -172,6 +180,8 @@ jobs:
             app/src-tauri/target/release/bundle/nsis/*.exe
             windows-screenshots/*.png
             windows-screenshots/*.json
+            windows-screenshots-fresh/*.png
+            windows-screenshots-fresh/*.json
             setup-asr.jsonl
             setup-analysis.jsonl
             .github/windows-ui-qualification.ps1

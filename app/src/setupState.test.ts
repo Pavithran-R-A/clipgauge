@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { resolveSelectedLocalModel, selectedLocalModel, summarizeSetupQueue } from './setupState'
+import { isLocalAiUnavailable, resolveSelectedLocalModel, selectedLocalModel, shouldAdvanceSetupQueue, summarizeSetupQueue } from './setupState'
+
+describe('setup lifecycle guards', () => {
+  it('advances only after successful terminal events', () => {
+    expect(shouldAdvanceSetupQueue({ event: 'terminal', ok: true })).toBe(true)
+    expect(shouldAdvanceSetupQueue({ event: 'terminal', ok: false })).toBe(false)
+    expect(shouldAdvanceSetupQueue({ event: 'progress', ok: true })).toBe(false)
+  })
+
+  it('recognizes unsupported local AI runtimes', () => {
+    expect(isLocalAiUnavailable({ local_ai: { state: 'unavailable' } })).toBe(true)
+    expect(isLocalAiUnavailable({ local_ai: { state: 'runtime-install-required' } })).toBe(false)
+  })
+})
 
 describe('setup queue aggregation', () => {
   it('reports complete only when every operation succeeds', () => {
