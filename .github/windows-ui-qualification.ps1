@@ -1,7 +1,8 @@
 param(
   [Parameter(Mandatory = $true)] [string] $AppPath,
   [Parameter(Mandatory = $true)] [string] $OutputDir,
-  [Parameter(Mandatory = $true)] [string] $Sentinel
+  [Parameter(Mandatory = $true)] [string] $Sentinel,
+  [switch] $FreshOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -331,6 +332,10 @@ function Invoke-State {
 }
 
 try {
+  if ($FreshOnly) {
+    Invoke-State 'setup-fresh' 1366 768 '1366x768-fresh'
+    return
+  }
   Invoke-State 'setup' 1366 768 '1366x768'
   Invoke-State 'local-ai' 1366 768 '1366x768'
   Invoke-State 'providers' 1366 768 '1366x768'

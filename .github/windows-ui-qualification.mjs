@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process'
-import { writeFileSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
@@ -266,6 +267,32 @@ async function setupState(page) {
   await capture(`setup-${suffix}`)
 }
 
+async function setupFreshState(page) {
+  await clickNav(page, 'Setup & Storage')
+  const heading = await visible(page.locator('.setup-page h1').first(), 'fresh setup heading')
+  const deadline = Date.now() + 30_000
+  let headingText = ''
+  while (Date.now() < deadline) {
+    headingText = (await heading.innerText()).trim()
+    if (headingText === 'Core setup needed' || headingText === 'Setup information unavailable') break
+    await page.waitForTimeout(250)
+  }
+  if (headingText !== 'Core setup needed') {
+    const body = (await page.locator('.setup-page').innerText()).replaceAll(sentinel, '[REDACTED]')
+    throw new Error(`fresh Setup inventory did not settle safely: ${headingText}; page=${body.slice(0, 1800)}`)
+  }
+  const home = process.env.CLIPGAUGE_HOME
+  if (!home) throw new Error('fresh setup did not expose a controlled ClipGauge home')
+  for (const relativePath of ['runtimes/pipeline', 'downloads', 'downloads.json']) {
+    if (existsSync(join(home, ...relativePath.split('/')))) throw new Error(`fresh setup created unapproved runtime data: ${relativePath}`)
+  }
+  await text(page, 'Core components need setup.', 'fresh setup requirement marker')
+  const body = await page.locator('.setup-page').innerText()
+  if (body.includes('Available disk\n—')) throw new Error('fresh setup showed an unknown available-disk placeholder')
+  if (body.includes('Size calculated during setup')) throw new Error('fresh setup showed an unknown component-size placeholder')
+  await capture(`setup-fresh-${suffix}`)
+}
+
 async function localState(page) {
   await clickNav(page, 'Setup & Storage')
   const heading = await visible(page.locator('.setup-page h1').first(), 'Setup heading for Local AI')
@@ -519,6 +546,7 @@ try {
   const displayFacts = await collectDisplayFacts(page)
   writeFileSync(`${outputDir}/display-${state}-${suffix}.json`, `${JSON.stringify(displayFacts, null, 2)}\n`)
   if (state === 'setup') await setupState(page)
+  else if (state === 'setup-fresh') await setupFreshState(page)
   else if (state === 'create') await createState(page)
   else if (state === 'create-hostile') await createState(page, true)
   else if (state === 'help') await helpState(page)

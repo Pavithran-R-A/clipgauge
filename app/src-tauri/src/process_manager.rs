@@ -164,6 +164,14 @@ impl ProcessManager {
             .unwrap_or(false)
     }
 
+    pub fn is_cancel_requested_for_job_id(&self, job_id: &str) -> bool {
+        self.active
+            .values()
+            .find(|record| record.job_id.as_deref() == Some(job_id))
+            .map(|record| record.cancel_requested)
+            .unwrap_or(false)
+    }
+
     pub fn finish(&mut self, key: &str, success: bool) -> Option<LifecycleState> {
         let record = self.active.get_mut(key)?;
         let state = if record.cancel_requested {
@@ -234,7 +242,10 @@ pub fn terminate_owned(process_id: u32) -> Result<(), String> {
 
     #[cfg(windows)]
     {
-        let status = std::process::Command::new("taskkill")
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new("taskkill");
+        command.creation_flags(0x0800_0000);
+        let status = command
             .args(["/PID", &process_id.to_string(), "/T", "/F"])
             .status()
             .map_err(|error| format!("could not terminate owned process tree: {error}"))?;
@@ -286,6 +297,22 @@ mod tests {
         assert!(manager.is_cancel_requested("pending"));
         assert_eq!(
             manager.finish("pending", false),
+            Some(LifecycleState::Cancelled)
+        );
+    }
+
+    #[test]
+    fn cancellation_before_spawn_is_preserved() {
+        let mut manager = ProcessManager::new();
+        manager.reserve("pending").unwrap();
+        manager.adopt_job_id("pending", "setup:pending").unwrap();
+        assert_eq!(
+            manager.request_cancel("setup:pending"),
+            Err("job is starting and has no cancellable process yet".to_string())
+        );
+        assert!(manager.is_cancel_requested_for_job_id("setup:pending"));
+        assert_eq!(
+            manager.finish("pending", true),
             Some(LifecycleState::Cancelled)
         );
     }

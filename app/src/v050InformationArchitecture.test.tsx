@@ -7,6 +7,7 @@ import SetupCenter from './components/SetupCenter'
 const mocks = vi.hoisted(() => ({
   setupState: vi.fn(),
   setupInventory: vi.fn(),
+  saveLocalModel: vi.fn(),
   youtubeReadiness: vi.fn(),
   startSetup: vi.fn(),
   cancelSetup: vi.fn(),
@@ -204,5 +205,23 @@ describe('v0.5 information architecture', () => {
     mocks.setupInventory.mockResolvedValue(mixedInventory)
     render(<ProviderCenter selectedProvider="clipgauge-local" onSelectProvider={vi.fn()} onBack={vi.fn()} onOpenSetup={vi.fn()} />)
     expect((await screen.findAllByText('Ready')).length).toBeGreaterThan(0)
+  })
+
+  it('shows an explicit loading state before inventory resolves', async () => {
+    let resolveInventory: (value: Record<string, unknown>) => void = () => undefined
+    mocks.setupInventory.mockImplementation(() => new Promise((resolve) => { resolveInventory = resolve }))
+    render(<SetupCenter onBack={vi.fn()} />)
+    expect(screen.getByRole('heading', { name: 'Loading setup information…' })).toBeInTheDocument()
+    expect(screen.getAllByText('Checking…').length).toBeGreaterThan(0)
+    resolveInventory({ state: 'ready', models: [], core_assets: [], managed_assets: [], runtime: {}, storage: {}, catalog: [] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Core setup needed' })).toBeInTheDocument())
+  })
+
+  it('shows a retryable error state when inventory fails', async () => {
+    mocks.setupInventory.mockRejectedValue({ code: 'PIPELINE_NOT_INITIALIZED' })
+    render(<SetupCenter onBack={vi.fn()} />)
+    expect(await screen.findByRole('heading', { name: 'Setup information unavailable' })).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('preparing its local runtime')
+    expect(screen.getByRole('button', { name: 'Retry setup check' })).toBeInTheDocument()
   })
 })
