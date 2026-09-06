@@ -126,12 +126,19 @@ class DownloadManager:
             return True, digest
         return False, digest
 
-    def inventory(self, assets: Iterable[ManagedAsset]) -> list[dict[str, Any]]:
+    def inventory(self, assets: Iterable[ManagedAsset], *, verify: bool = True) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for asset in assets:
             destination = self._destination(asset)
-            installed, digest = self._asset_ready(asset, destination)
             state = self.state.get(asset.asset_id, {})
+            if verify:
+                installed, digest = self._asset_ready(asset, destination)
+                verification = "fresh-hash"
+            else:
+                persisted_status = str(state.get("status", "")).lower()
+                installed = destination.is_file() and persisted_status in {"installed", "reused", "ready"}
+                digest = asset.sha256 if installed and asset.sha256 else None
+                verification = "persisted-state" if installed else "not-verified"
             status = "ready" if installed else state.get("status", "not-installed")
             if destination.is_file() and not installed and digest:
                 status = "needs-repair"
@@ -142,6 +149,7 @@ class DownloadManager:
                     "installed": installed,
                     "cached": cached,
                     "installed_sha256": digest,
+                    "verification": verification,
                     "status": status,
                     "state": status.upper().replace("-", "_"),
                     "managed_path": str(destination),
@@ -150,8 +158,8 @@ class DownloadManager:
             )
         return rows
 
-    def estimate(self, assets: Iterable[ManagedAsset]) -> dict[str, Any]:
-        rows = self.inventory(assets)
+    def estimate(self, assets: Iterable[ManagedAsset], *, verify: bool = True) -> dict[str, Any]:
+        rows = self.inventory(assets, verify=verify)
         required = sum(int(row["size_bytes"]) for row in rows if row["required"] and not row["installed"])
         optional = sum(int(row["size_bytes"]) for row in rows if not row["required"] and not row["installed"])
         installed = sum(

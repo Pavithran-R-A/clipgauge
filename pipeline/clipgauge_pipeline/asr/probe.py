@@ -15,6 +15,7 @@ from typing import Any
 
 from .. import config, hardware
 from ..models import managed
+from .alignment import EXACT, alignment_policy, fallback_word_alignment
 
 
 def _package_version(name: str) -> str:
@@ -60,7 +61,8 @@ def run_cuda_probe(audio_path: Path, evidence_path: Path, *, align: bool) -> dic
     gc.collect()
 
     alignment_seconds = None
-    if align:
+    alignment_policy_result = alignment_policy(result.get("language", "en"))
+    if align and alignment_policy_result.status == EXACT:
         started = time.monotonic()
         align_model, align_meta = whisperx.load_align_model(
             language_code=result.get("language", "en"),
@@ -82,6 +84,12 @@ def run_cuda_probe(audio_path: Path, evidence_path: Path, *, align: bool) -> dic
             raise RuntimeError("CUDA alignment returned no segments")
         del align_model
         gc.collect()
+    elif align:
+        started = time.monotonic()
+        aligned = fallback_word_alignment(result.get("segments", []), duration=audio_seconds)
+        if not aligned:
+            raise RuntimeError("deterministic alignment returned no segments")
+        alignment_seconds = time.monotonic() - started
 
     gpu = (capabilities.get("nvidia") or {}).get("gpus") or []
     evidence: dict[str, Any] = {
@@ -101,6 +109,8 @@ def run_cuda_probe(audio_path: Path, evidence_path: Path, *, align: bool) -> dic
         "cudnn_version": "9.11.0.98",
         "managed_runtime": True,
         "alignment": align,
+        "alignment_status": alignment_policy_result.status,
+        "alignment_asset_id": alignment_policy_result.asset_id,
     }
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = evidence_path.with_name(f".{evidence_path.name}.part")

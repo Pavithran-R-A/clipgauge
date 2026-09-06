@@ -265,8 +265,35 @@ def record_public_compatibility_success(*, method: str, ytdlp_version: str, prov
 
 def _find_browser() -> str | None:
     """Detect an installed browser without launching it or reading its profile."""
-    candidates = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"]
-    return next((shutil.which(candidate) for candidate in candidates if shutil.which(candidate)), None)
+    names = [
+        "chrome", "chrome.exe", "msedge", "msedge.exe", "chromium", "chromium.exe",
+        "firefox", "firefox.exe", "google-chrome", "google-chrome-stable", "chromium-browser",
+    ]
+    candidates: list[Path] = []
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            candidates.append(Path(found))
+    if os.name == "nt":
+        roots = [
+            os.environ.get("PROGRAMFILES"),
+            os.environ.get("PROGRAMFILES(X86)"),
+            os.environ.get("LOCALAPPDATA"),
+        ]
+        relative_paths = [
+            Path("Google/Chrome/Application/chrome.exe"),
+            Path("Microsoft/Edge/Application/msedge.exe"),
+            Path("Chromium/Application/chrome.exe"),
+            Path("Mozilla Firefox/firefox.exe"),
+        ]
+        candidates.extend(Path(root) / relative for root in roots if root for relative in relative_paths)
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return str(candidate.resolve())
+        except OSError:
+            continue
+    return None
 
 
 def _wpc_plugin_installed() -> bool:

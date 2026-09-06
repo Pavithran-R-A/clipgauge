@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 from .. import config, hardware
+from .alignment import EXACT, alignment_policy, fallback_word_alignment
 from .. import downloads
 from ..models import managed
 from ..jobs.queue import Stage, StageContext, StageError
@@ -220,67 +221,68 @@ class AsrStage(Stage):
 
         ctx.emit(-1, "Aligning words…")
         t1 = time.monotonic()
-        if language != "en":
-            raise StageError(
-                f"Word alignment for language '{language}' is not installed. Open Setup Center to approve its one-time language model.",
-                code="ASR_ALIGNMENT_ASSET_NOT_READY",
-                retryable=True,
-            )
-        try:
-            align_model, align_meta = whisperx.load_align_model(
-                language_code=language, device=device,
-                model_name="WAV2VEC2_ASR_BASE_960H",
-                model_dir=str(managed.alignment_model_dir()), model_cache_only=True,
-            )
-            aligned = whisperx.align(
-                result["segments"], align_model, align_meta, audio, device,
-                return_char_alignments=False,
-            )
-        except Exception as exc:  # noqa: BLE001 - alignment can fall back to CPU
-            if device != "cpu":
-                if long_job and not allow_cpu_fallback:
+        policy = alignment_policy(language)
+        align_model = None
+        if policy.status == EXACT:
+            try:
+                align_model, align_meta = whisperx.load_align_model(
+                    language_code=language, device=device,
+                    model_name=policy.model_name,
+                    model_dir=str(managed.alignment_model_dir()), model_cache_only=True,
+                )
+                aligned = whisperx.align(
+                    result["segments"], align_model, align_meta, audio, device,
+                    return_char_alignments=False,
+                )
+            except Exception as exc:  # noqa: BLE001 - alignment can fall back to CPU
+                if device != "cpu":
+                    if long_job and not allow_cpu_fallback:
+                        raise StageError(
+                            "GPU speech acceleration failed during word alignment. Repair GPU acceleration or explicitly continue in slower CPU mode.",
+                            code="ASR_GPU_FALLBACK_REQUIRES_APPROVAL",
+                            retryable=True,
+                        ) from exc
+                    fallback_reason = "CUDA word alignment failed."
+                    fallback_stages.append("alignment")
+                    device, compute_type = "cpu", "int8"
+                    acceleration = {
+                        **acceleration,
+                        "state": DEGRADED_ACCELERATION_STATE,
+                        "device": device,
+                        "compute_type": compute_type,
+                        "reason": fallback_reason,
+                    }
+                    os.environ["CLIPGAUGE_ACCELERATOR"] = "cpu/int8"
+                    ctx.emit(-1, "Word alignment fell back to CPU…")
+                    try:
+                        align_model, align_meta = whisperx.load_align_model(
+                            language_code=language, device=device,
+                            model_name=policy.model_name,
+                            model_dir=str(managed.alignment_model_dir()), model_cache_only=True,
+                        )
+                        aligned = whisperx.align(
+                            result["segments"], align_model, align_meta, audio, device,
+                            return_char_alignments=False,
+                        )
+                    except Exception as fallback_exc:  # noqa: BLE001 - final typed boundary
+                        raise StageError(
+                            "Speech alignment could not complete. Retry with CPU acceleration or repair the speech runtime.",
+                            code="ASR_ALIGNMENT_FAILED",
+                            retryable=True,
+                        ) from fallback_exc
+                else:
                     raise StageError(
-                        "GPU speech acceleration failed during word alignment. Repair GPU acceleration or explicitly continue in slower CPU mode.",
-                        code="ASR_GPU_FALLBACK_REQUIRES_APPROVAL",
-                        retryable=True,
-                    ) from exc
-                fallback_reason = "CUDA word alignment failed."
-                fallback_stages.append("alignment")
-                device, compute_type = "cpu", "int8"
-                acceleration = {
-                    **acceleration,
-                    "state": DEGRADED_ACCELERATION_STATE,
-                    "device": device,
-                    "compute_type": compute_type,
-                    "reason": fallback_reason,
-                }
-                os.environ["CLIPGAUGE_ACCELERATOR"] = "cpu/int8"
-                ctx.emit(-1, "Word alignment fell back to CPU…")
-                try:
-                    align_model, align_meta = whisperx.load_align_model(
-                        language_code=language, device=device,
-                        model_name="WAV2VEC2_ASR_BASE_960H",
-                        model_dir=str(managed.alignment_model_dir()), model_cache_only=True,
-                    )
-                    aligned = whisperx.align(
-                        result["segments"], align_model, align_meta, audio, device,
-                        return_char_alignments=False,
-                    )
-                except Exception as fallback_exc:  # noqa: BLE001 - final typed boundary
-                    raise StageError(
-                        "Speech alignment could not complete. Retry with CPU acceleration or repair the speech runtime.",
+                        "Speech alignment could not complete. Retry the job or repair the runtime.",
                         code="ASR_ALIGNMENT_FAILED",
                         retryable=True,
-                    ) from fallback_exc
-            else:
-                raise StageError(
-                    "Speech alignment could not complete. Retry the job or repair the speech runtime.",
-                    code="ASR_ALIGNMENT_FAILED",
-                    retryable=True,
-                ) from exc
+                    ) from exc
+        else:
+            aligned = {"segments": fallback_word_alignment(result.get("segments", []), duration=duration)}
+            ctx.emit(-1, f"{policy.language.upper()} word timings use a deterministic local fallback.")
         align_secs = time.monotonic() - t1
         alignment_device = device
-        del align_model
+        if align_model is not None:
+            del align_model
         gc.collect()
         if hasattr(torch, "mps") and torch.backends.mps.is_available():
             torch.mps.empty_cache()
@@ -341,6 +343,9 @@ class AsrStage(Stage):
             "model_load_device": model_load_device,
             "transcription_device": transcription_device,
             "alignment_device": alignment_device,
+            "alignment_status": policy.status,
+            "alignment_asset_id": policy.asset_id,
+            "alignment_reason": policy.reason,
             "fallback_stages": fallback_stages,
             "segments": segments,
             "word_count": word_count,

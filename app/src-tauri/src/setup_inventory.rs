@@ -327,8 +327,11 @@ fn runtime_variant_spec(manifest: &Value, key: &str) -> Option<AssetSpec> {
         display_name: format!("ClipGauge Local · llama.cpp {version} · {key}"),
         purpose: "Owned loopback local inference runtime".to_string(),
         destination: archive_path.clone(),
-        installed_paths: vec![archive_path.clone(), installed_path],
-        installed_hashes: vec![(archive_path, text(record.get("sha256"), ""))],
+        // The archive is a download cache, not the installed runtime.
+        // Keeping it here made a ready extracted runtime look incomplete
+        // after safe cache cleanup.
+        installed_paths: vec![installed_path],
+        installed_hashes: Vec::new(),
         url: text(record.get("url"), ""),
         size_bytes: number(record.get("size")),
         sha256: text(record.get("sha256"), ""),
@@ -435,7 +438,7 @@ fn installed_details(home: &Path, spec: &AssetSpec) -> (bool, Option<String>) {
             return (false, first_digest);
         }
     }
-    if spec.installed_paths.len() == 1 {
+    if spec.installed_paths.len() == 1 && !spec.installed_hashes.is_empty() {
         let Ok(metadata) = fs::metadata(home.join(&spec.installed_paths[0])) else {
             return (false, first_digest);
         };
@@ -477,6 +480,24 @@ fn asset_row(
     } else {
         Some(0)
     };
+    let readiness = json!({
+        "readiness_schema_version": 1,
+        "asset_id": spec.asset_id.clone(),
+        "installed": is_installed,
+        "verified": is_installed,
+        "usable": is_installed,
+        "repair": status == "needs-repair",
+        "selected_runtime": Value::Null,
+        "selected_model": if spec.asset_id.starts_with("clipgauge-local/") { Value::String(spec.asset_id.clone()) } else { Value::Null },
+        "actual_additional_bytes": if is_installed { 0 } else { spec.size_bytes },
+    });
+    let lifecycle_state = if is_installed {
+        "VERIFIED"
+    } else if status == "needs-repair" {
+        "NEEDS_REPAIR"
+    } else {
+        "DOWNLOAD_REQUIRED"
+    };
     json!({
         "asset_id": spec.asset_id,
         "display_name": spec.display_name,
@@ -498,6 +519,10 @@ fn asset_row(
         "state": status.to_ascii_uppercase().replace('-', "_"),
         "managed_path": home.join(&spec.destination),
         "consent_granted": false,
+        "readiness": readiness,
+        "lifecycle_state": lifecycle_state,
+        "lifecycle_label": if lifecycle_state == "VERIFIED" { "Installed · reused for future videos" } else if lifecycle_state == "NEEDS_REPAIR" { "Needs repair" } else { "Download required" },
+        "required_download_bytes": if is_installed { 0 } else { spec.size_bytes },
     })
 }
 
@@ -554,7 +579,7 @@ fn probe_executable(name: &str, args: &[&str]) -> bool {
 }
 
 fn native_runtime_selection(
-    _home: &Path,
+    home: &Path,
     manifest: &Value,
     specs: &[AssetSpec],
 ) -> (String, String) {
@@ -574,9 +599,24 @@ fn native_runtime_selection(
     let nvidia_verified =
         probe_executable("nvidia-smi", &["--query-gpu=name", "--format=csv,noheader"]);
     let vulkan_verified = probe_executable("vulkaninfo", &["--summary"]);
-    // CUDA selection remains owned by the Python hardware probe. Native
-    // inventory cannot import CTranslate2 safely without reintroducing the
-    // startup dependency that this path deliberately avoids.
+    let cuda_runtime_ready = [
+        "cublas64_12.dll",
+        "cublasLt64_12.dll",
+        "cudart64_12.dll",
+        "cudnn64_9.dll",
+    ]
+    .iter()
+    .all(|name| home.join("runtimes/cuda/12.4").join(name).is_file());
+    if available.contains(&"windows-x86_64-cuda")
+        && nvidia_verified
+        && cuda_runtime_ready
+        && manifest_asset(manifest, "llama-server", "windows-x86_64-cuda").is_some()
+    {
+        return (
+            "windows-x86_64-cuda".to_string(),
+            "Verified NVIDIA and managed CUDA runtime selected.".to_string(),
+        );
+    }
     if available.contains(&"windows-x86_64-vulkan")
         && (nvidia_verified || vulkan_verified)
         && manifest_asset(manifest, "llama-server", "windows-x86_64-vulkan").is_some()
@@ -759,18 +799,22 @@ fn probe_ffmpeg(path: &Path) -> (bool, Option<String>, HashMap<String, bool>, St
     let subtitles = filters
         .lines()
         .any(|line| line.split_whitespace().any(|token| token == "subtitles"));
+    let ass = filters
+        .lines()
+        .any(|line| line.split_whitespace().any(|token| token == "ass"));
     let mut capabilities = HashMap::new();
     capabilities.insert("starts".to_string(), starts);
     capabilities.insert("subtitles".to_string(), subtitles);
-    let reason = if starts && subtitles {
+    capabilities.insert("ass".to_string(), ass);
+    let reason = if starts && subtitles && ass {
         "Compatible caption-capable FFmpeg."
     } else if !starts {
         "FFmpeg did not start successfully."
     } else {
-        "FFmpeg is missing the subtitles filter required for caption rendering."
+        "FFmpeg is missing the subtitles or ass filter required for caption rendering."
     };
     (
-        starts && subtitles,
+        starts && subtitles && ass,
         version,
         capabilities,
         reason.to_string(),
@@ -829,6 +873,134 @@ extern "system" {
         total_bytes: *mut u64,
         total_free_bytes: *mut u64,
     ) -> i32;
+}
+
+fn directory_size(path: &Path) -> u64 {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if metadata.file_type().is_symlink() {
+        return 0;
+    }
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    if !metadata.is_dir() {
+        return 0;
+    }
+    fs::read_dir(path)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| directory_size(&entry.path()))
+        .sum()
+}
+
+fn categorized_size(path: &Path, predicate: &dyn Fn(&Path) -> bool) -> u64 {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if metadata.file_type().is_symlink() {
+        return 0;
+    }
+    if metadata.is_file() {
+        return if predicate(path) { metadata.len() } else { 0 };
+    }
+    if !metadata.is_dir() {
+        return 0;
+    }
+    fs::read_dir(path)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| categorized_size(&entry.path(), predicate))
+        .sum()
+}
+
+fn storage_breakdown(home: &Path) -> Value {
+    let jobs = home.join("jobs");
+    let rows = [
+        (
+            "components",
+            "Components",
+            directory_size(&home.join("models/asr"))
+                + directory_size(&home.join("models/torch"))
+                + directory_size(&home.join("runtimes/ffmpeg"))
+                + directory_size(&home.join("runtimes/yt-dlp"))
+                + directory_size(&home.join("runtimes/youtube"))
+                + directory_size(&home.join("bin")),
+            false,
+        ),
+        (
+            "local-ai",
+            "Local AI",
+            directory_size(&home.join("models/clipgauge-local"))
+                + directory_size(&home.join("runtimes/llama-server")),
+            false,
+        ),
+        ("sessions", "Sessions/source", directory_size(&jobs), false),
+        (
+            "rendered",
+            "Rendered",
+            categorized_size(&jobs, &|path| {
+                path.parent()
+                    .and_then(Path::file_name)
+                    .and_then(|name| name.to_str())
+                    .map(|name| name == "outputs" || name == "rendered")
+                    .unwrap_or(false)
+            }),
+            false,
+        ),
+        (
+            "download-cache",
+            "Download cache",
+            directory_size(&home.join("downloads")),
+            true,
+        ),
+        (
+            "temp-partial",
+            "Temp/partial",
+            categorized_size(home, &|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| {
+                        name.ends_with(".part")
+                            || name.ends_with(".tmp")
+                            || name.contains(".staging")
+                    })
+                    .unwrap_or(false)
+            }),
+            true,
+        ),
+        (
+            "diagnostics",
+            "Diagnostics",
+            directory_size(&home.join("diagnostics"))
+                + categorized_size(&jobs, &|path| {
+                    path.parent()
+                        .and_then(Path::file_name)
+                        .and_then(|name| name.to_str())
+                        .map(|name| name == "diagnostics")
+                        .unwrap_or(false)
+                }),
+            false,
+        ),
+    ];
+    Value::Array(
+        rows.into_iter()
+            .map(|(category, display_name, bytes, deletable)| {
+                json!({
+                    "category": category,
+                    "display_name": display_name,
+                    "bytes": bytes,
+                    "deletable": deletable,
+                    "requires_confirmation": true,
+                })
+            })
+            .collect(),
+    )
 }
 
 pub fn native_inventory(
@@ -1155,6 +1327,18 @@ pub fn native_inventory(
         })
         .cloned()
         .unwrap_or_else(|| json!({}));
+    let local_readiness = json!({
+        "readiness_schema_version": 1,
+        "asset_id": "provider:clipgauge-local",
+        "installed": runtime_ready && model_ready,
+        "verified": runtime_ready && model_ready,
+        "usable": runtime_ready && model_ready,
+        "repair": local_state == "repair-required",
+        "selected_runtime": manifest_asset(&manifest, "llama-server", &selected_runtime_key)
+            .map(|record| text(record.get("backend"), "cpu")),
+        "selected_model": selected_id.clone(),
+        "actual_additional_bytes": (if runtime_ready { 0 } else { runtime_spec.map(|spec| spec.size_bytes).unwrap_or_default() }) + (if model_ready { 0 } else { selected.map(|model| model.size_bytes).unwrap_or_default() }),
+    });
     Ok(json!({
         "state": if required_ready { "ready" } else { "setup-required" },
         "runtime": runtime_row,
@@ -1184,6 +1368,7 @@ pub fn native_inventory(
             "selected_model_id": selected_id,
             "required_bytes": (if runtime_ready { 0 } else { runtime_spec.map(|spec| spec.size_bytes).unwrap_or_default() }) + (if model_ready { 0 } else { selected.map(|model| model.size_bytes).unwrap_or_default() }),
             "action": if runtime_spec.is_none() { "Unavailable on this platform" } else if runtime_ready && model_ready { "Ready" } else if runtime_ready { "Download selected model" } else { "Install ClipGauge Local" },
+            "readiness": local_readiness,
         },
         "managed_assets": rows,
         "storage": {
@@ -1193,6 +1378,7 @@ pub fn native_inventory(
             "installed_bytes": installed_bytes,
             "available_bytes": available_bytes(home),
             "assets": [],
+            "breakdown": storage_breakdown(home),
             "consent_required": required_bytes > 0,
             "location": home,
         },

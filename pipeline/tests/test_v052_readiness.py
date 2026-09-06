@@ -13,7 +13,7 @@ def test_capable_system_ffmpeg_is_ready_without_managed_download(monkeypatch, tm
     binary.write_text("placeholder")
     monkeypatch.setattr(ffmpeg_bin, "_platform_asset", lambda: {"key": "win64-gpl", "size": 123})
     monkeypatch.setattr(ffmpeg_bin, "_candidates", lambda: [("system", str(binary))])
-    monkeypatch.setattr(ffmpeg_bin, "_probe", lambda _path: ("ffmpeg version test", {"starts": True, "subtitles": True}, "ok"))
+    monkeypatch.setattr(ffmpeg_bin, "_probe", lambda _path: ("ffmpeg version test", {"starts": True, "subtitles": True, "ass": True}, "ok"))
     _clear_cache()
     try:
         result = ffmpeg_bin.readiness()
@@ -21,7 +21,7 @@ def test_capable_system_ffmpeg_is_ready_without_managed_download(monkeypatch, tm
         assert result.source == "system"
         assert result.executable == str(binary)
         assert result.managed_download_needed is False
-        assert result.capabilities == {"starts": True, "subtitles": True}
+        assert result.capabilities == {"starts": True, "subtitles": True, "ass": True}
         assert ffmpeg_bin.resolve() == (str(binary), True)
     finally:
         _clear_cache()
@@ -32,7 +32,7 @@ def test_incompatible_system_ffmpeg_offers_managed_fallback(monkeypatch, tmp_pat
     binary.write_text("placeholder")
     monkeypatch.setattr(ffmpeg_bin, "_platform_asset", lambda: {"key": "win64-gpl", "size": 456})
     monkeypatch.setattr(ffmpeg_bin, "_candidates", lambda: [("system", str(binary))])
-    monkeypatch.setattr(ffmpeg_bin, "_probe", lambda _path: ("ffmpeg version old", {"starts": True, "subtitles": False}, "missing subtitles"))
+    monkeypatch.setattr(ffmpeg_bin, "_probe", lambda _path: ("ffmpeg version old", {"starts": True, "subtitles": False, "ass": False}, "missing subtitles"))
     _clear_cache()
     try:
         result = ffmpeg_bin.readiness()

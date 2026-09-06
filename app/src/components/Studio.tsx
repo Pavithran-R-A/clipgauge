@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { FileVideo, FolderOpen, Info, LockKeyhole, Play, Settings2, Sparkles, X } from 'lucide-react'
 import { open } from '@tauri-apps/plugin-dialog'
 import type { JobSummary, StageProgress } from '../types'
-import { creatorHeadline, providerHelperCopy, sourceKind, YOUTUBE_HELPER_COPY, type CreatorRunState } from '../creatorState'
+import { creatorHeadline, providerHelperCopy, YOUTUBE_HELPER_COPY, type CreatorRunState } from '../creatorState'
 
 const STAGE_ORDER = ['ingest', 'asr', 'diarize', 'events', 'candidates', 'score', 'camera', 'render']
 const STAGE_LABELS: Record<string, string> = {
@@ -61,7 +61,6 @@ export default function Studio({ running, runState, cancelling, startedAt, stage
   const [source, setSource] = useState('')
   const provider = selectedProvider
   const [captions, setCaptions] = useState('classic')
-  const [browserSession, setBrowserSession] = useState('')
   const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
@@ -74,7 +73,6 @@ export default function Studio({ running, runState, cancelling, startedAt, stage
   const selectedAI = AI_OPTIONS.find((option) => option.id === provider) ?? AI_OPTIONS[0]
   const selectedCaption = CAPTION_OPTIONS.find((option) => option.id === captions) ?? CAPTION_OPTIONS[0]
   const hasProgress = running || Object.keys(stages).length > 0 || runState !== 'IDLE' || Boolean(error)
-  const youtubeAttention = sourceKind(source) === 'youtube' && Boolean(error)
 
   async function chooseFile() {
     const selected = await open({ multiple: false, directory: false, filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'mkv', 'webm', 'avi'] }] })
@@ -116,7 +114,7 @@ export default function Studio({ running, runState, cancelling, startedAt, stage
         </div>
         <aside className="create-side-column"><section className="side-note card-surface"><div className="side-note-icon"><Info size={18} aria-hidden="true" /></div><div><strong>What happens next?</strong><p>ClipGauge finds strong moments, reframes them for vertical video, and adds captions. You’ll get a review screen with every clip and its reasons.</p></div></section><section className="selected-summary card-surface"><p className="section-eyebrow">Your choices</p><div className="summary-row"><span>AI</span><strong>{selectedAI.name}</strong></div><div className="summary-row"><span>Captions</span><strong>{selectedCaption.name}</strong></div><div className="summary-row"><span>Output</span><strong>Vertical 9:16</strong></div></section></aside>
       </div>
-      {hasProgress && <section className="processing-panel card-surface" aria-live="polite"><div className="processing-header"><div><p className="section-eyebrow">Creating your clips</p><h2>{creatorHeadline(runState)}</h2></div><span className="elapsed-pill">{formatElapsed(elapsed)} elapsed</span></div><div className="processing-timeline" data-testid="processing-timeline">{STAGE_ORDER.map((stage) => { const current = stages[stage]; const done = Boolean(current && current.fraction >= 1); const active = Boolean(current && !done) || (!current && running && stage === STAGE_ORDER.find((item) => !stages[item])); return <div className={`timeline-step ${done ? 'is-done' : ''} ${active ? 'is-active' : ''}`} key={stage}><span className="timeline-dot" aria-hidden="true">{done ? '✓' : active ? '•' : ''}</span><span>{current?.displayStage ?? STAGE_LABELS[stage]}</span>{active && current?.operation && <small>{current.operation}</small>}</div> })}</div>{notice && <p className="inline-message" role="status">{notice}</p>}{error && <p className="error-message" role="alert">{error}</p>}{youtubeAttention && <div className="youtube-recovery card-surface"><div><strong>YouTube playback verification was rejected</strong><p>ClipGauge itself is ready. You can retry later, or try browser-assisted compatibility after explicit approval. ClipGauge reads the selected browser session only for this operation and never saves cookies.</p></div><label className="browser-session-choice" htmlFor="browser-session">Browser session<select id="browser-session" value={browserSession} onChange={(event) => setBrowserSession(event.target.value)}><option value="">Choose a browser</option><option value="chrome">Chrome</option><option value="firefox">Firefox</option><option value="chromium">Chromium</option></select></label><div className="detail-actions"><button type="button" className="button button-secondary" onClick={() => onNavigate('setup')}>Open Setup</button><button type="button" className="button button-secondary" onClick={() => onRun(source.trim(), provider, captions, provider === 'clipgauge-local' ? localModelId : undefined, undefined, undefined, undefined, browserSession)} disabled={running || !browserSession}>Try browser-assisted YouTube compatibility</button><button type="button" className="button button-secondary" onClick={() => onRun(source.trim(), provider, captions, provider === 'clipgauge-local' ? localModelId : undefined)} disabled={running}>Retry later</button></div></div>}<details className="technical-disclosure"><summary>Show technical details</summary><div className="technical-progress-list">{Object.entries(stages).map(([name, stage]) => <div key={name}><span>{name}</span><span>{stage.message}</span></div>)}</div></details></section>}
+      {hasProgress && <section className="processing-panel card-surface" aria-live="polite"><div className="processing-header"><div><p className="section-eyebrow">Creating your clips</p><h2>{creatorHeadline(runState)}</h2></div><span className="elapsed-pill">{formatElapsed(elapsed)} elapsed</span></div><div className="processing-timeline" data-testid="processing-timeline">{STAGE_ORDER.map((stage) => { const current = stages[stage]; const done = Boolean(current && current.fraction >= 1); const active = Boolean(current && !done) || (!current && running && stage === STAGE_ORDER.find((item) => !stages[item])); return <div className={`timeline-step ${done ? 'is-done' : ''} ${active ? 'is-active' : ''}`} key={stage}><span className="timeline-dot" aria-hidden="true">{done ? '✓' : active ? '•' : ''}</span><span>{current?.displayStage ?? STAGE_LABELS[stage]}</span>{active && current?.operation && <small>{current.operation}</small>}</div> })}</div>{notice && <p className="inline-message" role="status">{notice}</p>}{error && <p className="error-message" role="alert">{error}</p>}<details className="technical-disclosure"><summary>Show technical details</summary><div className="technical-progress-list">{Object.entries(stages).map(([name, stage]) => <div key={name}><span>{name}</span><span>{stage.message}</span></div>)}</div></details></section>}
     </div>
   )
 }

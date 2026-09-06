@@ -20,6 +20,14 @@ def _segments(texts: list[str], seconds: float = 4.0) -> list[dict]:
     ]
 
 
+def test_story_units_preserve_non_latin_tokens():
+    units = build_sentence_units(_segments(["தமிழ் மொழி மிகவும் அழகானது."]))
+
+    assert units
+    assert units[0].tokens
+    assert any("தமிழ்" in token for token in units[0].tokens)
+
+
 def test_fixture_a_prefers_specific_story_shape_over_generic_reaction():
     units = build_sentence_units(_segments([
         "Okay, so here we are.",

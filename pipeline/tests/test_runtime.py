@@ -300,6 +300,41 @@ def test_local_runtime_inference_probe_rejects_empty_reply(monkeypatch, tmp_path
     assert result["reason"] == "Local inference returned an invalid response."
 
 
+def test_extracted_runtime_stays_ready_after_archive_cache_is_removed(monkeypatch, tmp_path):
+    manifest = {
+        "runtimes": {
+            "llama-server": {
+                "version": "test-runtime",
+                "assets": {
+                    "windows-x86_64": {
+                        "backend": "cpu",
+                        "binary": "llama-server.exe",
+                        "size": 123,
+                    },
+                },
+            }
+        }
+    }
+    instance = local_runtime.LocalRuntime(root=tmp_path, manifest=manifest)
+    monkeypatch.setattr(instance, "runtime_asset_key", lambda: "windows-x86_64")
+    binary = instance.binary_path()
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"installed runtime")
+    monkeypatch.setattr(
+        local_runtime.subprocess,
+        "run",
+        lambda *args, **kwargs: type("Result", (), {"returncode": 0})(),
+    )
+
+    readiness = instance.readiness()
+
+    assert readiness["installed"] is True
+    assert readiness["verified"] is True
+    assert readiness["usable"] is True
+    assert readiness["actual_additional_bytes"] == 0
+    assert not (tmp_path / "downloads").exists()
+
+
 def test_local_runtime_uses_new_process_group_on_windows(monkeypatch, tmp_path):
     model = tmp_path / "model.gguf"
     model.write_bytes(b"verified-model")

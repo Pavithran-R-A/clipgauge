@@ -54,7 +54,7 @@ def _stderr_tail(root: Path, path: Path | None, limit: int = 3_000) -> str | Non
         return None
 
 
-from . import config, hardware, runtime
+from . import config, hardware, readiness, runtime
 
 
 class LocalRuntimeError(RuntimeError):
@@ -173,17 +173,14 @@ class LocalRuntime:
         nvidia_available = False
         vulkan_available = False
         cuda_available = False
-        if platform_key == "windows-x86_64":
+        if platform_key == "windows-x86_64" and self.root == config.home_dir().resolve():
             try:
-                capabilities = hardware.snapshot(self.root)
+                capabilities = hardware.local_runtime_snapshot(self.root)
                 nvidia_available = bool((capabilities.get("nvidia") or {}).get("verified"))
                 vulkan_available = bool((capabilities.get("vulkan") or {}).get("verified"))
-                if self.root == config.home_dir().resolve():
-                    from .models import managed
+                from .models import managed
 
-                    cuda_available = managed.cuda_runtime_ready() and bool(
-                        (capabilities.get("cuda_ctranslate2") or {}).get("verified")
-                    )
+                cuda_available = managed.cuda_runtime_ready() and nvidia_available
             except Exception:  # noqa: BLE001 - capability probing must never remove CPU fallback
                 pass
         selected = select_runtime_asset_key(
@@ -204,6 +201,55 @@ class LocalRuntime:
 
     def runtime_backend(self) -> str:
         return str(self.runtime_asset().get("backend", "cpu"))
+
+    def readiness(self) -> dict[str, Any]:
+        """Inspect the selected runtime without requiring its download archive."""
+        try:
+            binary = self.binary_path()
+            installed = binary.is_file()
+            verified = False
+            usable = False
+            repair = False
+            reason = "ClipGauge Local runtime is not installed."
+            if installed:
+                try:
+                    result = subprocess.run(
+                        [str(binary), "--version"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    verified = result.returncode == 0
+                    usable = verified
+                    reason = "Verified llama.cpp runtime is ready." if usable else "The installed llama.cpp runtime failed its version check."
+                    repair = not usable
+                except (OSError, subprocess.TimeoutExpired):
+                    repair = True
+                    reason = "The installed llama.cpp runtime could not be started for verification."
+            return readiness.contract(
+                asset_id=f"runtime:llama-server:{self.runtime_asset_key()}",
+                installed=installed,
+                verified=verified,
+                usable=usable,
+                repair=repair,
+                selected_runtime=self.runtime_backend(),
+                actual_additional_bytes=0 if installed else int(self.runtime_asset().get("size", 0) or 0),
+                repair_reason=reason if repair else None,
+            ) | {
+                "binary": str(binary),
+                "reason": reason,
+            }
+        except (KeyError, LocalRuntimeError):
+            return readiness.contract(
+                asset_id="runtime:llama-server:unavailable",
+                installed=False,
+                verified=False,
+                usable=False,
+                repair=False,
+                selected_runtime=None,
+                actual_additional_bytes=0,
+            ) | {"binary": None, "reason": "ClipGauge Local is unavailable on this platform."}
 
     def runtime_library_dir(self) -> Path | None:
         """Return verified local CUDA libraries for the child runtime."""

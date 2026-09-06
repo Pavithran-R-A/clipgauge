@@ -17,6 +17,7 @@ export interface PipelineEvent {
   accelerator?: string
   one_time_download?: boolean
   job_id?: string
+  attempt_id?: string
   ok?: boolean
   code?: string
   error?: string
@@ -251,6 +252,19 @@ export interface PreflightStorage {
   available_bytes?: number | null
   consent_required: boolean
   assets: Array<Record<string, unknown>>
+  breakdown?: Array<{ category: string; display_name: string; bytes: number; deletable?: boolean; requires_confirmation?: boolean }>
+}
+
+export interface StorageCleanupPreview {
+  target: 'session' | 'failed-session' | 'safe-cache' | 'obsolete-runtime-archives' | string
+  job_id?: string | null
+  bytes: number
+  paths: string[]
+  requires_confirmation: boolean
+}
+
+export interface StorageCleanupResult extends StorageCleanupPreview {
+  removed?: string[]
 }
 
 export type YouTubeReadinessState = 'NOT_INSTALLED' | 'INSTALL_INCOMPLETE' | 'BUILD_REQUIRED' | 'UNHEALTHY' | 'READY' | 'DEPENDENCIES_READY' | 'PUBLIC_DOWNLOAD_VERIFIED' | 'REPAIR_REQUIRED'
@@ -275,6 +289,7 @@ export interface PreflightResult {
   hardware?: Record<string, unknown>
   storage?: PreflightStorage
   youtube?: YouTubeReadiness
+  readiness?: ReadinessContract
 }
 
 export interface ManagedAssetRow {
@@ -301,6 +316,23 @@ export interface ManagedAssetRow {
   capabilities?: Record<string, boolean>
   managed_path?: string
   consent_granted?: boolean
+  lifecycle_state?: LocalModelState
+  lifecycle_label?: string
+  required_download_bytes?: number
+  readiness?: ReadinessContract
+}
+
+export interface ReadinessContract {
+  readiness_schema_version: number
+  asset_id: string
+  installed: boolean
+  verified: boolean
+  usable: boolean
+  repair: boolean
+  selected_runtime?: string | null
+  selected_model?: string | null
+  actual_additional_bytes: number
+  repair_reason?: string
 }
 
 export interface SetupProgressEvent {
@@ -329,7 +361,7 @@ export interface LocalSetupInventory {
   state: 'ready' | 'setup-required' | string
   video_tools?: VideoToolReadiness
   local_ai?: LocalAiReadiness
-  runtime: Record<string, unknown> & { installed?: boolean; display_name?: string; size_bytes?: number; installed_size_bytes?: number; version?: string }
+  runtime: Record<string, unknown> & { installed?: boolean; display_name?: string; size_bytes?: number; installed_size_bytes?: number; version?: string; readiness?: ReadinessContract }
   models: Array<Record<string, unknown> & { asset_id?: string; installed?: boolean; cached?: boolean; one_time?: boolean; display_name?: string; purpose?: string; size_bytes?: number; installed_size_bytes?: number; version?: string; license?: string }>
   core_assets: Array<Record<string, unknown> & { asset_id?: string; installed?: boolean; cached?: boolean; one_time?: boolean; display_name?: string; purpose?: string; integrity?: string; license?: string; size_bytes?: number; installed_size_bytes?: number; version?: string }>
   managed_assets?: ManagedAssetRow[]
@@ -362,6 +394,7 @@ export interface LocalAiReadiness {
   selected_model_id?: string | null
   required_bytes: number
   action: string
+  readiness?: ReadinessContract
 }
 
 
