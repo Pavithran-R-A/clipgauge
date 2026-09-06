@@ -558,7 +558,9 @@ async function verifyOpenRouterRemoved(page) {
 const { browser, page } = await connect()
 try {
   page.setDefaultTimeout(120_000)
-  await visible(page.getByRole('button', { name: 'Setup & Storage', exact: true }).first(), 'application navigation')
+  if (state !== 'setup-fresh') {
+    await visible(page.getByRole('button', { name: 'Setup & Storage', exact: true }).first(), 'application navigation')
+  }
   const vaultScope = await page.evaluate(async () => {
     const invoke = window.__TAURI_INTERNALS__?.invoke
     if (typeof invoke !== 'function') throw new Error('Tauri invoke unavailable for vault scope')
