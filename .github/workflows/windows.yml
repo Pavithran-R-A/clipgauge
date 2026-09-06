@@ -76,10 +76,9 @@ jobs:
           Write-Host "installer: $($setup.Name)"
           $env:HOME = $env:USERPROFILE
           $nativeHome = Join-Path $env:USERPROFILE ".clipgauge"
+          $env:CLIPGAUGE_HOME = $nativeHome
           Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $nativeHome
           Start-Process -FilePath $setup.FullName -ArgumentList "/S" -Wait
-          New-Item -ItemType Directory -Force $nativeHome | Out-Null
-          New-Item -ItemType File -Force (Join-Path $nativeHome "onboarded") | Out-Null
           $dir = Join-Path $env:LOCALAPPDATA "ClipGauge"
           if (-not (Test-Path $dir)) { throw "install dir missing: $dir" }
           $resources = Join-Path $dir "resources"
@@ -97,6 +96,8 @@ jobs:
           & "$env:GITHUB_WORKSPACE\.github\windows-ui-qualification.ps1" -AppPath $freshExe.FullName -OutputDir "$env:GITHUB_WORKSPACE\windows-screenshots-fresh" -Sentinel "clipgauge-fresh-sentinel-20260824" -FreshOnly
           if ($LASTEXITCODE -ne 0) { throw "fresh packaged Setup qualification failed with exit code $LASTEXITCODE" }
           Write-Host "Bootstrapping the explicitly approved qualification environment."
+          New-Item -ItemType Directory -Force $nativeHome | Out-Null
+          New-Item -ItemType File -Force (Join-Path $nativeHome "onboarded") | Out-Null
           & $uv --directory $pipeline sync --locked
           if ($LASTEXITCODE -ne 0) { throw "bundled pipeline bootstrap failed with exit code $LASTEXITCODE" }
           function Install-VerifiedSetupGroup {

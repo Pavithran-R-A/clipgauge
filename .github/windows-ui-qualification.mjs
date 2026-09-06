@@ -267,7 +267,30 @@ async function setupState(page) {
   await capture(`setup-${suffix}`)
 }
 
+async function completeFreshOnboarding(page) {
+  const hero = page.getByRole('heading', { name: 'Turn long videos into clips people remember.', exact: true })
+  const setupStep = page.getByRole('heading', { name: 'Start with a private setup.', exact: true })
+  const finalStep = page.getByRole('heading', { name: 'You’re ready to create.', exact: true })
+  const setupNav = page.getByRole('button', { name: 'Setup & Storage', exact: true })
+  const deadline = Date.now() + 120_000
+  while (Date.now() < deadline) {
+    if (await hero.isVisible().catch(() => false) || await setupStep.isVisible().catch(() => false) || await finalStep.isVisible().catch(() => false) || await setupNav.isVisible().catch(() => false)) break
+    await page.waitForTimeout(250)
+  }
+  if (await hero.isVisible().catch(() => false)) {
+    await page.getByRole('button', { name: 'Set up ClipGauge', exact: true }).click()
+  }
+  if (await setupStep.isVisible().catch(() => false)) {
+    await page.getByRole('button', { name: 'Continue', exact: true }).click()
+  }
+  if (await finalStep.isVisible().catch(() => false)) {
+    await page.getByRole('button', { name: 'Open Create', exact: true }).click()
+  }
+  await visible(setupNav, 'fresh setup navigation')
+}
+
 async function setupFreshState(page) {
+  await completeFreshOnboarding(page)
   await clickNav(page, 'Setup & Storage')
   const heading = await visible(page.locator('.setup-page h1').first(), 'fresh setup heading')
   const deadline = Date.now() + 30_000

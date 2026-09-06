@@ -129,7 +129,11 @@ impl ProcessManager {
             .get_mut(key)
             .ok_or_else(|| "job reservation is no longer active".to_string())?;
         record.process_id = Some(process_id);
-        record.state = LifecycleState::Running;
+        record.state = if record.cancel_requested {
+            LifecycleState::Cancelling
+        } else {
+            LifecycleState::Running
+        };
         record.heartbeat_at_ms = now_ms();
         Ok(())
     }
@@ -315,6 +319,22 @@ mod tests {
             manager.finish("pending", true),
             Some(LifecycleState::Cancelled)
         );
+    }
+
+    #[test]
+    fn cancellation_during_registration_remains_cancelling() {
+        let mut manager = ProcessManager::new();
+        manager.reserve("pending").unwrap();
+        manager.adopt_job_id("pending", "setup:pending").unwrap();
+        assert_eq!(
+            manager.request_cancel("setup:pending"),
+            Err("job is starting and has no cancellable process yet".to_string())
+        );
+        manager.register_process("pending", 123).unwrap();
+
+        let lease = manager.lease("pending", "0.1.0", 1).unwrap();
+        assert_eq!(lease.state, LifecycleState::Cancelling);
+        assert!(manager.is_cancel_requested("pending"));
     }
 
     #[test]

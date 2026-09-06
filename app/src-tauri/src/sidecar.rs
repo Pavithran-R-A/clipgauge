@@ -12,6 +12,7 @@ use crate::diagnostics::BoundedTail;
 use crate::process_manager;
 
 pub const MAX_DIAGNOSTIC_BYTES: usize = 64 * 1024;
+pub const MAX_STDIN_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineMode {
@@ -194,6 +195,11 @@ fn run_bounded_with_callback_and_stdin<F>(
 where
     F: FnOnce(u32),
 {
+    if input.is_some_and(|bytes| bytes.len() > MAX_STDIN_BYTES) {
+        return Err(RunError::Wait(format!(
+            "sidecar stdin exceeds {MAX_STDIN_BYTES}-byte safety limit"
+        )));
+    }
     process_manager::configure_process_group(&mut command);
     command.stdin(if input.is_some() {
         Stdio::piped()
@@ -206,15 +212,6 @@ where
         .spawn()
         .map_err(|error| RunError::Spawn(error.to_string()))?;
     on_spawn(child.id());
-    if let Some(input) = input {
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Err(error) = stdin.write_all(input) {
-                let _ = process_manager::terminate_owned(child.id());
-                let _ = child.wait();
-                return Err(RunError::Wait(error.to_string()));
-            }
-        }
-    }
     let started = Instant::now();
     let activity = Arc::new(AtomicU64::new(0));
     let stdout_reader = child
@@ -225,6 +222,11 @@ where
         .stderr
         .take()
         .map(|stream| collect_stream(stream, Arc::clone(&activity), started));
+    let stdin_writer = input.map(|input| {
+        let data = input.to_vec();
+        let stdin = child.stdin.take();
+        thread::spawn(move || stdin.map_or(Ok(()), |mut stream| stream.write_all(&data)))
+    });
 
     let status = loop {
         match child.try_wait() {
@@ -246,6 +248,7 @@ where
             let stderr_tail = stderr_reader
                 .and_then(|reader| reader.join().ok())
                 .unwrap_or_default();
+            let _ = stdin_writer.and_then(|writer| writer.join().ok());
             let _ = (stdout, stderr_tail);
             return Err(RunError::HardTimeout);
         }
@@ -259,6 +262,7 @@ where
             let stderr_tail = stderr_reader
                 .and_then(|reader| reader.join().ok())
                 .unwrap_or_default();
+            let _ = stdin_writer.and_then(|writer| writer.join().ok());
             let _ = (stdout, stderr_tail);
             return Err(RunError::IdleTimeout);
         }
@@ -271,6 +275,13 @@ where
     let stderr_tail = stderr_reader
         .and_then(|reader| reader.join().ok())
         .unwrap_or_default();
+    if let Some(writer) = stdin_writer {
+        let write_result = writer
+            .join()
+            .map_err(|_| RunError::Wait("sidecar stdin writer panicked".to_string()))?
+            .map_err(|error| RunError::Wait(error.to_string()));
+        write_result?;
+    }
     Ok(RunOutput {
         status,
         stdout,
@@ -310,7 +321,7 @@ mod tests {
 
     use super::{
         pipeline_args, run_bounded, InitializationCoordinator, PipelineMode, RunError, RunPolicy,
-        MAX_DIAGNOSTIC_BYTES,
+        MAX_DIAGNOSTIC_BYTES, MAX_STDIN_BYTES,
     };
 
     fn test_sleep_command() -> Command {
@@ -357,6 +368,13 @@ mod tests {
     fn noisy_sidecar_completes_without_pipe_deadlock() {
         let output = run_bounded(test_noisy_command(), RunPolicy::test()).unwrap();
         assert!(output.stderr_tail.len() <= MAX_DIAGNOSTIC_BYTES);
+    }
+
+    #[test]
+    fn oversized_stdin_is_rejected_before_spawn() {
+        let input = vec![b'x'; MAX_STDIN_BYTES + 1];
+        let result = super::run_bounded_with_stdin(test_sleep_command(), &input, RunPolicy::test());
+        assert!(matches!(result, Err(RunError::Wait(message)) if message.contains("safety limit")));
     }
 
     #[test]

@@ -1458,15 +1458,15 @@ fn stream_setup(
             return;
         }
     };
-    let cancelled_before_spawn = processes
-        .lock()
-        .map(|state| state.is_cancel_requested(&key))
-        .unwrap_or(true);
-    if let Ok(mut state) = processes.lock() {
-        let _ = state.adopt_job_id(&key, key.clone());
-        let _ = state.register_process(&key, child.id());
-    }
-    if cancelled_before_spawn {
+    let cancelled_during_registration = match processes.lock() {
+        Ok(mut state) => {
+            let _ = state.adopt_job_id(&key, key.clone());
+            let _ = state.register_process(&key, child.id());
+            state.is_cancel_requested(&key)
+        }
+        Err(_) => true,
+    };
+    if cancelled_during_registration {
         let _ = process_manager::terminate_owned(child.id());
     }
     let started = Instant::now();

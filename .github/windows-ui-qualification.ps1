@@ -286,7 +286,7 @@ $realFfmpeg = Get-ChildItem -Path (Join-Path $chocoRoot 'lib\ffmpeg') -Filter 'f
 $realFfmpegPath = if ($realFfmpeg) { $realFfmpeg.FullName } else { (Get-Command ffmpeg -ErrorAction Stop).Source }
 $env:PATH = "$(Split-Path -Parent $realFfmpegPath);$env:PATH"
 Write-Host "qualification system FFmpeg: $realFfmpegPath"
-Seed-HostileSessions
+if (-not $FreshOnly) { Seed-HostileSessions }
 $proc = Start-Process -FilePath $AppPath -PassThru
 $deadline = (Get-Date).AddSeconds(30)
 while ((Get-Date) -lt $deadline) {
