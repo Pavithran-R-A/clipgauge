@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -55,11 +56,12 @@ def main() -> int:
     if render_data.get("captions_burned") is not True:
         raise SystemExit(f"model E2E output did not burn captions: {render_data!r}")
 
+    digest = hashlib.sha256(args.output.read_bytes()).hexdigest()
     summary = {
         "terminal": terminal,
         "stages": sorted(observed),
         "output": str(args.output),
-        "sha256": subprocess.check_output(["sha256sum", str(args.output)], text=True).split()[0],
+        "sha256": digest,
         "probe": probe,
         "render": render_data,
     }
