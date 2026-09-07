@@ -2,6 +2,20 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.13] — 2026-09-07
+
+ClipGauge v0.5.13 makes zero-recommendation analysis explicit and preserves valid finalists through camera and render.
+
+### Fixed
+
+- Return `SUCCESS_NO_RECOMMENDATIONS` when scoring finds no finalists.
+- Emit sanitized zero-result diagnostics with rejection counts.
+- Require complete finalist-to-trajectory coverage before rendering.
+- Preserve static-center fallback provenance for faceless clips.
+- Keep non-English deterministic signals neutral where unsupported.
+- Invalidate stale checkpoints after source or recovery changes.
+- Show clean zero-recommendation results in Review and Sessions.
+
 ## [0.5.12] — 2026-09-07
 
 ClipGauge v0.5.12 repairs real-device GPU recovery and resumable ASR execution.
