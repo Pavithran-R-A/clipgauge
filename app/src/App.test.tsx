@@ -15,7 +15,8 @@ const mocks = vi.hoisted(() => ({
     preflight: vi.fn(),
     runJob: vi.fn(),
     resumeJob: vi.fn(),
-    cancelJob: vi.fn()
+    cancelJob: vi.fn(),
+    repairGpu: vi.fn()
   }
 }))
 
@@ -31,12 +32,17 @@ vi.mock('./components/Onboarding', () => ({ default: () => <div data-testid="onb
 vi.mock('./components/Loop', () => ({ default: () => <div data-testid="loop" /> }))
 vi.mock('./components/Review', () => ({ default: ({ results }: { results: { job_id: string } }) => <div data-testid="review">{results.job_id}</div> }))
 vi.mock('./components/Studio', () => ({
-  default: ({ error, notice, running, onRun, onCancel }: { error: string | null; notice: string | null; running: boolean; onRun: (...args: string[]) => void; onCancel: () => void }) => (
+  default: ({ error, notice, running, runState, stages, onRun, onCancel, onContinueCpu, onRepairGpu, onResume }: { error: string | null; notice: string | null; running: boolean; runState?: string; stages?: Record<string, { message: string }>; onRun: (...args: string[]) => void; onCancel: () => void; onContinueCpu?: () => void; onRepairGpu?: () => void; onResume?: (id: string) => void }) => (
     <>
       <div data-testid="studio-error">{error}</div>
       <div data-testid="studio-notice">{notice}</div>
+      <div data-testid="studio-state">{runState}</div>
+      <div data-testid="stage-asr">{stages?.asr?.message}</div>
       <button data-testid="create-job" disabled={running} onClick={() => onRun('C:\\Videos\\source.mp4', 'clipgauge-local', 'classic')}>create</button>
       <button data-testid="cancel-job" onClick={onCancel}>cancel</button>
+      <button data-testid="continue-cpu" onClick={onContinueCpu}>continue cpu</button>
+      <button data-testid="repair-gpu" onClick={onRepairGpu}>repair gpu</button>
+      <button data-testid="resume-job" onClick={() => onResume?.('job-a')}>resume</button>
     </>
   )
 }))
@@ -67,6 +73,8 @@ beforeEach(() => {
   mocks.api.setupInventory.mockResolvedValue({})
   mocks.api.preflight.mockResolvedValue({ state: 'blocked', checks: [{ state: 'blocked', message: 'setup required' }] })
   mocks.api.cancelJob.mockResolvedValue(undefined)
+  mocks.api.resumeJob.mockResolvedValue(undefined)
+  mocks.api.repairGpu.mockResolvedValue(undefined)
   vi.clearAllMocks()
 })
 
@@ -116,7 +124,7 @@ describe('structured pipeline terminal events', () => {
         diagnostic_id: 'diag-test-123'
       }
     })
-    expect(await screen.findByTestId('studio-error')).toHaveTextContent('yt-dlp could not process this video.')
+    await waitFor(() => expect(screen.getByTestId('studio-error')).toHaveTextContent('yt-dlp could not process this video.'))
     expect(screen.getByTestId('studio-error')).not.toHaveTextContent('YTDLP_METADATA_FAILED')
     expect(screen.getByTestId('studio-error')).toHaveTextContent('diag-test-123')
   })
@@ -127,6 +135,13 @@ describe('structured pipeline terminal events', () => {
     mocks.pipelineHandler?.({ payload: { event: 'job', job_id: '20260818-155237-c6b118' } })
     fireEvent.click(await screen.findByTestId('cancel-job'))
     await waitFor(() => expect(mocks.api.cancelJob).toHaveBeenCalledWith('20260818-155237-c6b118'))
+  })
+
+  it('runs GPU repair from the recovery surface', async () => {
+    render(<App />)
+    await userEvent.click(await screen.findByTestId('repair-gpu'))
+    await waitFor(() => expect(mocks.api.repairGpu).toHaveBeenCalledTimes(1))
+    expect(screen.getByTestId('studio-notice')).toHaveTextContent('GPU speech acceleration repair completed')
   })
 
   it('renders cancellation as resumable status rather than an error', async () => {
@@ -162,5 +177,32 @@ describe('structured pipeline terminal events', () => {
     })
     await waitFor(() => expect(screen.getByTestId('studio-error')).toHaveTextContent('stopped before reporting'))
     expect(screen.getByTestId('studio-error')).not.toHaveTextContent('/home/ubuntu')
+  })
+
+  it('routes CPU recovery to a fresh attempt and ignores late events', async () => {
+    render(<App />)
+    await waitFor(() => expect(mocks.pipelineHandler).toBeDefined())
+    mocks.pipelineHandler?.({ payload: { event: 'job', job_id: 'job-a', attempt_id: 'attempt-a' } })
+    mocks.pipelineHandler?.({ payload: { event: 'terminal', job_id: 'job-a', attempt_id: 'attempt-a', ok: false, code: 'ASR_GPU_FALLBACK_REQUIRES_APPROVAL', message: 'GPU failed' } })
+
+    await userEvent.click(await screen.findByTestId('continue-cpu'))
+    await waitFor(() => expect(mocks.api.resumeJob).toHaveBeenCalledWith('job-a', undefined, undefined, undefined, undefined, undefined, undefined, undefined, true))
+
+    mocks.pipelineHandler?.({ payload: { event: 'job', job_id: 'job-a', attempt_id: 'attempt-b' } })
+    mocks.pipelineHandler?.({ payload: { event: 'progress', job_id: 'job-a', attempt_id: 'attempt-b', stage: 'asr', message: 'CPU recovery running' } })
+    await waitFor(() => expect(screen.getByTestId('stage-asr')).toHaveTextContent('CPU recovery running'))
+
+    mocks.pipelineHandler?.({ payload: { event: 'progress', job_id: 'job-a', attempt_id: 'attempt-a', stage: 'asr', message: 'late GPU attempt' } })
+    expect(screen.getByTestId('stage-asr')).not.toHaveTextContent('late GPU attempt')
+    mocks.pipelineHandler?.({ payload: { event: 'terminal', job_id: 'job-a', attempt_id: 'attempt-b', ok: true } })
+    expect(await screen.findByTestId('review')).toHaveTextContent('20260818-155237-c6b118')
+  })
+
+  it('surfaces rejected resume actions instead of silently staying busy', async () => {
+    mocks.api.resumeJob.mockRejectedValueOnce(new Error('resume rejected'))
+    render(<App />)
+    await userEvent.click(await screen.findByTestId('resume-job'))
+    expect(await screen.findByTestId('studio-error')).toHaveTextContent('resume rejected')
+    expect(screen.getByTestId('studio-state')).toHaveTextContent('FAILED')
   })
 })

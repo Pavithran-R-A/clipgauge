@@ -210,8 +210,6 @@ def cuda_runtime_ready() -> bool:
     if asset is None:
         return True
     try:
-        if not CUDA_RUNTIME_ARCHIVE.is_file() or runtime.sha256_file(CUDA_RUNTIME_ARCHIVE).lower() != asset.sha256.lower():
-            return False
         return all(
             (CUDA_RUNTIME_DIR / filename).is_file()
             and runtime.sha256_file(CUDA_RUNTIME_DIR / filename).lower() == digest
@@ -247,8 +245,6 @@ def cudnn_runtime_ready() -> bool:
     if asset is None:
         return True
     try:
-        if not CUDNN_RUNTIME_ARCHIVE.is_file() or runtime.sha256_file(CUDNN_RUNTIME_ARCHIVE).lower() != asset.sha256.lower():
-            return False
         return all(
             (CUDA_RUNTIME_DIR / filename).is_file()
             and runtime.sha256_file(CUDA_RUNTIME_DIR / filename).lower() == digest
@@ -258,14 +254,19 @@ def cudnn_runtime_ready() -> bool:
         return False
 
 
-def _ensure_cuda_runtime() -> bool:
+def _ensure_cuda_runtime(manager: downloads.DownloadManager | None = None) -> bool:
     """Extract only the three approved CUDA DLLs after archive verification."""
     if cuda_runtime_ready():
         return True
     asset = cuda_runtime_asset()
-    if asset is None or not CUDA_RUNTIME_ARCHIVE.is_file():
+    if asset is None:
         return False
     try:
+        archive_valid = CUDA_RUNTIME_ARCHIVE.is_file() and runtime.sha256_file(CUDA_RUNTIME_ARCHIVE).lower() == asset.sha256.lower()
+        if not archive_valid and manager is not None:
+            manager.download(asset)
+        if not CUDA_RUNTIME_ARCHIVE.is_file() or runtime.sha256_file(CUDA_RUNTIME_ARCHIVE).lower() != asset.sha256.lower():
+            return False
         if runtime.sha256_file(CUDA_RUNTIME_ARCHIVE).lower() != asset.sha256.lower():
             return False
         runtime.extract_zip_verified(
@@ -278,14 +279,19 @@ def _ensure_cuda_runtime() -> bool:
     return cuda_runtime_ready()
 
 
-def _ensure_cudnn_runtime() -> bool:
+def _ensure_cudnn_runtime(manager: downloads.DownloadManager | None = None) -> bool:
     """Extract only NVIDIA cuDNN DLLs after archive verification."""
     if cudnn_runtime_ready():
         return True
     asset = cudnn_runtime_asset()
-    if asset is None or not CUDNN_RUNTIME_ARCHIVE.is_file():
+    if asset is None:
         return False
     try:
+        archive_valid = CUDNN_RUNTIME_ARCHIVE.is_file() and runtime.sha256_file(CUDNN_RUNTIME_ARCHIVE).lower() == asset.sha256.lower()
+        if not archive_valid and manager is not None:
+            manager.download(asset)
+        if not CUDNN_RUNTIME_ARCHIVE.is_file() or runtime.sha256_file(CUDNN_RUNTIME_ARCHIVE).lower() != asset.sha256.lower():
+            return False
         if runtime.sha256_file(CUDNN_RUNTIME_ARCHIVE).lower() != asset.sha256.lower():
             return False
         runtime.extract_zip_selected_verified(
@@ -514,9 +520,9 @@ def prepare_assets(manager: downloads.DownloadManager, *, require_consent: bool,
     punkt_archive = config.data_dir() / "nltk" / "punkt_tab.zip"
     _safe_extract_punkt(punkt_archive)
     _ensure_silero_hub_cache()
-    if cuda_runtime_asset() is not None and not _ensure_cuda_runtime():
+    if cuda_runtime_asset() is not None and not _ensure_cuda_runtime(manager):
         raise runtime.RuntimeIntegrityError("CUDA speech runtime failed extraction or verification")
-    if cudnn_runtime_asset() is not None and not _ensure_cudnn_runtime():
+    if cudnn_runtime_asset() is not None and not _ensure_cudnn_runtime(manager):
         raise runtime.RuntimeIntegrityError("cuDNN speech runtime failed extraction or verification")
     return paths
 

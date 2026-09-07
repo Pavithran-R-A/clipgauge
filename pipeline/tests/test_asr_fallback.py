@@ -115,3 +115,104 @@ def test_tamil_asr_uses_local_fallback_and_never_loads_english_alignment(monkeyp
     assert result["alignment_asset_id"] is None
     assert result["word_count"] == 2
     assert any("deterministic" in message for message in events)
+
+
+def test_gpu_transcription_uses_cpu_alignment_when_pytorch_cuda_is_unavailable(monkeypatch, tmp_path):
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"audio")
+    events = []
+
+    class Torch:
+        class backends:
+            class mps:
+                @staticmethod
+                def is_available():
+                    return False
+
+    class Model:
+        def transcribe(self, _audio, batch_size):
+            assert batch_size == 8
+            return {"language": "en", "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}]}
+
+    class WhisperX:
+        @staticmethod
+        def load_model(*args, **_kwargs):
+            assert args[1] == "cuda"
+            return Model()
+
+        @staticmethod
+        def load_audio(_path):
+            return [0.0] * 16_000
+
+        @staticmethod
+        def load_align_model(*_args, **kwargs):
+            assert kwargs["device"] == "cpu"
+            return object(), object()
+
+        @staticmethod
+        def align(segments, *_args, **_kwargs):
+            return {"segments": [{**segments[0], "words": [{"word": "hello", "start": 0.0, "end": 1.0, "score": 1.0}]}]}
+
+    class Context:
+        prior = {"ingest": {"audio_path": str(audio_path), "probe": {"duration_sec": 1.0}}}
+        settings = SimpleNamespace(allow_cpu_asr_fallback=False)
+
+        def emit(self, _fraction, message):
+            events.append(message)
+
+    monkeypatch.setitem(sys.modules, "torch", Torch)
+    monkeypatch.setitem(sys.modules, "whisperx", WhisperX)
+    monkeypatch.setattr(asr_stage.managed, "ready", lambda _manager: True)
+    monkeypatch.setattr(asr_stage.managed, "asr_model_path", lambda: tmp_path / "model")
+    monkeypatch.setattr(asr_stage.managed, "alignment_model_dir", lambda: tmp_path / "alignment")
+    monkeypatch.setattr(asr_stage.managed, "activate_cuda_runtime", lambda: None)
+    monkeypatch.setattr(asr_stage.hardware, "snapshot", lambda _root: {"cuda_ctranslate2": {"verified": True}})
+    monkeypatch.setattr(asr_stage.hardware, "select_asr_devices", lambda _capabilities: {"transcription_device": "cuda", "transcription_compute_type": "float16", "alignment_device": "cpu"})
+    monkeypatch.setattr(asr_stage.hardware, "asr_readiness", lambda _capabilities: {"state": "GPU ACCELERATED", "device": "cuda", "compute_type": "float16", "reason": "probe"})
+
+    result = asr_stage.AsrStage().run(Context())
+
+    assert result["transcription_device"] == "cuda"
+    assert result["alignment_device"] == "cpu"
+    assert result["acceleration_state"] == asr_stage.GPU_TRANSCRIPTION_CPU_ALIGNMENT_STATE
+    assert result["acceleration_reason"] == "GPU transcription completed; word alignment is using CPU."
+    assert any("GPU transcription" in message for message in events) or result["acceleration_reason"]
+
+
+def test_transcription_checkpoint_reuse_skips_model_loading(monkeypatch, tmp_path):
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"audio")
+    cached = {
+        "identity": asr_stage._transcription_identity(audio_path),
+        "result": {"language": "en", "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}]},
+        "transcription_device": "cuda",
+        "transcription_compute_type": "float16",
+    }
+
+    class Context:
+        job = object()
+        prior = {"ingest": {"audio_path": str(audio_path), "probe": {"duration_sec": 1.0}}}
+        settings = SimpleNamespace(allow_cpu_asr_fallback=False)
+
+        def emit(self, _fraction, _message):
+            pass
+
+    monkeypatch.setattr(asr_stage.queue, "read_checkpoint", lambda *_args: cached)
+    monkeypatch.setattr(asr_stage.managed, "ready", lambda _manager: True)
+    monkeypatch.setattr(asr_stage.managed, "alignment_model_dir", lambda: tmp_path / "alignment")
+    monkeypatch.setattr(asr_stage.managed, "activate_cuda_runtime", lambda: None)
+    monkeypatch.setattr(asr_stage.hardware, "snapshot", lambda _root: {"cuda_ctranslate2": {"verified": True}})
+    monkeypatch.setattr(asr_stage.hardware, "select_asr_devices", lambda _capabilities: {"transcription_device": "cuda", "transcription_compute_type": "float16", "alignment_device": "cpu"})
+    monkeypatch.setattr(asr_stage.hardware, "asr_readiness", lambda _capabilities: {"state": "GPU ACCELERATED", "device": "cuda", "compute_type": "float16", "reason": "probe"})
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: False))))
+    monkeypatch.setitem(sys.modules, "whisperx", SimpleNamespace(
+        load_audio=lambda _path: [0.0] * 16_000,
+        load_model=lambda *_args, **_kwargs: pytest.fail("cached transcription must skip model loading"),
+        load_align_model=lambda **_kwargs: (object(), object()),
+        align=lambda segments, *_args, **_kwargs: {"segments": [{**segments[0], "words": [{"word": "hello", "start": 0.0, "end": 1.0}]}]},
+    ))
+
+    result = asr_stage.AsrStage().run(Context())
+
+    assert result["word_count"] == 1
+    assert result["benchmark"]["transcribe_sec"] == 0.0

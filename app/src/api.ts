@@ -26,6 +26,7 @@ export const api = {
     invoke<void>('resume_job', {
       request: { job_id: jobId, llm: provider ? legacyMode(provider) : undefined, provider, model, endpoint, auth, secret_header: secretHeader, captions, camera, allow_cpu_asr_fallback: allowCpuAsrFallback },
     }),
+  repairGpu: () => invoke<Record<string, unknown>>('setup_tool', { args: ['gpu-repair'] }),
   testConnection: (provider: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
     invoke<ProviderTestResult>('test_connection', { llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader }),
   saveProviderKey: (profileId: string, key: string) => invoke<boolean>('save_provider_key', { profileId, key }),
@@ -41,6 +42,7 @@ export const api = {
   saveLocalModel: (modelId: string) => invoke<void>('save_local_model', { modelId }),
   checkOllama: () => invoke<{ state: 'service-stopped' | 'model-missing' | 'service-healthy'; running: boolean; models: string[]; message?: string }>('check_ollama'),
   setupInventory: (modelId?: string) => invoke<LocalSetupInventory>('setup_tool', { args: ['inventory', ...(modelId ? ['--model', modelId] : []) ] }),
+  gpuDiagnostics: () => invoke<import('./types').GpuDiagnostics>('setup_tool', { args: ['gpu-status'] }),
   storagePreview: (target: string, jobId?: string) => invoke<StorageCleanupPreview>('setup_tool', { args: ['storage-preview', target, ...(jobId ? [jobId] : [])] }),
   storageCleanup: (target: string, jobId?: string) => invoke<StorageCleanupResult>('setup_tool', { args: ['storage-cleanup', target, ...(jobId ? [jobId] : []), '--confirm'] }),
   youtubeReadiness: () => invoke<import('./types').YouTubeReadiness>('setup_tool', { args: ['youtube-status'] }),

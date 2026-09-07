@@ -57,3 +57,25 @@ def test_asr_readiness_distinguishes_acceleration_and_fallback():
     assert accelerated["device"] == "cuda"
     assert degraded["state"] == "GPU PRESENT — RUNTIME DEGRADED"
     assert failed["state"] == "CPU FALLBACK"
+
+
+def test_transcription_and_alignment_devices_are_selected_independently():
+    devices = hardware.select_asr_devices(
+        {
+            "cuda_ctranslate2": {
+                "verified": True,
+                "device_count": 1,
+                "compute_types": ["int8_float16"],
+            },
+            "pytorch_cuda": {
+                "verified": False,
+                "reason": "Torch not compiled with CUDA enabled",
+            },
+        }
+    )
+
+    assert devices == {
+        "transcription_device": "cuda",
+        "transcription_compute_type": "int8_float16",
+        "alignment_device": "cpu",
+    }

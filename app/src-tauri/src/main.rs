@@ -312,7 +312,7 @@ fn pipeline_environment_ready() -> bool {
     } else {
         pipeline_environment_dir().join("bin").join("python")
     };
-    python.is_file()
+    python.is_file() && home_dir().join("runtime-environment.json").is_file()
 }
 
 fn pipeline_invocation_for(mode: sidecar::PipelineMode) -> (String, Vec<String>) {
@@ -356,13 +356,29 @@ where
     let output =
         sidecar::run_bounded_with_callback(command, sidecar::RunPolicy::initialization(), on_spawn)
             .map_err(|error| format!("pipeline initialization failed: {error:?}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
+    if !output.status.success() {
         Err(format!(
             "pipeline initialization exited unsuccessfully: {}",
             diagnostics::redact(&output.stderr_tail)
         ))
+    } else {
+        let (program, mut args) = pipeline_invocation_for(sidecar::PipelineMode::ManagedOperation);
+        args.push("environment-initialize".to_string());
+        let mut identity_command = quiet_command(&program);
+        secrets::apply_operation_env(&mut identity_command);
+        identity_command
+            .env("CLIPGAUGE_HOME", home_dir())
+            .args(args);
+        let identity = sidecar::run_bounded(identity_command, sidecar::RunPolicy::status())
+            .map_err(|error| format!("pipeline identity recording failed: {error:?}"))?;
+        if identity.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "pipeline identity recording failed: {}",
+                diagnostics::redact(&identity.stderr_tail)
+            ))
+        }
     }
 }
 
@@ -749,9 +765,42 @@ fn run_job(
     let cookies_from_browser = validate_browser_session(cookies_from_browser.as_deref())?;
     let (program, base_args) = pipeline_invocation();
     let processes = state.processes.clone();
+    let initialization = state.initialization.clone();
     let key = format!("run:{}", diagnostics::diagnostic_id());
     reserve_process(&processes, key.clone())?;
     std::thread::spawn(move || {
+        let init_processes = processes.clone();
+        let init_key = key.clone();
+        if let Err(error) = initialization.ensure_initialized(|| {
+            initialize_pipeline_with_registration(|process_id| {
+                if let Ok(mut lifecycle) = init_processes.lock() {
+                    let _ = lifecycle.adopt_job_id(&init_key, init_key.clone());
+                    let _ = lifecycle.register_process(&init_key, process_id);
+                    if lifecycle.is_cancel_requested(&init_key) {
+                        let _ = process_manager::terminate_owned(process_id);
+                    }
+                }
+            })
+        }) {
+            if let Ok(mut lifecycle) = processes.lock() {
+                let _ = lifecycle.finish(&key, false);
+            }
+            write_lifecycle_snapshot(&processes, &key);
+            emit_terminal(
+                &app,
+                json!({
+                    "event": "terminal",
+                    "protocol_version": 2,
+                    "ok": false,
+                    "stage": "pipeline",
+                    "code": "PIPELINE_INITIALIZATION_FAILED",
+                    "message": diagnostics::redact(&error),
+                    "retryable": true,
+                    "diagnostic_id": diagnostics::diagnostic_id(),
+                }),
+            );
+            return;
+        }
         let mut args = base_args.clone();
         args.push("--jsonl".to_string());
         args.push("run".to_string());

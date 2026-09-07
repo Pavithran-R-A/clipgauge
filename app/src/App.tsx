@@ -19,6 +19,7 @@ import { resolveSelectedLocalModel } from './setupState'
 import './styles.css'
 
 type View = 'boot' | 'onboarding' | 'shell' | 'review' | 'loop'
+type AttemptExpectation = { jobId: string | null; attemptId: string | null; previousAttemptId: string | null; awaitingJob: boolean }
 
 const FRIENDLY_FAILURES: Record<string, string> = {
   SPEAKER_MODEL_DOWNLOAD_FAILED: 'Speaker analysis couldn’t start because its model could not be downloaded. Open Setup & Storage and retry the component.',
@@ -50,10 +51,21 @@ export default function App() {
   const [runNotice, setRunNotice] = useState<string | null>(null)
   const [selectedProvider, setSelectedProvider] = useState('clipgauge-local')
   const [selectedLocalModelId, setSelectedLocalModelId] = useState<string | null>(null)
+  const [gpuRepairing, setGpuRepairing] = useState(false)
   const unlistenRef = useRef<(() => void) | null>(null)
   const activeJobRef = useRef<string | null>(null)
   const activeAttemptRef = useRef<string | null>(null)
+  const attemptExpectationRef = useRef<AttemptExpectation | null>(null)
   activeJobRef.current = activeJob
+
+  const prepareAttempt = useCallback((jobId: string | null) => {
+    const previousAttemptId = activeAttemptRef.current
+    attemptExpectationRef.current = { jobId, attemptId: null, previousAttemptId, awaitingJob: true }
+    activeJobRef.current = jobId
+    activeAttemptRef.current = null
+    setActiveJob(jobId)
+    setResults(null)
+  }, [])
 
   const refreshJobs = useCallback(() => { api.listJobs().then(setJobs).catch(() => setJobs([])) }, [])
 
@@ -88,10 +100,26 @@ export default function App() {
   useEffect(() => {
     let disposed = false
     listen<PipelineEvent>('pipeline-event', ({ payload }) => {
-      // Sidecar events can arrive late after a resumed or retried job.
-      // Once a job is active, unrelated events must not mutate its UI.
-      if (payload.job_id && activeJobRef.current && payload.job_id !== activeJobRef.current) return
-      if (payload.attempt_id && activeAttemptRef.current && payload.attempt_id !== activeAttemptRef.current) return
+      const expected = attemptExpectationRef.current
+      if (expected) {
+        if (payload.event === 'job' && payload.job_id) {
+          if (expected.jobId && payload.job_id !== expected.jobId) return
+          if (expected.previousAttemptId && payload.attempt_id === expected.previousAttemptId) return
+          if (expected.attemptId && payload.attempt_id !== expected.attemptId) return
+          if (expected.awaitingJob) {
+            attemptExpectationRef.current = { jobId: payload.job_id, attemptId: payload.attempt_id ?? null, previousAttemptId: expected.previousAttemptId, awaitingJob: false }
+          }
+        } else if (expected.awaitingJob && !(expected.jobId === null && payload.event === 'terminal')) {
+          return
+        } else if (payload.job_id && payload.job_id !== expected.jobId) {
+          return
+        } else if (payload.attempt_id && payload.attempt_id !== expected.attemptId) {
+          return
+        }
+      } else {
+        if (payload.job_id && activeJobRef.current && payload.job_id !== activeJobRef.current) return
+        if (payload.attempt_id && activeAttemptRef.current && payload.attempt_id !== activeAttemptRef.current) return
+      }
       if (payload.event === 'job' && payload.job_id) {
         activeJobRef.current = payload.job_id
         activeAttemptRef.current = payload.attempt_id ?? null
@@ -149,9 +177,7 @@ export default function App() {
     setRunNotice(null)
     setStages({})
     setResults(null)
-    setActiveJob(null)
-    activeJobRef.current = null
-    activeAttemptRef.current = null
+    prepareAttempt(null)
     try {
       const resolvedModel = model ?? (provider === 'clipgauge-local' ? resolveSelectedLocalModel(await api.setupInventory()) : undefined)
       const preflight = await api.preflight(provider, resolvedModel, endpoint, auth, secretHeader, sourceKind(source) === 'youtube' ? source : undefined)
@@ -176,7 +202,7 @@ export default function App() {
       setRunError(String(error))
       setRunErrorCode(null)
     }
-  }, [])
+  }, [prepareAttempt])
 
   const openJob = useCallback(async (jobId: string) => {
     const result = await api.jobResults(jobId)
@@ -185,21 +211,62 @@ export default function App() {
     if (result.render?.outputs?.length) setView('review')
   }, [])
 
-  const continueCpu = useCallback(() => {
-    if (!activeJob) return
+  const resumeJobAction = useCallback(async (jobId: string, provider?: string, captions?: string, camera?: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, allowCpuAsrFallback = false, notice = 'Starting recovery…') => {
+    prepareAttempt(jobId)
     setRunning(true)
     setRunState('RUNNING')
+    setRunStartedAt(Date.now())
+    setCancelling(false)
     setRunError(null)
     setRunErrorCode(null)
-    setRunNotice(null)
+    setRunNotice(notice)
     setStages({})
-    void api.resumeJob(activeJob, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)
-  }, [activeJob])
+    try {
+      await api.resumeJob(jobId, provider, captions, camera, model, endpoint, auth, secretHeader, allowCpuAsrFallback)
+    } catch (error) {
+      setRunning(false)
+      setRunState('FAILED')
+      setRunNotice(null)
+      setRunError(String(error))
+      attemptExpectationRef.current = { jobId, attemptId: activeAttemptRef.current, previousAttemptId: activeAttemptRef.current, awaitingJob: false }
+    }
+  }, [prepareAttempt])
+
+  const continueCpu = useCallback(() => {
+    const jobId = activeJobRef.current ?? activeJob
+    if (!jobId) return
+    void resumeJobAction(jobId, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true, 'Starting CPU recovery…')
+  }, [activeJob, resumeJobAction])
+
+  const repairGpu = useCallback(async () => {
+    setGpuRepairing(true)
+    setRunError(null)
+    try {
+      await api.repairGpu()
+      setRunNotice('GPU speech acceleration repair completed. Retry the job.')
+    } catch (error) {
+      setRunError(`GPU repair could not start: ${String(error)}`)
+    } finally {
+      setGpuRepairing(false)
+    }
+  }, [])
+
+  const resumeFromSessions = useCallback((jobId: string) => {
+    setSection('create')
+    void resumeJobAction(jobId)
+  }, [resumeJobAction])
+
+  const resumeFromReview = useCallback((jobId: string, captions?: string, camera?: string) => {
+    setSection('create')
+    setView('shell')
+    void resumeJobAction(jobId, undefined, captions, camera, undefined, undefined, undefined, undefined, false, 'Starting restyle…')
+  }, [resumeJobAction])
+
 
   if (view === 'boot') return <div className="boot" />
-  if (view === 'onboarding') return <Onboarding onDone={() => { void api.markOnboarded(); setSetup((current) => current ? { ...current, onboarded: true } : current); setView('shell') }} />
+  if (view === 'onboarding') return <Onboarding onDone={() => { void Promise.resolve(api.markOnboarded()).catch((error) => setRunError(String(error))); setSetup((current) => current ? { ...current, onboarded: true } : current); setView('shell') }} />
   if (view === 'loop') return <Loop onBack={() => { setSection('integrations'); setView('shell') }} />
-  if (view === 'review' && results) return <Review results={results} onBack={() => { setSection('create'); setView('shell'); refreshJobs() }} onRestyle={(captions, camera) => { setRunning(true); setRunState('RUNNING'); setRunStartedAt(Date.now()); setCancelling(false); setRunError(null); setRunNotice(null); setStages({}); setActiveJob(results.job_id); setSection('create'); setView('shell'); void api.resumeJob(results.job_id, undefined, captions, camera) }} />
+  if (view === 'review' && results) return <Review results={results} onBack={() => { setSection('create'); setView('shell'); refreshJobs() }} onRestyle={(captions, camera) => resumeFromReview(results.job_id, captions, camera)} />
 
   function navigate(next: AppSection) {
     setRunError(null)
@@ -209,8 +276,8 @@ export default function App() {
   }
 
   let content
-  if (section === 'create') content = <Studio jobs={jobs} running={running} runState={runState} cancelling={cancelling} startedAt={runStartedAt} stages={stages} error={runError} errorCode={runErrorCode} notice={runNotice} onRun={startRun} localModelId={selectedLocalModelId ?? undefined} onContinueCpu={continueCpu} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { setCancelling(false); setRunError(String(error)) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onOpenJob={openJob} onResume={(id) => { setRunning(true); setRunState('RUNNING'); setCancelling(false); setRunError(null); setRunErrorCode(null); setRunNotice(null); setStages({}); setActiveJob(id); void api.resumeJob(id) }} />
-  else if (section === 'sessions') content = <Sessions jobs={jobs} onBack={() => setSection('create')} onOpenJob={openJob} onResume={(id) => { setSection('create'); setRunning(true); setRunState('RUNNING'); setActiveJob(id); void api.resumeJob(id) }} />
+  if (section === 'create') content = <Studio jobs={jobs} running={running} runState={runState} cancelling={cancelling} startedAt={runStartedAt} stages={stages} error={runError} errorCode={runErrorCode} notice={runNotice} onRun={startRun} localModelId={selectedLocalModelId ?? undefined} onContinueCpu={continueCpu} onRepairGpu={repairGpu} gpuRepairing={gpuRepairing} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { setCancelling(false); setRunError(String(error)) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onOpenJob={openJob} onResume={(id) => { void resumeJobAction(id) }} />
+  else if (section === 'sessions') content = <Sessions jobs={jobs} onBack={() => setSection('create')} onOpenJob={openJob} onResume={resumeFromSessions} />
   else if (section === 'setup') content = <SetupCenter onBack={() => setSection('create')} onUseLocal={(modelId) => { if (modelId) setSelectedLocalModelId(modelId); setSelectedProvider('clipgauge-local'); setSection('create') }} />
   else if (section === 'providers') content = <ProviderCenter selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onBack={() => setSection('create')} onOpenSetup={() => setSection('setup')} />
   else if (section === 'integrations') content = <Integrations onBack={() => setSection('create')} onOpenLoop={() => setView('loop')} />
@@ -218,5 +285,5 @@ export default function App() {
   else if (section === 'help') content = <SupportPage onBack={() => setSection('create')} onNavigate={(next) => setSection(next)} provider={selectedProvider} />
   else content = <About onBack={() => setSection('create')} />
 
-  return <AppShell active={section} onNavigate={navigate} jobs={jobs} running={running} onOpenJob={openJob} onResume={(id) => { setSection('create'); setRunning(true); setRunState('RUNNING'); setActiveJob(id); void api.resumeJob(id) }} onSupport={() => setSection('help')}>{content}</AppShell>
+  return <AppShell active={section} onNavigate={navigate} jobs={jobs} running={running} onOpenJob={openJob} onResume={resumeFromSessions} onSupport={() => setSection('help')}>{content}</AppShell>
 }

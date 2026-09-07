@@ -78,6 +78,30 @@ def test_managed_cudnn_catalog_is_pinned_and_minimal(monkeypatch):
     assert all(len(digest) == 64 for digest in managed.CUDNN_RUNTIME_FILES.values())
 
 
+def test_extracted_cuda_runtime_remains_ready_without_download_archive(monkeypatch, tmp_path):
+    import hashlib
+    from clipgauge_pipeline import downloads
+
+    dlls = {"cublas64_12.dll": b"cublas", "cublasLt64_12.dll": b"lt", "cudart64_12.dll": b"runtime"}
+    monkeypatch.setattr(managed.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(managed.platform, "machine", lambda: "AMD64")
+    runtime_dir = tmp_path / "cuda"
+    runtime_dir.mkdir()
+    for name, data in dlls.items():
+        (runtime_dir / name).write_bytes(data)
+    monkeypatch.setattr(managed, "CUDA_RUNTIME_DIR", runtime_dir)
+    monkeypatch.setattr(managed, "CUDA_RUNTIME_ARCHIVE", tmp_path / "missing.zip")
+    monkeypatch.setattr(managed, "CUDA_RUNTIME_FILES", {name: hashlib.sha256(data).hexdigest() for name, data in dlls.items()})
+    monkeypatch.setattr(managed, "cuda_runtime_asset", lambda: downloads.ManagedAsset(
+        asset_id="runtime:cuda:test", display_name="CUDA", purpose="test", destination="missing.zip",
+        url="https://example.invalid/cuda.zip", size_bytes=1, sha256="0" * 64,
+    ))
+
+    assert managed.cuda_runtime_ready() is True
+    (runtime_dir / "cudart64_12.dll").write_bytes(b"corrupt")
+    assert managed.cuda_runtime_ready() is False
+
+
 def test_local_model_requires_hash_verification_before_runtime_start(tmp_path, monkeypatch):
     expected = b"approved!"
     tampered = b"tampered!"

@@ -16,7 +16,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from . import __version__, config, downloads, local_runtime, protocol, readiness, runtime, setup_models, storage
+from . import __version__, config, downloads, environment, local_runtime, protocol, readiness, runtime, setup_models, storage
 from .jobs import queue
 from .render import ffmpeg_bin
 from .scoring import providers as providers_mod
@@ -327,6 +327,28 @@ def cmd_setup(args: argparse.Namespace) -> int:
             result = run_cuda_probe(Path(args.audio), Path(args.evidence), align=args.align)
             print(json.dumps(result))
             return 0 if result.get("status") == "PASS" else 1
+        if args.setup_cmd == "gpu-status":
+            from .models import managed
+
+            capabilities = __import__("clipgauge_pipeline.hardware", fromlist=["snapshot"]).snapshot(config.home_dir())
+            result = {
+                "environment": environment.status(config.home_dir()),
+                "hardware": capabilities,
+                "cuda_runtime_ready": managed.cuda_runtime_ready(),
+                "cudnn_runtime_ready": managed.cudnn_runtime_ready(),
+            }
+            print(json.dumps(result))
+            return 0
+        if args.setup_cmd == "gpu-repair":
+            from .models import managed
+
+            assets = [asset for asset in (managed.cuda_runtime_asset(), managed.cudnn_runtime_asset()) if asset is not None]
+            downloads_manager.grant_consent("core:asr", assets)
+            cuda_ok = managed._ensure_cuda_runtime(downloads_manager)
+            cudnn_ok = managed._ensure_cudnn_runtime(downloads_manager)
+            result = {"ok": cuda_ok and cudnn_ok, "cuda_runtime_ready": cuda_ok, "cudnn_runtime_ready": cudnn_ok}
+            print(json.dumps(result))
+            return 0 if result["ok"] else 1
         runtime_asset = _setup_runtime_asset(manager)
         model_assets = [_setup_model_asset(model) for model in local_runtime.MODEL_CATALOG.values()]
         if args.setup_cmd in {"youtube-status", "youtube-test"}:
@@ -544,6 +566,16 @@ def cmd_preflight(args: argparse.Namespace) -> int:
         }
     print(json.dumps(payload), flush=True)
     return 0 if payload["state"] != "blocked" else 2
+
+
+def cmd_environment_status(args: argparse.Namespace) -> int:
+    print(json.dumps(environment.status(config.home_dir()), sort_keys=True), flush=True)
+    return 0
+
+
+def cmd_environment_initialize(args: argparse.Namespace) -> int:
+    print(json.dumps(environment.write_identity(config.home_dir()), sort_keys=True), flush=True)
+    return 0
 
 
 def cmd_provider_test(args: argparse.Namespace) -> int:
@@ -886,6 +918,11 @@ def main(argv: list[str] | None = None) -> int:
     p_preflight.add_argument("--source", default=None, help=argparse.SUPPRESS)
     p_preflight.set_defaults(fn=cmd_preflight)
 
+    p_environment_status = sub.add_parser("environment-status", help="show managed runtime identity")
+    p_environment_status.set_defaults(fn=cmd_environment_status)
+    p_environment_initialize = sub.add_parser("environment-initialize", help="record the synced managed runtime identity")
+    p_environment_initialize.set_defaults(fn=cmd_environment_initialize)
+
     p_setup = sub.add_parser("setup", help="inspect or install managed local-AI assets")
     setup_sub = p_setup.add_subparsers(dest="setup_cmd", required=True)
     p_inventory = setup_sub.add_parser("inventory", help="show verified runtime/model inventory")
@@ -896,6 +933,8 @@ def main(argv: list[str] | None = None) -> int:
     p_cuda_probe.add_argument("--audio", required=True, help="local audio fixture")
     p_cuda_probe.add_argument("--evidence", required=True, help="sanitized evidence JSON output")
     p_cuda_probe.add_argument("--align", action="store_true", help="run CUDA word alignment")
+    setup_sub.add_parser("gpu-status", help="show independent speech accelerator diagnostics")
+    setup_sub.add_parser("gpu-repair", help="repair the managed speech accelerator runtime")
     setup_sub.add_parser("install-runtime", help="download and install the verified llama.cpp runtime")
     setup_sub.add_parser("install-ffmpeg", help="download, install, and capability-test the managed FFmpeg engine")
     p_install_group = setup_sub.add_parser("install-group", help="download one consented managed asset group")
