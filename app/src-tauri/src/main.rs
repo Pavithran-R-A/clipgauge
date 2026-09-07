@@ -1792,7 +1792,9 @@ fn setup_tool_blocking(
         .map_err(|error| diagnostics::redact(&error));
     }
     let mode = match args.first().map(String::as_str) {
-        Some("inventory" | "youtube-status" | "youtube-test") => sidecar::PipelineMode::ReadOnly,
+        Some("inventory" | "gpu-status" | "youtube-status" | "youtube-test") => {
+            sidecar::PipelineMode::ReadOnly
+        }
         _ => sidecar::PipelineMode::ManagedOperation,
     };
     if mode == sidecar::PipelineMode::ReadOnly && !pipeline_environment_ready() {
