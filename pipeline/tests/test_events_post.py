@@ -106,3 +106,21 @@ def test_events_device_selection_keeps_cpu_fallback(monkeypatch):
             return name
 
     assert str(events_stage.select_inference_device(FakeTorch)) == "cpu"
+
+
+def test_events_device_selection_forces_cpu_recovery(monkeypatch):
+    monkeypatch.setattr(events_stage.managed, "activate_cuda_runtime", lambda: None)
+
+    class FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+        @staticmethod
+        def device(name):
+            return name
+
+    assert str(events_stage.select_inference_device(FakeTorch, force_cpu=True)) == "cpu"

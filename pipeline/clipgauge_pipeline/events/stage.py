@@ -42,8 +42,10 @@ def _extract_wav(media: Path, dst: Path, sr: int) -> None:
         raise StageError(f"Audio extraction failed: {(proc.stderr or '')[-500:]}")
 
 
-def select_inference_device(torch_module):
+def select_inference_device(torch_module, *, force_cpu: bool = False):
     """Use CUDA only after managed runtime verification; otherwise use CPU."""
+    if force_cpu:
+        return torch_module.device("cpu")
     try:
         managed.activate_cuda_runtime()
     except Exception:
@@ -77,7 +79,10 @@ class EventsStage(Stage):
         from ..vendor.panns import models as panns_models
         from . import dsp, panns_channel, post
 
-        device = select_inference_device(torch)
+        device = select_inference_device(
+            torch,
+            force_cpu=bool(getattr(ctx.settings, "allow_cpu_asr_fallback", False)),
+        )
         bench: dict[str, float | str | int] = {"device": str(device)}
         events: list[dict] = []
 
