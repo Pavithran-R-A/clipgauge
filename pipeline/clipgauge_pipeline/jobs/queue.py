@@ -15,14 +15,16 @@ half-checkpoint that resume would trust.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
 from .. import config, protocol
 from . import artifacts
@@ -241,6 +243,7 @@ def write_checkpoint(job: Job, stage: str, schema_version: int, data: dict) -> N
         "stage": stage,
         "schema_version": schema_version,
         "created_at": time.time(),
+        "dependency_fingerprint": data.get("_checkpoint", {}).get("dependency_fingerprint"),
         "data": prepared,
         "artifacts": descriptors,
     }
@@ -258,7 +261,10 @@ def write_checkpoint(job: Job, stage: str, schema_version: int, data: dict) -> N
 
 
 def read_checkpoint_detailed(
-    job: Job, stage: str, schema_version: int
+    job: Job,
+    stage: str,
+    schema_version: int,
+    expected_dependency_fingerprint: str | None = None,
 ) -> tuple[dict | None, artifacts.ArtifactError | None]:
     """Read and validate one checkpoint, returning a structured recovery reason."""
     path = checkpoint_path(job, stage)
@@ -274,6 +280,13 @@ def read_checkpoint_detailed(
         data, _ = artifacts.validate(job.dir, envelope, stage, schema_version)
     except artifacts.ArtifactError as exc:
         return None, exc
+    if expected_dependency_fingerprint is not None:
+        stored_dependency = envelope.get("dependency_fingerprint")
+        if stored_dependency != expected_dependency_fingerprint:
+            return None, artifacts.ArtifactError(
+                "CHECKPOINT_DEPENDENCY_STALE",
+                "checkpoint dependencies no longer match the current job inputs",
+            )
     return data, None
 
 
@@ -375,6 +388,101 @@ class Stage:
     def timing_metadata(self, data: dict) -> dict[str, Any]:
         return _stage_timing_metadata(self, data)
 
+    def dependency_settings(self, ctx: StageContext) -> dict[str, Any]:
+        """Return settings that change this stage's semantic output."""
+        settings = ctx.settings.to_json()
+        if self.name == "asr":
+            return {"allow_cpu_asr_fallback": settings.get("allow_cpu_asr_fallback")}
+        if self.name == "score":
+            return {
+                key: settings.get(key)
+                for key in (
+                    "llm_mode",
+                    "provider_profile_id",
+                    "provider_model",
+                    "provider_endpoint_identity",
+                    "provider_capabilities",
+                )
+            }
+        if self.name == "camera":
+            return {"camera": settings.get("camera")}
+        if self.name == "render":
+            return {
+                key: settings.get(key)
+                for key in ("caption_preset", "lufs_target", "true_peak_db")
+            }
+        return {}
+
+
+def _fingerprint(payload: Any) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _sampled_source_hash(path: Path) -> str | None:
+    try:
+        stat = path.stat()
+        hasher = hashlib.sha256()
+        hasher.update(str(stat.st_size).encode())
+        with path.open("rb") as handle:
+            hasher.update(handle.read(1024 * 1024))
+            if stat.st_size > 1024 * 1024:
+                handle.seek(max(0, stat.st_size - 1024 * 1024))
+                hasher.update(handle.read(1024 * 1024))
+        return hasher.hexdigest()
+    except OSError:
+        return None
+
+
+def _dependency_fingerprint(stage: Stage, ctx: StageContext, prior: dict[str, dict]) -> str:
+    upstream = {
+        name: value.get("_checkpoint", {}).get("output_fingerprint")
+        for name, value in prior.items()
+        if isinstance(value, dict)
+    }
+    source_hash = None
+    ingest = prior.get("ingest")
+    if isinstance(ingest, dict):
+        source_hash = ingest.get("source_hash")
+    source_identity: dict[str, Any] = {
+        "type": ctx.job.source_type,
+        "source": ctx.job.source,
+    }
+    if ctx.job.source_type == "file":
+        source_path = Path(ctx.job.source)
+        try:
+            stat = source_path.stat()
+            source_identity.update(
+                {
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                    "sampled_hash": _sampled_source_hash(source_path)
+                    if stage.name == "ingest"
+                    else None,
+                }
+            )
+        except OSError:
+            source_identity["missing"] = True
+    return _fingerprint(
+        {
+            "stage": stage.name,
+            "schema_version": stage.schema_version,
+            "source_hash": source_hash,
+            "source_identity": source_identity,
+            "settings": stage.dependency_settings(ctx),
+            "upstream": upstream,
+        }
+    )
+
+
+def _with_checkpoint_metadata(data: dict, dependency_fingerprint: str) -> dict:
+    output = dict(data)
+    output["_checkpoint"] = {
+        "dependency_fingerprint": dependency_fingerprint,
+        "output_fingerprint": _fingerprint(data),
+    }
+    return output
+
 
 def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[str, dict]:
     """Run stages in order, skipping fresh checkpoints. Returns stage→data."""
@@ -383,7 +491,13 @@ def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[
     results: dict[str, dict] = {}
     set_job_status(job.id, "running")
     for stage in stages:
-        cached, issue = read_checkpoint_detailed(job, stage.name, stage.schema_version)
+        dependency_fingerprint = _dependency_fingerprint(stage, ctx, results)
+        cached, issue = read_checkpoint_detailed(
+            job,
+            stage.name,
+            stage.schema_version,
+            dependency_fingerprint,
+        )
         if issue is not None:
             progress(
                 stage.name,
@@ -404,6 +518,8 @@ def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[
                 },
             )
             progress(stage.name, 1.0, "cached")
+            if cached.get("outcome") == "SUCCESS_NO_RECOMMENDATIONS":
+                break
             continue
         started_at = time.time()
         started_mono = time.monotonic()
@@ -450,6 +566,14 @@ def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[
             )
             set_job_status(job.id, "failed", f"{stage.name}: {err!r}")
             raise StageExecutionError(stage.name, err) from err
+        if data.get("outcome") == "SUCCESS_NO_RECOMMENDATIONS":
+            diagnostic_id = protocol.write_json_diagnostic(
+                job.dir,
+                stage.name,
+                {"outcome": data.get("outcome"), "counts": data.get("counts", {})},
+            )
+            data = {**data, "diagnostic_id": diagnostic_id}
+        data = _with_checkpoint_metadata(data, dependency_fingerprint)
         try:
             write_checkpoint(job, stage.name, stage.schema_version, data)
         except artifacts.ArtifactError as err:
@@ -485,8 +609,13 @@ def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[
             },
         )
         progress(stage.name, 1.0, "done")
+        if data.get("outcome") == "SUCCESS_NO_RECOMMENDATIONS":
+            break
     set_job_status(job.id, "done", None)
-    return results
+    return {
+        name: {key: value for key, value in data.items() if key != "_checkpoint"}
+        for name, data in results.items()
+    }
 
 
 @dataclass

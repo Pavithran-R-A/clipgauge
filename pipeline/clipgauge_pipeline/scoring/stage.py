@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -20,8 +21,7 @@ from . import constants as constants_mod
 from . import frames as frames_mod
 from . import llm as llm_mod
 from . import providers as providers_mod
-from . import rubric
-from . import short_quality
+from . import rubric, short_quality
 
 SELECT_COUNT = 12
 LOCAL_T1_CANDIDATE_LIMIT = 20
@@ -30,6 +30,34 @@ LOCAL_T1_MIN_CALLS = 12
 LOCAL_STRONG_MINIMUM = 3
 LOCAL_T1_WALL_BUDGET_SECONDS = 180.0
 LOCAL_FINALIST_LIMIT = 6
+
+
+def recommendation_outcome(
+    *,
+    candidate_count: int,
+    eligible_candidate_count: int,
+    scored_count: int,
+    clips: list[dict],
+    rejection_reason_counts: dict[str, int] | None = None,
+    best_candidate: dict | None = None,
+) -> dict:
+    """Describe scoring completion without conflating empty recommendations with failure."""
+    has_clips = bool(clips)
+    return {
+        "outcome": "SUCCESS_WITH_CLIPS" if has_clips else "SUCCESS_NO_RECOMMENDATIONS",
+        "code": "OK" if has_clips else "NO_RECOMMENDED_CLIPS",
+        "counts": {
+            "candidate_count": max(0, int(candidate_count)),
+            "eligible_candidate_count": max(0, int(eligible_candidate_count)),
+            "scored_count": max(0, int(scored_count)),
+            "score_clip_count": len(clips),
+            "camera_trajectory_count": 0,
+            "render_attempt_count": 0,
+            "render_output_count": 0,
+            "rejection_reason_counts": dict(rejection_reason_counts or {}),
+        },
+        "best_candidate": best_candidate if not has_clips else None,
+    }
 
 
 def scoring_budget(*, local: bool, candidate_count: int) -> dict[str, int | float | bool]:
@@ -354,7 +382,7 @@ def select_diverse_finalists(entries: list[dict], limit: int = LOCAL_FINALIST_LI
 
 class ScoreStage(Stage):
     name = "score"
-    schema_version = 24  # v24: score compact payoff variants
+    schema_version = 25  # v25: typed recommendation outcomes and language-neutral signals
 
     def run(self, ctx: StageContext) -> dict:
         prior = ctx.prior or {}
@@ -857,7 +885,33 @@ class ScoreStage(Stage):
         for entry in finalists:
             entry.pop("transcript", None)  # bulky; review UI re-slices from diarize
 
+        rejection_reason_counts = Counter(
+            reason
+            for entry in rejected
+            for reason in entry.get("rejection_reasons", [])
+        )
+        rejection_reason_counts.update(
+            "STRONG_RECOMMENDATION_REQUIRED" for _ in borderline
+        )
+        best_candidate = None
+        if not finalists and scored:
+            best = scored[0]
+            best_candidate = {
+                "start": best["start"],
+                "end": best["end"],
+                "recommendation_score": best["recommendation_score"],
+            }
+        outcome = recommendation_outcome(
+            candidate_count=len(candidates),
+            eligible_candidate_count=len(eligible),
+            scored_count=len(scored),
+            clips=finalists,
+            rejection_reason_counts=rejection_reason_counts,
+            best_candidate=best_candidate,
+        )
+
         return {
+            **outcome,
             "llm_mode": llm_mode,
             "provider_profile_id": profile.id,
             "provider_kind": profile.kind,

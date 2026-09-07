@@ -109,6 +109,28 @@ export default function Review({ results, onBack, onRestyle }: Props) {
     )
   }
 
+  if (results.outcome === 'SUCCESS_NO_RECOMMENDATIONS' || outputs.length === 0) {
+    const counts = results.score?.counts
+    return (
+      <div className="review">
+        <header className="review-head">
+          <button className="btn-ghost" onClick={onBack}>← studio</button>
+          <div className="review-title-block">
+            <h1 className="review-title">Analysis complete</h1>
+            <p className="review-sub mono">No recommended clips</p>
+          </div>
+        </header>
+        <section className="empty-review card-surface" aria-live="polite" data-testid="no-recommendations">
+          <p className="section-eyebrow">No recommended clips</p>
+          <h2>We did not find a moment that met ClipGauge&apos;s quality bar.</h2>
+          <p>{counts?.scored_count ?? results.score?.scored_count ?? 0} moments were evaluated.</p>
+          {results.score?.best_candidate && <p>Best evaluated moment: {fmtTime(results.score.best_candidate.start)}–{fmtTime(results.score.best_candidate.end)} · score {Math.round(results.score.best_candidate.recommendation_score)}.</p>}
+          <button className="button button-primary" onClick={onBack}>Create another set</button>
+        </section>
+      </div>
+    )
+  }
+
   return (
     <div className="review">
       <header className="review-head">

@@ -1288,13 +1288,25 @@ fn list_job_dirs_blocking() -> Result<Vec<Value>, String> {
             let dir = entry.path();
             let has_render = dir.join("render.json").exists();
             let has_ingest = dir.join("ingest.json").exists();
+            let outcome = fs::read_to_string(dir.join("score.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|value| value["data"]["outcome"].as_str().map(String::from));
             let lifecycle = fs::read_to_string(dir.join("lifecycle.json"))
                 .ok()
                 .and_then(|text| serde_json::from_str::<Value>(&text).ok());
             let lifecycle_state = lifecycle
                 .as_ref()
                 .and_then(|value| value["state"].as_str())
-                .unwrap_or(if has_render { "COMPLETED" } else { "RESUMABLE" });
+                .unwrap_or(
+                    if outcome.as_deref() == Some("SUCCESS_NO_RECOMMENDATIONS") {
+                        "COMPLETED_NO_RECOMMENDATIONS"
+                    } else if has_render {
+                        "COMPLETED"
+                    } else {
+                        "RESUMABLE"
+                    },
+                );
             let last_stage = lifecycle.as_ref().and_then(|value| value["stage"].as_str());
             let resume_safe = !has_render
                 && matches!(
@@ -1308,6 +1320,7 @@ fn list_job_dirs_blocking() -> Result<Vec<Value>, String> {
             out.push(json!({
                 "id": id, "title": title,
                 "ingested": has_ingest, "rendered": has_render,
+                "outcome": outcome,
                 "lifecycle_state": lifecycle_state,
                 "last_stage": last_stage,
                 "resume_safe": resume_safe,

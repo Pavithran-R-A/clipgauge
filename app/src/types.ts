@@ -19,7 +19,7 @@ export interface PipelineEvent {
   job_id?: string
   attempt_id?: string
   ok?: boolean
-  code?: string
+  code?: 'OK' | 'NO_RECOMMENDED_CLIPS' | 'CAMERA_TRAJECTORY_MISSING' | 'CANCELLED' | string
   error?: string
   retryable?: boolean
   diagnostic_id?: string
@@ -62,6 +62,19 @@ export interface MusicBrief {
 }
 
 export type CapabilityValue = boolean | null
+
+export type PipelineOutcome = 'SUCCESS_WITH_CLIPS' | 'SUCCESS_NO_RECOMMENDATIONS' | 'FAILED'
+
+export interface RecommendationCounts {
+  candidate_count?: number
+  eligible_candidate_count?: number
+  scored_count?: number
+  score_clip_count?: number
+  camera_trajectory_count?: number
+  render_attempt_count?: number
+  render_output_count?: number
+  rejection_reason_counts?: Record<string, number>
+}
 
 export interface ProviderCapabilities {
   text: CapabilityValue
@@ -172,13 +185,25 @@ export interface RenderOutput {
 
 export interface JobResults {
   job_id: string
+  outcome?: PipelineOutcome
   dir?: string
   ingest: {
     title: string
     heatmap: unknown[] | null
     probe: { duration_sec: number; width: number; height: number }
   } | null
-  score: { clips: Clip[]; llm_mode: string; model: string; scored_count: number; provider_profile_id?: string; provider_kind?: string; capabilities?: ProviderCapabilities } | null
+  score: {
+    clips: Clip[]
+    llm_mode: string
+    model: string
+    scored_count: number
+    counts?: RecommendationCounts
+    best_candidate?: { start: number; end: number; recommendation_score: number } | null
+    diagnostic_id?: string
+    provider_profile_id?: string
+    provider_kind?: string
+    capabilities?: ProviderCapabilities
+  } | null
   render: { outputs: RenderOutput[]; emoji_ok: boolean; caption_preset: string } | null
   events: { counts: Record<string, number>; timeline: unknown[]; arousal_source: string } | null
   candidates: { count: number; effective_weights: Record<string, number>; heatmap_present: boolean } | null
@@ -221,6 +246,7 @@ export interface JobSummary {
   lifecycle_state?: string
   last_stage?: string | null
   resume_safe?: boolean
+  outcome?: PipelineOutcome
 }
 
 export interface PreflightCheck {

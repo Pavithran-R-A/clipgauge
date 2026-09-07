@@ -49,6 +49,9 @@ def main() -> int:
     render_path = args.job_dir / "render.json"
     render = json.loads(render_path.read_text(encoding="utf-8"))
     render_data = render.get("data", render)
+    outputs = render_data.get("outputs")
+    if not isinstance(outputs, list) or len(outputs) < 1:
+        raise SystemExit("model E2E render.outputs must contain at least one clip")
     if render_data.get("captions_burned") is not True:
         raise SystemExit(f"model E2E output did not burn captions: {render_data!r}")
 

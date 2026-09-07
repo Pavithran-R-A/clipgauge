@@ -42,6 +42,15 @@ def _words(text: str) -> list[str]:
     return [token.lower() for token in _TOKEN.findall(text)]
 
 
+def _language_signal_mode(tokens: list[str]) -> str:
+    """Use English lexical signals only for predominantly Latin text."""
+    letters = [character for token in tokens for character in token if character.isalpha()]
+    if not letters:
+        return "neutral_non_english"
+    latin_ratio = sum(character.isascii() for character in letters) / len(letters)
+    return "english_lexical" if latin_ratio >= 0.7 else "neutral_non_english"
+
+
 def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
     return max(low, min(high, float(value)))
 
@@ -184,16 +193,18 @@ def _deterministic(
     ending_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     tokens = _words(text)
+    language_signal_mode = _language_signal_mode(tokens)
+    english_signals = language_signal_mode == "english_lexical"
     first = tokens[:8]
     last = tokens[-8:]
-    first_marker = bool(set(first) & _HOOK_MARKERS)
+    first_marker = english_signals and bool(set(first) & _HOOK_MARKERS)
     specific_number = any(any(character.isdigit() for character in token) for token in first)
-    contrast = bool(set(first) & {"but", "except", "instead", "until"})
+    contrast = english_signals and bool(set(first) & {"but", "except", "instead", "until"})
     hook = 38.0 + (28.0 if first_marker else 0.0) + (18.0 if specific_number else 0.0) + (12.0 if contrast else 0.0)
-    generic_opening = _generic_reaction_opening(text)
+    generic_opening = english_signals and _generic_reaction_opening(text)
     if generic_opening:
         hook -= 26.0
-    if first and first[0] in _FILLER:
+    if english_signals and first and first[0] in _FILLER:
         hook -= 22.0
     hook_reason = (
         "reaction" if generic_opening else
@@ -214,17 +225,21 @@ def _deterministic(
         bool(evidence.get(key, False))
         for key in ("segment_boundary", "silence", "speaker_turn_boundary", "semantic_complete")
     ) or segment_boundary
-    grammatical_fragment = (
+    grammatical_fragment = english_signals and (
         terminal in _FRAGMENT_FUNCTION_WORDS
         or terminal in _GRAMMATICAL_TERMINAL_MARKERS
     )
     complete_ending = bool(last and (punctuated or structural_boundary) and not grammatical_fragment)
-    filler_ratio = sum(token in _FILLER for token in tokens) / max(1, len(tokens))
+    filler_ratio = (
+        sum(token in _FILLER for token in tokens) / max(1, len(tokens))
+        if english_signals
+        else 0.0
+    )
     density = min(100.0, len(tokens) / max(1.0, duration) * 5.0)
     payoff = 76.0 if has_reaction else 62.0 if has_reveal else 28.0
     story_shape = 35.0 + (22.0 if has_setup else 0.0) + (24.0 if has_reveal else 0.0) + (16.0 if has_reaction else 0.0)
     standalone = 78.0 if len(tokens) >= 20 else 54.0
-    if tokens and tokens[0] in _PRONOUNS:
+    if english_signals and tokens and tokens[0] in _PRONOUNS:
         standalone -= 20.0
     return {
         "hook": _clamp(hook),
@@ -246,6 +261,7 @@ def _deterministic(
         "has_reaction": has_reaction,
         "generic_opening": generic_opening,
         "complete_ending": complete_ending,
+        "language_signal_mode": language_signal_mode,
     }
 
 
@@ -298,11 +314,16 @@ def assess(
         reaction = 0.4 * reaction + 0.6 * _llm_score(fields, "reaction_strength", reaction)
     story_name = str(fields.get("story_shape") or "none")
     story_shape = _STORY_SCORES.get(story_name, evidence["story_shape"]) if fields.get("story_shape") else evidence["story_shape"]
+    language_neutral = evidence["language_signal_mode"] == "neutral_non_english"
     requirements = {
         "conflict_reaction": ("reaction or payoff", lambda: payoff >= 20.0 and reaction >= 20.0),
         "question_answer": ("an answer or payoff", lambda: payoff >= 20.0),
         "hook_setup_payoff": ("a payoff", lambda: payoff >= 20.0),
-        "reveal": ("reveal evidence", lambda: payoff >= 20.0 and (evidence["has_reveal"] or evidence["has_reaction"])),
+        "reveal": (
+            "reveal evidence",
+            lambda: payoff >= 20.0
+            and (evidence["has_reveal"] or evidence["has_reaction"] or language_neutral),
+        ),
     }
     story_consistent = True
     story_consistency_reason = ""
@@ -417,6 +438,7 @@ def assess(
         "payoff_location": str(fields.get("payoff_location", "none")),
         "ending_completeness": round(_clamp(ending), 1),
         "complete_ending": bool(evidence["complete_ending"]),
+        "language_signal_mode": evidence["language_signal_mode"],
         "syntactic_complete": syntactic_complete,
         "semantic_closure_0_100": semantic_closure,
         "open_loop_at_end": open_loop_at_end,

@@ -10,6 +10,58 @@ from pathlib import Path
 from ..jobs.queue import Stage, StageContext, StageError, _atomic_write_text
 
 
+class CameraTrajectoryContractError(StageError):
+    """A finalist lost the camera data required for rendering."""
+
+    def __init__(self, context: dict[str, object]) -> None:
+        self.context = context
+        super().__init__(
+            "Camera trajectories are missing for finalist clips: "
+            f"expected={context.get('expected_clips', 0)}, "
+            f"available={context.get('available_trajectories', [])}, "
+            f"missing_indexes={context.get('missing_indexes', [])}.",
+            code="CAMERA_TRAJECTORY_MISSING",
+            retryable=True,
+            stage="render",
+        )
+
+
+def validate_trajectory_contract(
+    clips: list[dict],
+    trajectories: object,
+    *,
+    existing_paths: set[str] | None = None,
+) -> None:
+    """Require one usable trajectory or fallback for every finalist."""
+    if not isinstance(trajectories, dict):
+        raise CameraTrajectoryContractError(
+            {
+                "expected_clips": len(clips),
+                "available_trajectories": [],
+                "missing_indexes": list(range(len(clips))),
+            }
+        )
+    available = sorted(str(index) for index in trajectories)
+    missing: list[int] = []
+    for index in range(len(clips)):
+        path = trajectories.get(str(index))
+        if not isinstance(path, str) or not path:
+            missing.append(index)
+            continue
+        if (existing_paths is not None and path not in existing_paths) or (
+            existing_paths is None and not Path(path).exists()
+        ):
+            missing.append(index)
+    if missing:
+        raise CameraTrajectoryContractError(
+            {
+                "expected_clips": len(clips),
+                "available_trajectories": available,
+                "missing_indexes": missing,
+            }
+        )
+
+
 def captions_allowed_for_clip(clip: dict, captions_ok: bool) -> bool:
     """Avoid caption collisions when T2 confirms source-burned text."""
     visual = clip.get("t2")
@@ -18,7 +70,7 @@ def captions_allowed_for_clip(clip: dict, captions_ok: bool) -> bool:
 
 class RenderStage(Stage):
     name = "render"
-    schema_version = 7  # v7: consume refreshed scoring classifications
+    schema_version = 8  # v8: enforce finalist trajectory contracts
 
     def artifacts_ok(self, ctx: StageContext, data: dict) -> bool:
         if data.get("caption_preset") != ctx.settings.caption_preset:
@@ -26,8 +78,6 @@ class RenderStage(Stage):
         return all(Path(c["path"]).exists() for c in data.get("outputs", []))
 
     def run(self, ctx: StageContext) -> dict:
-        import numpy as np
-
         from ..captions import ass as ass_mod
         from . import ffmpeg_bin, renderer, scheduler
 
@@ -46,8 +96,10 @@ class RenderStage(Stage):
         events = prior.get("events")
         score = prior.get("score")
         camera = prior.get("camera")
-        if not (ingest and diarize and events and score and camera):
+        if not (ingest and diarize and events and score):
             raise StageError("Render needs every prior stage output.")
+        if not isinstance(camera, dict):
+            validate_trajectory_contract(score.get("clips", []), camera)
 
         media = ingest["media_path"]
         probe = ingest["probe"]
@@ -71,10 +123,9 @@ class RenderStage(Stage):
         render_durations: list[float] = []
         encoder = renderer.selected_video_encoder()
         concurrency = scheduler.concurrency_limit(encoder)
+        validate_trajectory_contract(clips, camera.get("trajectories", {}))
         for i, clip in enumerate(clips):
             traj_path = camera["trajectories"].get(str(i))
-            if not traj_path or not Path(traj_path).exists():
-                continue
             trajectory = json.loads(Path(traj_path).read_text())
             start, end = clip["start"], clip["end"]
             ctx.emit(i / max(1, len(clips)), f"Rendering clip {i + 1}/{len(clips)}…")
@@ -150,7 +201,10 @@ class RenderStage(Stage):
             )
 
         if not outputs:
-            raise StageError("No clips were rendered.")
+            raise StageError(
+                "Rendering produced no outputs after finalist validation.",
+                code="RENDER_OUTPUT_EMPTY",
+            )
         return {
             "outputs": outputs,
             "emoji_ok": emoji_ok,
