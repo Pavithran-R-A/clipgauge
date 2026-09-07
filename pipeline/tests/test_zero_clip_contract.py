@@ -105,4 +105,7 @@ def test_zero_recommendations_stop_before_camera_and_render(monkeypatch, tmp_pat
     assert not (job.dir / "camera.json").exists()
     diagnostics = list((job.dir / "diagnostics").glob("*.json"))
     assert diagnostics
-    assert "candidate_count" in diagnostics[0].read_text(encoding="utf-8")
+    assert any(
+        "candidate_count" in path.read_text(encoding="utf-8")
+        for path in diagnostics
+    )
