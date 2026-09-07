@@ -1620,6 +1620,26 @@ fn valid_start_setup_args(args: &[String]) -> bool {
         || matches!(args, [command, model] if command == "download-model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
 }
 
+fn valid_setup_tool_args(args: &[String]) -> bool {
+    let storage_target = |value: &str| {
+        matches!(
+            value,
+            "session" | "failed-session" | "safe-cache" | "obsolete-runtime-archives"
+        )
+    };
+    let valid_storage_preview = matches!(args, [command, target] if command == "storage-preview" && storage_target(target))
+        || matches!(args, [command, target, job_id] if command == "storage-preview" && storage_target(target) && path_security::valid_job_id(job_id));
+    let valid_storage_cleanup = matches!(args, [command, target, confirm] if command == "storage-cleanup" && storage_target(target) && confirm == "--confirm")
+        || matches!(args, [command, target, job_id, confirm] if command == "storage-cleanup" && storage_target(target) && path_security::valid_job_id(job_id) && confirm == "--confirm");
+    valid_storage_preview
+        || valid_storage_cleanup
+        || matches!(args, [command] if command == "inventory" || command == "gpu-status" || command == "gpu-repair" || command == "youtube-status" || command == "youtube-test" || command == "install-runtime" || command == "install-ffmpeg")
+        || matches!(args, [command, flag, model] if command == "inventory" && flag == "--model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
+        || matches!(args, [command, group, value] if command == "install-group" && group == "--group" && matches!(value.as_str(), "core:asr" | "core:analysis" | "core:youtube"))
+        || matches!(args, [command, asset] if command == "install-asset" && asset.len() <= 180 && asset.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '_' | '/' | '.')))
+        || matches!(args, [command, model] if command == "download-model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
+}
+
 #[tauri::command]
 fn start_setup(
     app: AppHandle,
@@ -1735,24 +1755,7 @@ fn setup_tool_blocking(
     args: Vec<String>,
     initialization: Arc<sidecar::InitializationCoordinator>,
 ) -> Result<Value, String> {
-    let storage_target = |value: &str| {
-        matches!(
-            value,
-            "session" | "failed-session" | "safe-cache" | "obsolete-runtime-archives"
-        )
-    };
-    let valid_storage_preview = matches!(args.as_slice(), [command, target] if command == "storage-preview" && storage_target(target))
-        || matches!(args.as_slice(), [command, target, job_id] if command == "storage-preview" && storage_target(target) && path_security::valid_job_id(job_id));
-    let valid_storage_cleanup = matches!(args.as_slice(), [command, target, confirm] if command == "storage-cleanup" && storage_target(target) && confirm == "--confirm")
-        || matches!(args.as_slice(), [command, target, job_id, confirm] if command == "storage-cleanup" && storage_target(target) && path_security::valid_job_id(job_id) && confirm == "--confirm");
-    let valid = valid_storage_preview
-        || valid_storage_cleanup
-        || matches!(args.as_slice(), [command] if command == "inventory" || command == "youtube-status" || command == "youtube-test" || command == "install-runtime" || command == "install-ffmpeg")
-        || matches!(args.as_slice(), [command, flag, model] if command == "inventory" && flag == "--model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
-        || matches!(args.as_slice(), [command, group, value] if command == "install-group" && group == "--group" && matches!(value.as_str(), "core:asr" | "core:analysis" | "core:youtube"))
-        || matches!(args.as_slice(), [command, asset] if command == "install-asset" && asset.len() <= 180 && asset.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '_' | '/' | '.')))
-        || matches!(args.as_slice(), [command, model] if command == "download-model" && model.starts_with("clipgauge-local/") && model.len() <= 120 && model.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')));
-    if !valid {
+    if !valid_setup_tool_args(&args) {
         return Err("unsupported setup operation".to_string());
     }
     if args.first().map(String::as_str) == Some("storage-preview")
@@ -2246,8 +2249,8 @@ mod tests {
     use super::{
         canonical_provider_id, generate_support_bundle_at, ig_connect_args, ig_failure_message,
         is_completion_payload, migrate_legacy_data_from, read_bounded_line, selected_provider_env,
-        spawn_blocking_result, valid_start_setup_args, validate_browser_session, ResumeJobRequest,
-        RunJobRequest,
+        spawn_blocking_result, valid_setup_tool_args, valid_start_setup_args,
+        validate_browser_session, ResumeJobRequest, RunJobRequest,
     };
     use serde_json::json;
 
@@ -2382,6 +2385,16 @@ mod tests {
         assert!(!valid_start_setup_args(&["youtube-status".to_string()]));
         assert!(!valid_start_setup_args(&["youtube-test".to_string()]));
         assert!(valid_start_setup_args(&["install-runtime".to_string()]));
+    }
+
+    #[test]
+    fn setup_tool_accepts_gpu_diagnostics_and_repair() {
+        assert!(valid_setup_tool_args(&["gpu-status".to_string()]));
+        assert!(valid_setup_tool_args(&["gpu-repair".to_string()]));
+        assert!(!valid_setup_tool_args(&[
+            "gpu-repair".to_string(),
+            "unexpected".to_string()
+        ]));
     }
 
     #[test]
