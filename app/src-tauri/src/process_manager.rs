@@ -85,8 +85,11 @@ impl ProcessManager {
 
     pub fn reserve(&mut self, key: impl Into<String>) -> Result<Reservation, ReserveError> {
         let key = key.into();
-        if self.active.contains_key(&key) {
-            return Err(ReserveError::AlreadyActive);
+        if let Some(record) = self.active.get(&key) {
+            if !record.state.terminal() {
+                return Err(ReserveError::AlreadyActive);
+            }
+            self.active.remove(&key);
         }
         if self
             .active
@@ -350,5 +353,43 @@ mod tests {
         assert_eq!(stale.state, LifecycleState::Interrupted);
         assert_ne!(stale.session_id, "other-session");
         assert_eq!(stale.process_id, 123);
+    }
+
+    #[test]
+    fn failed_and_cancelled_jobs_release_their_retry_reservations() {
+        let mut manager = ProcessManager::new();
+        manager.reserve("failed").unwrap();
+        assert_eq!(
+            manager.finish("failed", false),
+            Some(LifecycleState::Failed)
+        );
+        manager.reserve("failed").unwrap();
+        assert_eq!(
+            manager.finish("failed", true),
+            Some(LifecycleState::Completed)
+        );
+
+        manager.reserve("cancelled").unwrap();
+        manager.adopt_job_id("cancelled", "cancelled-job").unwrap();
+        assert_eq!(
+            manager.request_cancel("cancelled-job"),
+            Err("job is starting and has no cancellable process yet".to_string())
+        );
+        assert_eq!(
+            manager.finish("cancelled", false),
+            Some(LifecycleState::Cancelled)
+        );
+        assert!(manager.reserve("cancelled").is_ok());
+    }
+
+    #[test]
+    fn completed_job_retry_policy_is_explicit_at_manager_boundary() {
+        let mut manager = ProcessManager::new();
+        manager.reserve("completed").unwrap();
+        assert_eq!(
+            manager.finish("completed", true),
+            Some(LifecycleState::Completed)
+        );
+        assert!(manager.reserve("completed").is_ok());
     }
 }

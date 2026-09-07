@@ -2,6 +2,19 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.12] — 2026-09-07
+
+ClipGauge v0.5.12 repairs real-device GPU recovery and resumable ASR execution.
+
+### Fixed
+
+- Separate CTranslate2 GPU transcription from PyTorch/WhisperX word alignment, with explicit CPU alignment fallback.
+- Repair stale managed runtime environments before starting pipeline work.
+- Persist verified transcription checkpoints and reuse them during resume.
+- Route recovery attempts by job and attempt identity, ignoring stale events.
+- Make failed and cancelled runs retryable while preserving completed-run policy.
+- Expose GPU diagnostics and a working recovery action in Setup and recovery surfaces.
+
 ## [0.5.11] — 2026-09-06
 
 ClipGauge v0.5.11 completes real-device stabilization on Windows.

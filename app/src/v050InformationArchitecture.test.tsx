@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   youtubeReadiness: vi.fn(),
   startSetup: vi.fn(),
   cancelSetup: vi.fn(),
+  gpuDiagnostics: vi.fn(),
+  repairGpu: vi.fn(),
   saveProviderKey: vi.fn(),
   removeProviderKey: vi.fn(),
   testConnection: vi.fn(),
@@ -43,6 +45,13 @@ beforeEach(() => {
     catalog: []
   })
   mocks.youtubeReadiness.mockResolvedValue({ state: 'DEPENDENCIES_READY', ready: true, public_download_verified: false, reason: 'YouTube tools are ready.', actions: ['Test'], checks: [] })
+  mocks.gpuDiagnostics.mockResolvedValue({
+    environment: { state: 'READY' },
+    hardware: { nvidia: { verified: false, gpus: [] }, cuda_ctranslate2: { verified: false, compute_types: [] }, pytorch_cuda: { verified: false } },
+    cuda_runtime_ready: true,
+    cudnn_runtime_ready: true
+  })
+  mocks.repairGpu.mockResolvedValue({ ok: true })
   mocks.listen.mockResolvedValue(() => undefined)
 })
 
@@ -238,7 +247,7 @@ describe('v0.5 information architecture', () => {
       catalog: []
     })
     render(<SetupCenter onBack={vi.fn()} />)
-    expect(await screen.findByText('Unavailable')).toBeInTheDocument()
+    expect((await screen.findAllByText('Unavailable')).length).toBeGreaterThan(0)
     expect(screen.getByRole('button', { name: 'Install ClipGauge Local' })).toBeDisabled()
   })
 })

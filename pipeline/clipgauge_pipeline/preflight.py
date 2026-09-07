@@ -10,7 +10,7 @@ from pathlib import Path
 
 import httpx
 
-from . import config, hardware, local_runtime, protocol, readiness, runtime
+from . import config, environment, hardware, local_runtime, protocol, readiness, runtime
 from .ingest import ytdlp
 from .models import registry, specs  # noqa: F401 - register concrete models
 from .render import ffmpeg_bin
@@ -243,6 +243,16 @@ def run(selected_llm: providers_mod.ProviderProfile | str = "gemini", source: st
     except OSError as error:
         _check(checks, "disk", "warning", "Free disk space could not be measured.", "Check the volume manually before starting a large render.", error=str(error))
     _writable_root(checks)
+    runtime_identity = environment.status(config.home_dir())
+    _check(
+        checks,
+        "pipeline-environment",
+        "ready" if runtime_identity["state"] == "READY" else "warning",
+        "The managed pipeline environment matches this application." if runtime_identity["state"] == "READY" else "ClipGauge runtime update required before the next run.",
+        None if runtime_identity["state"] == "READY" else "Start the run again to apply the verified runtime update.",
+        expected_fingerprint=runtime_identity["expected_fingerprint"],
+        stored_fingerprint=runtime_identity["stored_fingerprint"],
+    )
     try:
         manifest = _runtime_manifest()
         _check(checks, "runtime-manifest", "ready", "The pinned runtime manifest is valid.", version=manifest["manifest_version"])
