@@ -128,4 +128,20 @@ describe('Review media trust states', () => {
     await waitFor(() => expect(chooseExportDestinationMock).toHaveBeenCalled())
     expect(api.exportClip).not.toHaveBeenCalled()
   })
+
+  it('shows a successful no-recommendations result without export controls', () => {
+    const noRecommendations: JobResults = {
+      job_id: 'job-no-recommendations',
+      outcome: 'SUCCESS_NO_RECOMMENDATIONS',
+      ingest: { title: 'fixture', heatmap: null, probe: { duration_sec: 10, width: 1920, height: 1080 } },
+      score: { clips: [], llm_mode: 'ollama', model: 'fixture', scored_count: 5, counts: { scored_count: 5 } },
+      render: null,
+      events: { counts: {}, timeline: [], arousal_source: 'dsp-proxy' },
+      candidates: { count: 5, effective_weights: {}, heatmap_present: false },
+    }
+    render(<Review results={noRecommendations} onBack={vi.fn()} onRestyle={vi.fn()} />)
+    expect(screen.getByTestId('no-recommendations')).toHaveTextContent('No recommended clips')
+    expect(screen.getByTestId('no-recommendations')).toHaveTextContent('5 moments were evaluated')
+    expect(screen.queryByRole('button', { name: 'EXPORT MP4' })).not.toBeInTheDocument()
+  })
 })

@@ -724,13 +724,23 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
         "title": results.get("ingest", {}).get("title"),
         "heatmap_segments": len(results.get("ingest", {}).get("heatmap") or []),
     }
+    score_result = results.get("score", {})
+    outcome = score_result.get("outcome", "SUCCESS_WITH_CLIPS")
+    code = score_result.get("code", "OK")
+    message = (
+        "We analyzed this video but did not find a moment that met ClipGauge's quality bar."
+        if outcome == "SUCCESS_NO_RECOMMENDATIONS"
+        else "Pipeline completed."
+    )
+    summary.update({"outcome": outcome, "code": code, "counts": score_result.get("counts", {})})
     if jsonl:
         terminal.terminal(
             ok=True,
-            code="OK",
-            message="Pipeline completed.",
+            code=code,
+            message=message,
             retryable=False,
-            stage="pipeline",
+            stage="score" if outcome == "SUCCESS_NO_RECOMMENDATIONS" else "pipeline",
+            diagnostic=score_result.get("diagnostic_id"),
         )
     else:
         _emit_result(jsonl, summary)

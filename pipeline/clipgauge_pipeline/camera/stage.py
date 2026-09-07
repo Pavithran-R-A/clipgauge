@@ -11,14 +11,32 @@ from ..jobs.queue import Stage, StageContext, StageError, _atomic_write_json
 from ..models import registry, specs
 
 
+def camera_mode_for_trajectory(trajectory: dict) -> str:
+    """Expose safe fallback provenance for review and diagnostics."""
+    meta = trajectory.get("meta") if isinstance(trajectory, dict) else {}
+    if isinstance(meta, dict) and meta.get("faceless_fallback"):
+        return "static_center"
+    distribution = meta.get("camera_mode_distribution") if isinstance(meta, dict) else {}
+    if isinstance(distribution, dict) and distribution.get("speaker"):
+        return "speaker_tracking"
+    if isinstance(distribution, dict) and distribution.get("face"):
+        return "face_tracking"
+    return "safe_fit"
+
+
 class CameraStage(Stage):
     name = "camera"
-    schema_version = 7  # v7: consume refreshed scoring classifications
+    schema_version = 8  # v8: explicit fallback provenance
 
     def artifacts_ok(self, ctx: StageContext, data: dict) -> bool:
         if data.get("camera_settings") != ctx.settings.camera.__dict__:
             return False  # camera style changed → re-direct
-        return all(Path(p).exists() for p in data.get("trajectories", {}).values())
+        trajectories = data.get("trajectories", {})
+        if not isinstance(trajectories, dict) or any(not isinstance(path, str) for path in trajectories.values()):
+            return False
+        if data.get("expected_clip_count") != len(trajectories):
+            return False
+        return all(Path(p).exists() for p in trajectories.values())
 
     def run(self, ctx: StageContext) -> dict:
         import numpy as np
@@ -81,6 +99,7 @@ class CameraStage(Stage):
             stats.append(
                 {
                     "clip": i,
+                    "camera_mode": camera_mode_for_trajectory({"meta": traj.meta}),
                     "tracks": traj.meta["tracks"],
                     "switch_cuts": traj.meta["switch_cuts"],
                     "shot_cuts": traj.meta["shot_cuts"],
@@ -90,6 +109,7 @@ class CameraStage(Stage):
 
         return {
             "trajectories": trajectories,
+            "expected_clip_count": len(clips),
             "stats": stats,
             "camera_settings": ctx.settings.camera.__dict__.copy(),
         }

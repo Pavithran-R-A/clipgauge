@@ -198,6 +198,29 @@ describe('structured pipeline terminal events', () => {
     expect(await screen.findByTestId('review')).toHaveTextContent('20260818-155237-c6b118')
   })
 
+  it('routes zero recommendations as successful analysis', async () => {
+    mocks.api.jobResults.mockResolvedValueOnce({
+      job_id: 'job-no-recommendations',
+      outcome: 'SUCCESS_NO_RECOMMENDATIONS',
+      score: { clips: [], scored_count: 5 },
+      render: null,
+    })
+    render(<App />)
+    await waitFor(() => expect(mocks.pipelineHandler).toBeDefined())
+    mocks.pipelineHandler?.({ payload: { event: 'job', job_id: 'job-no-recommendations', attempt_id: 'attempt-no-recommendations' } })
+    mocks.pipelineHandler?.({
+      payload: {
+        event: 'terminal',
+        job_id: 'job-no-recommendations',
+        attempt_id: 'attempt-no-recommendations',
+        ok: true,
+        code: 'NO_RECOMMENDED_CLIPS',
+        message: 'We analyzed this video but did not find a moment that met ClipGauge\'s quality bar.',
+      },
+    })
+    expect(await screen.findByTestId('review')).toHaveTextContent('job-no-recommendations')
+  })
+
   it('surfaces rejected resume actions instead of silently staying busy', async () => {
     mocks.api.resumeJob.mockRejectedValueOnce(new Error('resume rejected'))
     render(<App />)

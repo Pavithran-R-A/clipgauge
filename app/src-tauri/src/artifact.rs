@@ -114,6 +114,17 @@ pub fn job_results(home: &Path, job_id: &str) -> Result<Value, String> {
     let mut render = read_stage(&dir, "render")?;
     let events = read_stage(&dir, "events")?;
     let candidates = read_stage(&dir, "candidates")?;
+    let outcome = score.get("outcome").cloned().unwrap_or_else(|| {
+        if render
+            .get("outputs")
+            .and_then(Value::as_array)
+            .is_some_and(|outputs| !outputs.is_empty())
+        {
+            json!("SUCCESS_WITH_CLIPS")
+        } else {
+            json!("FAILED")
+        }
+    });
 
     if let Some(outputs) = render.get_mut("outputs").and_then(Value::as_array_mut) {
         for output in outputs {
@@ -127,6 +138,7 @@ pub fn job_results(home: &Path, job_id: &str) -> Result<Value, String> {
 
     Ok(json!({
         "job_id": job_id,
+        "outcome": outcome,
         "ingest": ingest,
         "score": score,
         "camera": camera,

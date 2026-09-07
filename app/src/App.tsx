@@ -138,7 +138,7 @@ export default function App() {
           setRunNotice(payload.message ?? 'Job cancelled. Completed work remains available to resume.')
         } else if (payload.ok && activeJobRef.current) {
           setRunState('SUCCEEDED')
-          setRunNotice(null)
+          setRunNotice(payload.code === 'NO_RECOMMENDED_CLIPS' ? (payload.message ?? 'No recommended clips were found.') : null)
           api.jobResults(activeJobRef.current).then((result) => { setResults(result); setView('review') }).catch((error) => setRunError(String(error)))
         } else if (!payload.ok) {
           setRunState('FAILED')
@@ -208,7 +208,7 @@ export default function App() {
     const result = await api.jobResults(jobId)
     setActiveJob(jobId)
     setResults(result)
-    if (result.render?.outputs?.length) setView('review')
+    if (result.render?.outputs?.length || result.outcome === 'SUCCESS_NO_RECOMMENDATIONS') setView('review')
   }, [])
 
   const resumeJobAction = useCallback(async (jobId: string, provider?: string, captions?: string, camera?: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, allowCpuAsrFallback = false, notice = 'Starting recovery…') => {
