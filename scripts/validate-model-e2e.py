@@ -8,7 +8,8 @@ import json
 import subprocess
 from pathlib import Path
 
-REQUIRED_STAGES = {"ingest", "asr", "diarize", "events", "candidates", "score", "camera", "render"}
+ANALYSIS_STAGES = {"ingest", "asr", "diarize", "events", "candidates", "score"}
+RENDER_STAGES = {"camera", "render"}
 
 
 def main() -> int:
@@ -23,9 +24,26 @@ def main() -> int:
     if not terminal or terminal.get("ok") is not True:
         raise SystemExit(f"model E2E did not finish successfully: {terminal!r}")
     observed = {str(event.get("stage")) for event in events if event.get("event") == "progress" and event.get("stage")}
-    missing = REQUIRED_STAGES - observed
+    missing = ANALYSIS_STAGES - observed
     if missing:
         raise SystemExit(f"model E2E is missing stages: {sorted(missing)}")
+
+    if terminal.get("code") == "NO_RECOMMENDED_CLIPS":
+        if observed & RENDER_STAGES:
+            raise SystemExit("model E2E rendered after NO_RECOMMENDED_CLIPS")
+        summary = {
+            "terminal": terminal,
+            "stages": sorted(observed),
+            "outcome": "SUCCESS_NO_RECOMMENDATIONS",
+            "render_skipped": True,
+        }
+        args.output.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(summary, indent=2))
+        return 0
+
+    missing = RENDER_STAGES - observed
+    if missing:
+        raise SystemExit(f"model E2E is missing render stages: {sorted(missing)}")
     if not args.output.is_file() or args.output.stat().st_size <= 0:
         raise SystemExit(f"model E2E output is missing or empty: {args.output}")
 
