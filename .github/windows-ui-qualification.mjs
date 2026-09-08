@@ -57,7 +57,7 @@ async function setLogicalSize(page) {
 
 async function collectDisplayFacts(page) {
   return await page.evaluate(async ({ width, height }) => {
-    const invoke = window.__TAURI_INTERNALS__?.invoke
+    const invoke = window.__TAURI__?.core?.invoke ?? window.__TAURI_INTERNALS__?.invoke
     if (typeof invoke !== 'function') throw new Error('Tauri invoke unavailable for display facts')
     const [inner, outer, scale] = await Promise.all([
       invoke('plugin:window|inner_size', { label: 'main' }),
@@ -192,7 +192,7 @@ async function displayDiagnosticsState(page) {
   await visible(page.getByRole('heading', { name: 'Get unstuck without guessing.', exact: true }), 'Help heading for display diagnostics')
   await visible(page.getByRole('heading', { name: 'Logical layout facts', exact: true }), 'display diagnostics heading')
   const diagnostics = await page.evaluate(async ({ requestedWidth, requestedHeight }) => {
-    const invoke = window.__TAURI_INTERNALS__?.invoke
+    const invoke = window.__TAURI__?.core?.invoke ?? window.__TAURI_INTERNALS__?.invoke
     if (typeof invoke !== 'function') throw new Error('Tauri invoke unavailable for display diagnostics')
     const label = 'main'
     const [inner, outer, scale] = await Promise.all([
@@ -233,7 +233,7 @@ async function helpState(page) {
 async function setupState(page) {
   await clickNav(page, 'Setup & Storage')
   const inventoryDiagnostic = await page.evaluate(async () => {
-    const invoke = window.__TAURI_INTERNALS__?.invoke
+    const invoke = window.__TAURI__?.core?.invoke ?? window.__TAURI_INTERNALS__?.invoke
     if (typeof invoke !== 'function') return { available: false }
     const value = await invoke('setup_tool', { args: ['inventory'] })
     const video = value?.video_tools ?? {}
@@ -410,10 +410,12 @@ function nativeWindowRecords() {
 async function removalConfirmation(page) {
   const confirmRuntime = await page.evaluate(() => {
     const internals = window.__TAURI_INTERNALS__
-    if (typeof internals?.invoke !== 'function') return { type: typeof window.confirm, own: Object.prototype.hasOwnProperty.call(window, 'confirm'), source: String(window.confirm).replace(/\s+/g, ' ').slice(0, 240), invoke: 'unavailable' }
-    const originalInvoke = internals.invoke
+    const globalCore = window.__TAURI__?.core
+    const invokeOwner = typeof globalCore?.invoke === 'function' ? globalCore : internals
+    if (typeof invokeOwner?.invoke !== 'function') return { type: typeof window.confirm, own: Object.prototype.hasOwnProperty.call(window, 'confirm'), source: String(window.confirm).replace(/\s+/g, ' ').slice(0, 240), invoke: 'unavailable' }
+    const originalInvoke = invokeOwner.invoke
     window.__clipGaugeQaConfirmState = { state: 'not-called' }
-    internals.invoke = async function (...args) {
+    invokeOwner.invoke = async function (...args) {
       if (args[0] !== 'plugin:dialog|confirm') return originalInvoke.apply(this, args)
       window.__clipGaugeQaConfirmState = { state: 'pending' }
       try {
@@ -562,7 +564,7 @@ try {
     await visible(page.getByRole('button', { name: 'Setup & Storage', exact: true }).first(), 'application navigation')
   }
   const vaultScope = await page.evaluate(async () => {
-    const invoke = window.__TAURI_INTERNALS__?.invoke
+    const invoke = window.__TAURI__?.core?.invoke ?? window.__TAURI_INTERNALS__?.invoke
     if (typeof invoke !== 'function') throw new Error('Tauri invoke unavailable for vault scope')
     return await invoke('vault_scope')
   })
