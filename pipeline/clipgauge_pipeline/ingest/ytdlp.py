@@ -344,6 +344,47 @@ def _with_self_update_retry(bin_path: Path, progress: ProgressFn, fn: Callable[[
     return fn()
 
 
+def _is_attestation_transfer_failure(
+    error: YtDlpError,
+    source_url: str,
+    cookies_from_browser: str | None,
+) -> bool:
+    details = error.details
+    return bool(
+        _needs_youtube_provider(source_url)
+        and not cookies_from_browser
+        and error.code == "YTDLP_ATTESTATION_REQUIRED"
+        and details.get("failure_phase") == "GVS_TRANSFER"
+        and details.get("http_status") == 403
+    )
+
+
+def _run_youtube_recovery(
+    fn: Callable[[], str],
+    *,
+    source_url: str,
+    cookies_from_browser: str | None,
+) -> str:
+    """Retry one attestation transfer after refreshing public compatibility."""
+    try:
+        return fn()
+    except YtDlpError as first_error:
+        if not _is_attestation_transfer_failure(first_error, source_url, cookies_from_browser):
+            raise
+        youtube_compat.invalidate_public_compatibility()
+        _stop_operation_provider()
+        try:
+            return fn()
+        except YtDlpError as final_error:
+            final_error.details = {
+                **final_error.details,
+                "cache_invalidated": True,
+                "retry_count": 1,
+                "recovery": "provider_restart",
+            }
+            raise
+
+
 @dataclass
 class UrlMeta:
     id: str
@@ -385,7 +426,11 @@ def fetch_meta(url: str, progress: ProgressFn, cookies_from_browser: str | None 
             raise
 
     try:
-        out = _with_self_update_retry(bin_path, progress, _go)
+        out = _run_youtube_recovery(
+            _go,
+            source_url=source_url,
+            cookies_from_browser=cookies_from_browser,
+        )
     finally:
         if _needs_youtube_provider(source_url):
             _stop_operation_provider()
@@ -435,20 +480,6 @@ def download(url: str, out_path: Path, progress: ProgressFn, cookies_from_browse
     bin_path = ensure_ytdlp(progress)
     source_url = normalize_youtube_url(url) if _needs_youtube_provider(url) else url
     ffmpeg = ffmpeg_bin.ffmpeg() if ffmpeg_bin.readiness().ready else None
-    args = [
-        *_youtube_provider_args(source_url, compatibility_method=compatibility_method),
-        *_browser_auth_args(cookies_from_browser),
-        "-f", download_format_for(compatibility_method),
-        "--merge-output-format", "mp4",
-        "--no-playlist",
-        "--no-warnings",
-        "--newline",
-        "--socket-timeout", "30",
-    ]
-    if ffmpeg:
-        args += ["--ffmpeg-location", ffmpeg]
-    args += ["-o", str(out_path), source_url]
-
     def _on_line(line: str) -> None:
         m = _PCT_RE.search(line)
         if m:
@@ -458,6 +489,19 @@ def download(url: str, out_path: Path, progress: ProgressFn, cookies_from_browse
             progress(0.96, "Merging streams…")
 
     def _go() -> str:
+        args = [
+            *_youtube_provider_args(source_url, compatibility_method=compatibility_method),
+            *_browser_auth_args(cookies_from_browser),
+            "-f", download_format_for(compatibility_method),
+            "--merge-output-format", "mp4",
+            "--no-playlist",
+            "--no-warnings",
+            "--newline",
+            "--socket-timeout", "30",
+        ]
+        if ffmpeg:
+            args += ["--ffmpeg-location", ffmpeg]
+        args += ["-o", str(out_path), source_url]
         try:
             return _run(bin_path, args, on_line=_on_line)
         except YtDlpError as error:
@@ -466,7 +510,11 @@ def download(url: str, out_path: Path, progress: ProgressFn, cookies_from_browse
             raise
 
     try:
-        _with_self_update_retry(bin_path, progress, _go)
+        _run_youtube_recovery(
+            _go,
+            source_url=source_url,
+            cookies_from_browser=cookies_from_browser,
+        )
     finally:
         if _needs_youtube_provider(source_url):
             _stop_operation_provider()

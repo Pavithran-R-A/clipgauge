@@ -193,6 +193,28 @@ def test_clipgauge_local_timeout_is_single_attempt(monkeypatch):
     assert calls == 1
 
 
+def test_provider_http_failure_has_safe_request_details(monkeypatch):
+    def fake_post(*args, **kwargs):
+        return httpx.Response(500, json={"error": {"message": "private runtime detail"}})
+
+    monkeypatch.setattr(providers.httpx, "post", fake_post)
+    adapter = providers.make_adapter("clipgauge-local")
+    request = providers.InferenceRequest(
+        prompt="do not include this prompt",
+        schema={"type": "object"},
+    )
+
+    with pytest.raises(providers.ProviderError) as exc_info:
+        adapter._post_json("chat/completions", {"messages": []}, request=request)
+
+    error = exc_info.value
+    assert error.code == "PROVIDER_UNAVAILABLE"
+    assert error.details["http_status"] == 500
+    assert error.details["request_number"] == 1
+    assert "private runtime detail" not in json.dumps(error.details)
+    assert "do not include this prompt" not in json.dumps(error.details)
+
+
 def test_local_qa_trace_is_opt_in_and_bounded(monkeypatch):
     trace_path = config.home_dir() / "diagnostics" / "local-runtime.jsonl"
     providers._local_qa_trace("disabled", payload="secret-free")
