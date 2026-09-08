@@ -442,7 +442,9 @@ jobs:
           job_id=$(python3 -c 'import json; events=[json.loads(line) for line in open("../model-e2e.jsonl") if line.lstrip().startswith("{")]; print(next(event["job_id"] for event in reversed(events) if event.get("event")=="terminal"))')
           job_dir="$CLIPGAUGE_HOME/jobs/$job_id"
           test -d "$job_dir"
-          uv run python ../scripts/validate-model-e2e.py ../model-e2e.jsonl "$job_dir" "$job_dir/clips/clip_00.mp4" > ../model-e2e-summary.json
+          validator="$RUNNER_TEMP/validate-model-e2e.py"
+          git show "$GITHUB_SHA:scripts/validate-model-e2e.py" > "$validator"
+          uv run python "$validator" ../model-e2e.jsonl "$job_dir" "$job_dir/clips/clip_00.mp4" > ../model-e2e-summary.json
           printf 'job_id=%s\n' "$job_id" > ../model-e2e-job.txt
       - name: Upload model E2E diagnostics
         if: always()
