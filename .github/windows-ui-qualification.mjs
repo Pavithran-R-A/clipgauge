@@ -5,6 +5,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
 import { parseWinAppJsonText } from './windows-ui-json.mjs'
+import { getTauriBridgeFacts } from './windows-ui-bridge.mjs'
 import { isLocalAiActionLabel, isLocalAiHeading, isSetupReadyLabel, isSetupReuseLabel } from './windows-ui-evidence-contract.mjs'
 const args = new Map()
 for (let index = 2; index < process.argv.length; index += 2) args.set(process.argv[index].replace(/^--/, ''), process.argv[index + 1])
@@ -76,6 +77,24 @@ async function collectDisplayFacts(page) {
       available_screen: { width: window.screen.availWidth, height: window.screen.availHeight },
     }
   }, { width: targetWidth, height: targetHeight })
+}
+
+async function invokeVaultScope(page) {
+  try {
+    await page.waitForFunction(() => {
+      const tauri = globalThis.__TAURI__
+      const internals = globalThis.__TAURI_INTERNALS__
+      return typeof tauri?.core?.invoke === 'function' || typeof internals?.invoke === 'function'
+    }, undefined, { timeout: 30_000 })
+  } catch (error) {
+    const facts = await page.evaluate(getTauriBridgeFacts)
+    throw new Error(`Tauri invoke unavailable for vault scope: ${JSON.stringify(facts)}`, { cause: error })
+  }
+  return await page.evaluate(async () => {
+    const invoke = globalThis.__TAURI__?.core?.invoke ?? globalThis.__TAURI_INTERNALS__?.invoke
+    if (typeof invoke !== 'function') throw new Error('Tauri invoke unavailable for vault scope after bridge wait')
+    return await invoke('vault_scope')
+  })
 }
 
 async function text(page, value, label = value) {
@@ -563,11 +582,7 @@ try {
   if (state !== 'setup-fresh') {
     await visible(page.getByRole('button', { name: 'Setup & Storage', exact: true }).first(), 'application navigation')
   }
-  const vaultScope = await page.evaluate(async () => {
-    const invoke = window.__TAURI__?.core?.invoke ?? window.__TAURI_INTERNALS__?.invoke
-    if (typeof invoke !== 'function') throw new Error('Tauri invoke unavailable for vault scope')
-    return await invoke('vault_scope')
-  })
+  const vaultScope = await invokeVaultScope(page)
   if (vaultScope !== 'qualification') throw new Error(`qualification build required, got ${String(vaultScope)}`)
   await setLogicalSize(page)
   const displayFacts = await collectDisplayFacts(page)
