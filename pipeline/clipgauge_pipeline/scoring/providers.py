@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import time
 from dataclasses import asdict, dataclass, field
 from json import JSONDecodeError
@@ -290,12 +291,14 @@ class ProviderError(Exception):
         message: str,
         *,
         retry_after: float | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         if code not in ERROR_CODES:
             code = "INTERNAL_PROVIDER_ERROR"
         self.code = code
         self.message = protocol.safe_message(message, limit=300)
         self.retry_after = retry_after
+        self.details = dict(details or {})
         super().__init__(self.message)
 
 
@@ -307,6 +310,7 @@ class ProviderAdapter:
         self.model = profile.model
         self._secret = secret.strip() if secret and secret.strip() else None
         self.last_result: InferenceResult | None = None
+        self._request_number = 0
 
     @property
     def backend_name(self) -> str:
@@ -400,6 +404,14 @@ class ProviderAdapter:
 
     def model_listing(self) -> list[str]:
         return []
+
+    def failure_context(self) -> dict[str, Any]:
+        """Return safe runtime facts for a provider failure diagnostic."""
+        return {}
+
+    def recover_for_scoring(self) -> dict[str, Any]:
+        """Give a provider one bounded scoring recovery opportunity."""
+        return {"recovered": False}
 
     def test_connection(self) -> dict[str, Any]:
         schema = {
@@ -546,20 +558,20 @@ def _status_error(response: httpx.Response) -> ProviderError:
     except Exception:  # noqa: BLE001
         message = "provider request failed"
     if status in {401, 403}:
-        return ProviderError("AUTH_INVALID", "Provider rejected the configured credential.")
+        return ProviderError("AUTH_INVALID", "Provider rejected the configured credential.", details={"http_status": status})
     if status == 404:
-        return ProviderError("MODEL_NOT_FOUND", "The selected provider model or endpoint was not found.")
+        return ProviderError("MODEL_NOT_FOUND", "The selected provider model or endpoint was not found.", details={"http_status": status})
     if status == 429:
         lower = message.lower()
         code = "QUOTA_EXHAUSTED" if "quota" in lower or "credit" in lower or "billing" in lower else "RATE_LIMITED"
-        return ProviderError(code, "Provider rate or quota limit was reached.", retry_after=_retry_after(response))
+        return ProviderError(code, "Provider rate or quota limit was reached.", retry_after=_retry_after(response), details={"http_status": status})
     if status in {413, 422}:
-        return ProviderError("CONTEXT_TOO_LARGE", "The provider rejected the request size or schema.")
+        return ProviderError("CONTEXT_TOO_LARGE", "The provider rejected the request size or schema.", details={"http_status": status})
     if 500 <= status < 600:
-        return ProviderError("PROVIDER_UNAVAILABLE", "The provider service returned a temporary server error.")
+        return ProviderError("PROVIDER_UNAVAILABLE", "The provider service returned a temporary server error.", details={"http_status": status})
     if 300 <= status < 400:
-        return ProviderError("PROVIDER_UNAVAILABLE", "Authenticated redirects are disabled for provider safety.")
-    return ProviderError("PROVIDER_RESPONSE_INVALID", f"Provider returned HTTP {status}.")
+        return ProviderError("PROVIDER_UNAVAILABLE", "Authenticated redirects are disabled for provider safety.", details={"http_status": status})
+    return ProviderError("PROVIDER_RESPONSE_INVALID", f"Provider returned HTTP {status}.", details={"http_status": status})
 
 
 LOCAL_PROVIDER_TIMEOUT_SECONDS = 300.0
@@ -654,8 +666,11 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         last: ProviderError | None = None
         trace_local = self.profile.kind == "clipgauge-local"
         max_attempts = LOCAL_PROVIDER_MAX_ATTEMPTS if trace_local else 3
+        self._request_number += 1
+        request_number = self._request_number
         for attempt in range(max_attempts):
             started = time.monotonic()
+            duration_ms = 0
             if trace_local:
                 handle = getattr(getattr(self, "_runtime", None), "handle", None)
                 memory = _memory_snapshot(handle.process.pid if handle else None)
@@ -700,25 +715,70 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                         **_memory_snapshot(handle.process.pid if handle else None),
                     )
                 return payload
-            except ProviderError:
+            except ProviderError as error:
+                error.details = {
+                    **self._failure_details(request_number, duration_ms, error),
+                    **error.details,
+                }
                 raise
             except httpx.TimeoutException:
                 duration_ms = int((time.monotonic() - started) * 1000)
                 last = ProviderError("TIMEOUT", "Provider request timed out.")
+                last.details = self._failure_details(request_number, duration_ms, last)
                 if trace_local:
                     _local_qa_trace("request_timeout", attempt=attempt + 1, duration_ms=duration_ms, timeout_seconds=self.profile.timeout_seconds, **_memory_snapshot(handle.process.pid if handle else None))
             except httpx.HTTPError:
                 duration_ms = int((time.monotonic() - started) * 1000)
                 last = ProviderError("NETWORK_FAILED", "Provider network request failed.")
+                last.details = self._failure_details(request_number, duration_ms, last)
                 if trace_local:
                     _local_qa_trace("request_network_error", attempt=attempt + 1, duration_ms=duration_ms)
             except JSONDecodeError as err:
                 if trace_local:
                     _local_qa_trace("request_invalid_json", attempt=attempt + 1, duration_ms=int((time.monotonic() - started) * 1000))
-                raise ProviderError("PROVIDER_RESPONSE_INVALID", "Provider returned malformed JSON.") from err
+                error = ProviderError("PROVIDER_RESPONSE_INVALID", "Provider returned malformed JSON.")
+                error.details = self._failure_details(
+                    request_number,
+                    int((time.monotonic() - started) * 1000),
+                    error,
+                )
+                raise error from err
             if attempt + 1 < max_attempts:
                 time.sleep(2**attempt)
-        raise last or ProviderError("INTERNAL_PROVIDER_ERROR", "Provider request failed.")
+        if last:
+            raise last
+        error = ProviderError("INTERNAL_PROVIDER_ERROR", "Provider request failed.")
+        error.details = self._failure_details(request_number, 0, error)
+        raise error
+
+    def _failure_details(
+        self,
+        request_number: int,
+        duration_ms: int,
+        error: ProviderError | None,
+    ) -> dict[str, Any]:
+        try:
+            free_disk_bytes = shutil.disk_usage(config.home_dir().parent).free
+        except OSError:
+            free_disk_bytes = None
+        details: dict[str, Any] = {
+            "provider_code": error.code if error else None,
+            "provider_kind": self.profile.kind,
+            "request_number": request_number,
+            "elapsed_ms": duration_ms,
+            "timeout_seconds": self.profile.timeout_seconds,
+            "structured_level": self.structured_level(),
+            "structured_output_status": (
+                "invalid"
+                if error and error.code in {"STRUCTURED_OUTPUT_INVALID", "PROVIDER_RESPONSE_INVALID"}
+                else "not_returned"
+            ),
+            "free_disk_bytes": free_disk_bytes,
+        }
+        context = self.failure_context()
+        details.update(context)
+        details.update(_memory_snapshot(context.get("runtime_pid")))
+        return details
 
 
 class ClipGaugeLocalAdapter(OpenAICompatibleAdapter):
@@ -754,6 +814,37 @@ class ClipGaugeLocalAdapter(OpenAICompatibleAdapter):
     def infer(self, request: InferenceRequest) -> InferenceResult:
         self._ensure_runtime()
         return super().infer(request)
+
+    def failure_context(self) -> dict[str, Any]:
+        handle = self._runtime.handle
+        process = handle.process if handle else None
+        exit_code = process.poll() if process else None
+        return {
+            "runtime_alive": bool(process and exit_code is None),
+            "runtime_pid": process.pid if process else None,
+            "runtime_exit_code": exit_code,
+        }
+
+    def recover_for_scoring(self) -> dict[str, Any]:
+        if self.profile.metadata.get("managed", True) is False:
+            return {"recovered": False, "runtime_restarted": False, "runtime_alive": True}
+        health_url = self._endpoint.rsplit("/v1", 1)[0] + "/health"
+        try:
+            response = httpx.get(health_url, timeout=0.5, follow_redirects=False)
+            if response.status_code in {200, 204}:
+                return {"recovered": True, "runtime_restarted": False, "runtime_alive": True}
+        except httpx.HTTPError:
+            pass
+        self._runtime.stop()
+        try:
+            self._endpoint = self._runtime.start(self.model)
+        except local_runtime.LocalRuntimeError as exc:
+            raise ProviderError(
+                "PROVIDER_UNAVAILABLE",
+                "ClipGauge Local could not recover its managed runtime.",
+                details={"runtime_alive": False},
+            ) from exc
+        return {"recovered": True, "runtime_restarted": True, "runtime_alive": True}
 
     def stop(self) -> None:
         self._runtime.stop()

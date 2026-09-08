@@ -3,7 +3,7 @@ import json
 import pytest
 
 from clipgauge_pipeline import cli, setup_models
-from clipgauge_pipeline.ingest import youtube_compat
+from clipgauge_pipeline.ingest import ytdlp, youtube_compat
 
 
 def _row(asset_id, *, installed=False, status='not-installed'):
@@ -149,6 +149,66 @@ def test_youtube_ingest_starts_provider_before_live_health_check(monkeypatch):
     assert events == ['start', 'self_test']
     assert '--plugin-dirs' in args
     assert 'youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416' in args
+
+
+def test_youtube_attestation_recovery_restarts_once_without_cookies(monkeypatch):
+    events = []
+    monkeypatch.setattr(ytdlp.youtube_compat, "invalidate_public_compatibility", lambda: events.append("invalidate"))
+    monkeypatch.setattr(ytdlp, "_stop_operation_provider", lambda: events.append("stop"))
+    attempts = 0
+
+    def operation():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ytdlp.YtDlpError(
+                "HTTP Error 403: Forbidden",
+                code="YTDLP_ATTESTATION_REQUIRED",
+                details={
+                    "failure_phase": "GVS_TRANSFER",
+                    "http_status": 403,
+                },
+            )
+        raise ytdlp.YtDlpError(
+            "HTTP Error 403: Forbidden",
+            code="YTDLP_ATTESTATION_REQUIRED",
+            details={
+                "failure_phase": "GVS_TRANSFER",
+                "http_status": 403,
+            },
+        )
+
+    with pytest.raises(ytdlp.YtDlpError) as exc_info:
+        ytdlp._run_youtube_recovery(
+            operation,
+            source_url="https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+            cookies_from_browser=None,
+        )
+
+    assert attempts == 2
+    assert events == ["invalidate", "stop"]
+    assert exc_info.value.details["cache_invalidated"] is True
+    assert exc_info.value.details["retry_count"] == 1
+
+
+def test_youtube_attestation_recovery_never_uses_cookies_implicitly(monkeypatch):
+    called = []
+    monkeypatch.setattr(ytdlp.youtube_compat, "invalidate_public_compatibility", lambda: called.append(True))
+
+    def operation():
+        raise ytdlp.YtDlpError(
+            "HTTP Error 403: Forbidden",
+            code="YTDLP_ATTESTATION_REQUIRED",
+            details={"failure_phase": "GVS_TRANSFER", "http_status": 403},
+        )
+
+    with pytest.raises(ytdlp.YtDlpError):
+        ytdlp._run_youtube_recovery(
+            operation,
+            source_url="https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+            cookies_from_browser="chrome",
+        )
+    assert called == []
 
 
 def test_youtube_readiness_distinguishes_dependencies_from_public_download(monkeypatch, tmp_path):

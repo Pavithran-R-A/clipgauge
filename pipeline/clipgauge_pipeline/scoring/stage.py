@@ -15,6 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .. import protocol
 from ..jobs.queue import Stage, StageContext, StageError
 from ..music import brief as music_brief
 from . import constants as constants_mod
@@ -30,6 +31,54 @@ LOCAL_T1_MIN_CALLS = 12
 LOCAL_STRONG_MINIMUM = 3
 LOCAL_T1_WALL_BUDGET_SECONDS = 180.0
 LOCAL_FINALIST_LIMIT = 6
+LOCAL_RECOVERABLE_PROVIDER_CODES = {
+    "PROVIDER_UNAVAILABLE",
+    "NETWORK_FAILED",
+    "TIMEOUT",
+    "STRUCTURED_OUTPUT_INVALID",
+    "PROVIDER_RESPONSE_INVALID",
+    "INTERNAL_PROVIDER_ERROR",
+}
+
+
+def _scoring_failure_code(error: providers_mod.ProviderError) -> str:
+    if error.code == "TIMEOUT":
+        return "LOCAL_SCORING_TIMEOUT"
+    if error.code in {"STRUCTURED_OUTPUT_INVALID", "PROVIDER_RESPONSE_INVALID"}:
+        return "LOCAL_SCORING_INVALID_OUTPUT"
+    if error.code == "PROVIDER_UNAVAILABLE" and (
+        error.details.get("runtime_alive") is False
+        or error.details.get("runtime_exit_code") is not None
+    ):
+        return "LOCAL_SCORING_RUNTIME_EXITED"
+    return "LOCAL_SCORING_UNAVAILABLE"
+
+
+def _safe_failure_record(error: providers_mod.ProviderError) -> dict:
+    safe_keys = {
+        "provider_code",
+        "provider_kind",
+        "request_number",
+        "elapsed_ms",
+        "timeout_seconds",
+        "structured_level",
+        "structured_output_status",
+        "free_disk_bytes",
+        "client_rss_kb",
+        "server_rss_kb",
+        "mem_available_kb",
+        "runtime_alive",
+        "runtime_pid",
+        "runtime_exit_code",
+        "http_status",
+    }
+    return {
+        "code": _scoring_failure_code(error),
+        "provider_code": error.code,
+        "details": {
+            key: value for key, value in error.details.items() if key in safe_keys
+        },
+    }
 
 
 def recommendation_outcome(
@@ -132,11 +181,32 @@ def _events_desc(events: list[dict]) -> str:
 
 def _generate_t1(client, prompt: str, schema: dict, sentence_ids: set[str]) -> dict:
     """Run one T1 judgment and enforce managed balanced boundaries."""
-    result = client.generate_json(prompt, schema)
-    if schema is rubric.BALANCED_T1_SCHEMA:
-        result = rubric.normalize_balanced_output(result)
-        rubric.validate_balanced_output(result, sentence_ids)
-    return result
+    for attempt in range(2):
+        try:
+            result = client.generate_json(prompt, schema)
+            if schema is rubric.BALANCED_T1_SCHEMA:
+                result = rubric.normalize_balanced_output(result)
+                rubric.validate_balanced_output(result, sentence_ids)
+            return result
+        except ValueError as error:
+            provider_error = providers_mod.ProviderError(
+                "STRUCTURED_OUTPUT_INVALID",
+                "The local scorer returned invalid structured output.",
+            )
+            if attempt == 0 and getattr(getattr(client, "profile", None), "kind", None) == "clipgauge-local":
+                client.recover_for_scoring()
+                continue
+            raise provider_error from error
+        except providers_mod.ProviderError as error:
+            can_recover = (
+                attempt == 0
+                and getattr(getattr(client, "profile", None), "kind", None) == "clipgauge-local"
+                and error.code in LOCAL_RECOVERABLE_PROVIDER_CODES
+            )
+            if not can_recover:
+                raise
+            client.recover_for_scoring()
+    raise AssertionError("bounded scoring retry exhausted")
 
 
 def _ending_evidence(
@@ -382,7 +452,7 @@ def select_diverse_finalists(entries: list[dict], limit: int = LOCAL_FINALIST_LI
 
 class ScoreStage(Stage):
     name = "score"
-    schema_version = 25  # v25: typed recommendation outcomes and language-neutral signals
+    schema_version = 26  # v26: bounded local scoring recovery diagnostics
 
     def run(self, ctx: StageContext) -> dict:
         prior = ctx.prior or {}
@@ -457,6 +527,7 @@ class ScoreStage(Stage):
                     prepared.append((cand, labeled, flat))
 
         scored: list[dict] = []
+        failure_records: list[dict] = []
         t1_calls = 0
         scoring_started = time.monotonic()
         round_one = (
@@ -482,10 +553,13 @@ class ScoreStage(Stage):
                     t1_schema,
                     set(cand.get("sentence_ids", [])),
                 )
-            except llm_mod.LlmError:
-                raise
-            except Exception as err:  # noqa: BLE001
-                ctx.emit(-1, f"moment {i + 1} scoring failed, skipping: {err}")
+            except providers_mod.ProviderError as err:
+                failure_records.append(_safe_failure_record(err))
+                ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_records[-1]['code']}); skipping")
+                continue
+            except Exception:  # noqa: BLE001
+                failure_records.append({"code": "LOCAL_SCORING_UNAVAILABLE", "provider_code": "UNEXPECTED_SCORING_ERROR", "details": {}})
+                ctx.emit(-1, f"moment {i + 1} scoring unavailable (LOCAL_SCORING_UNAVAILABLE); skipping")
                 continue
 
             quality = short_quality.assess(flat, window_events, end - start, llm=t1)
@@ -555,10 +629,13 @@ class ScoreStage(Stage):
                             t1_schema,
                             set(cand.get("sentence_ids", [])),
                         )
-                    except llm_mod.LlmError:
-                        raise
-                    except Exception as err:  # noqa: BLE001
-                        ctx.emit(-1, f"moment {i + 1} scoring failed, skipping: {err}")
+                    except providers_mod.ProviderError as err:
+                        failure_records.append(_safe_failure_record(err))
+                        ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_records[-1]['code']}); skipping")
+                        continue
+                    except Exception:  # noqa: BLE001
+                        failure_records.append({"code": "LOCAL_SCORING_UNAVAILABLE", "provider_code": "UNEXPECTED_SCORING_ERROR", "details": {}})
+                        ctx.emit(-1, f"moment {i + 1} scoring unavailable (LOCAL_SCORING_UNAVAILABLE); skipping")
                         continue
                     quality = short_quality.assess(flat, window_events, end - start, llm=t1)
                     arousal_pct = _window_pct(arousal, arousal_grid, start, end)
@@ -624,10 +701,13 @@ class ScoreStage(Stage):
                             t1_schema,
                             set(cand.get("sentence_ids", [])),
                         )
-                    except llm_mod.LlmError:
-                        raise
-                    except Exception as err:  # noqa: BLE001
-                        ctx.emit(-1, f"moment {i + 1} scoring failed, skipping: {err}")
+                    except providers_mod.ProviderError as err:
+                        failure_records.append(_safe_failure_record(err))
+                        ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_records[-1]['code']}); skipping")
+                        continue
+                    except Exception:  # noqa: BLE001
+                        failure_records.append({"code": "LOCAL_SCORING_UNAVAILABLE", "provider_code": "UNEXPECTED_SCORING_ERROR", "details": {}})
+                        ctx.emit(-1, f"moment {i + 1} scoring unavailable (LOCAL_SCORING_UNAVAILABLE); skipping")
                         continue
                     quality = short_quality.assess(flat, window_events, end - start, llm=t1)
                     arousal_pct = _window_pct(arousal, arousal_grid, start, end)
@@ -662,8 +742,30 @@ class ScoreStage(Stage):
                     rounds_run += 1
                     refill_rounds = 2
 
+        failure_reason_counts = dict(Counter(item["code"] for item in failure_records))
         if not scored:
-            raise StageError("No candidate produced a scoreable transcript.")
+            if failure_reason_counts:
+                dominant_code = max(failure_reason_counts, key=failure_reason_counts.get)
+            else:
+                dominant_code = "LOCAL_SCORING_UNAVAILABLE"
+            diagnostic_id = protocol.write_json_diagnostic(
+                ctx.job_dir,
+                "score",
+                {
+                    "code": dominant_code,
+                    "provider": profile.kind,
+                    "attempted_count": t1_calls,
+                    "successful_count": 0,
+                    "failed_count": len(failure_records),
+                    "failure_reason_counts": failure_reason_counts,
+                    "failures": failure_records,
+                },
+            )
+            raise StageError(
+                "ClipGauge Local could not score any candidate.",
+                code=dominant_code,
+                diagnostic_id=diagnostic_id,
+            )
 
         def _apply_platform_scores(entry: dict, visual: dict | None = None) -> tuple[dict, list[dict]]:
             platform_scores, adjustments = rubric.composite(
@@ -932,6 +1034,13 @@ class ScoreStage(Stage):
             "strong_recommendation_count": len(strong),
             "good_recommendation_count": len(good),
             "scored_count": len(scored),
+            "scoring_degraded": bool(failure_records),
+            "scoring_failures": {
+                "attempted_count": t1_calls,
+                "successful_count": len(scored),
+                "failed_count": len(failure_records),
+                "failure_reason_counts": failure_reason_counts,
+            },
             "t2_ran": supports_vision,
             "scoring_config_version": scoring_config["version"],
             "scoring_constants": cv_constants,
@@ -940,6 +1049,10 @@ class ScoreStage(Stage):
                 "viable_candidate_count": len(prepared),
                 "candidate_llm_limit": len(prepared),
                 "t1_calls": t1_calls,
+                "attempted_count": t1_calls,
+                "successful_count": len(scored),
+                "failed_count": len(failure_records),
+                "failure_reason_counts": failure_reason_counts,
                 "hard_t1_limit": len(prepared),
                 "t1_wall_budget_seconds": LOCAL_T1_WALL_BUDGET_SECONDS if is_local else None,
                 "rounds_run": rounds_run,
