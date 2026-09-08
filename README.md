@@ -4,7 +4,7 @@ ClipGauge is a desktop app for finding strong moments in longer videos and turni
 
 [Download the latest release](https://github.com/Pavithran-R-A/clipgauge/releases/latest) · [Report an issue](https://github.com/Pavithran-R-A/clipgauge/issues)
 
-> **Current release: ClipGauge v0.5.13** — typed zero-recommendation results and safe camera/render contracts.
+> **Current release: ClipGauge v0.5.14** — bounded long-form audio analysis and typed resource failures.
 
 > **Fallback if v0.5.12 has issues:** you can use [ClipGauge v0.5.3](https://github.com/Pavithran-R-A/clipgauge/releases/tag/v0.5.3). If you fall back to v0.5.3, **do not rely on the YouTube-link workflow**; YouTube compatibility is best effort and may fail because of upstream changes. Download or obtain the source video separately and use **local media upload/import** in ClipGauge instead.
 

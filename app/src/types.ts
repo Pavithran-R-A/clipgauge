@@ -426,8 +426,8 @@ export interface LocalAiReadiness {
 export interface GpuDiagnostics {
   environment?: { state?: string; reason?: string; expected_fingerprint?: string; stored_fingerprint?: string }
   hardware?: {
-    nvidia?: { verified?: boolean; gpus?: Array<{ name?: string; driver?: string; vram_mb?: string }> }
-    cuda_ctranslate2?: { available?: boolean; verified?: boolean; device_count?: number; compute_types?: string[] }
+    nvidia?: { available?: boolean; verified?: boolean; gpus?: Array<{ name?: string; driver?: string; vram_mb?: string }> }
+    cuda_ctranslate2?: { available?: boolean; verified?: boolean; device_count?: number; compute_types?: string[]; reason?: string }
     pytorch_cuda?: { available?: boolean; verified?: boolean; compiled_cuda?: string | null; reason?: string; device_name?: string }
     whisperx_alignment?: { available?: boolean; verified?: boolean; version?: string; reason?: string }
   }

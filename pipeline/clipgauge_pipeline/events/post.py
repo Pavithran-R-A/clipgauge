@@ -108,11 +108,13 @@ def fuse(events: list[dict], iou_threshold: float = FUSION_IOU) -> list[dict]:
     0.99), not a tiebreak — cross-model agreement is evidence, per the
     architecture's fusion rule."""
     out: list[dict] = []
+    by_type: dict[str, list[dict]] = {}
     for event in sorted(events, key=lambda e: (e["type"], e["start"])):
         merged = False
-        for existing in out:
-            if existing["type"] != event["type"]:
-                continue
+        candidates = by_type.setdefault(event["type"], [])
+        if candidates:
+            candidates[:] = [existing for existing in candidates if existing["end"] > event["start"]]
+        for existing in candidates:
             if _iou(existing, event) >= iou_threshold:
                 existing["start"] = min(existing["start"], event["start"])
                 existing["end"] = max(existing["end"], event["end"])
@@ -125,7 +127,9 @@ def fuse(events: list[dict], iou_threshold: float = FUSION_IOU) -> list[dict]:
                 merged = True
                 break
         if not merged:
-            out.append(dict(event, sources=sorted(event["sources"])))
+            created = dict(event, sources=sorted(event["sources"]))
+            candidates.append(created)
+            out.append(created)
     for event in out:
         event["start"] = round(event["start"], 3)
         event["end"] = round(event["end"], 3)

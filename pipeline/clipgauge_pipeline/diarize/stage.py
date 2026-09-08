@@ -54,11 +54,10 @@ class DiarizeStage(Stage):
                 retryable=True,
             ) from exc
 
-        from ..audio.io import load_mono
+        from ..audio.io import read_mono_window, sample_count
 
         try:
-            y16k, _ = load_mono(audio_path, 16000)
-            duration = len(y16k) / 16000.0
+            duration = sample_count(audio_path) / 16000.0
         except Exception as exc:  # noqa: BLE001 - audio boundary is intentionally typed
             raise StageError(
                 "Speaker analysis couldn’t read the analysis audio. Re-run ingest or choose another video.",
@@ -76,7 +75,7 @@ class DiarizeStage(Stage):
                 retryable=True,
             ) from exc
         if not windows:
-            del model, y16k
+            del model
             release_cpu_memory()
             return {"speakers": 0, "turns": [], "segments": segments}
 
@@ -101,7 +100,10 @@ class DiarizeStage(Stage):
             ctx.emit(0.25, f"Embedding {len(windows)} speech windows…")
             try:
                 embeddings = campplus.embed_windows(
-                    model, y16k, windows, device,
+                    model,
+                    lambda start, end: read_mono_window(audio_path, 16000, start, end),
+                    windows,
+                    device,
                     progress=lambda f: ctx.emit(0.25 + f * 0.55, "Embedding speech…"),
                 )
                 np.save(cache_path, embeddings)
@@ -125,7 +127,7 @@ class DiarizeStage(Stage):
             ) from exc
 
         speakers = int(len(np.unique(labels))) if len(labels) else 0
-        del model, y16k, embeddings
+        del model, embeddings
         release_cpu_memory()
         return {
             "speakers": speakers,

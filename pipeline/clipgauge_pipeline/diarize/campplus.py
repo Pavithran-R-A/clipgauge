@@ -11,6 +11,8 @@ the exact frontend 3D-Speaker/FunASR use with this checkpoint.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 import torch
 
@@ -69,7 +71,7 @@ def speech_windows(
 
 def embed_windows(
     model: CAMPPlus,
-    y16k: np.ndarray,
+    y16k: np.ndarray | Callable[[int, int], np.ndarray],
     windows: list[tuple[float, float]],
     device: torch.device,
     batch_size: int = 64,
@@ -96,7 +98,12 @@ def embed_windows(
             batch_feats, batch_idx, max_frames = [], [], 0
 
         for i, (start, end) in enumerate(windows):
-            chunk = y16k[int(start * sr) : int(end * sr)]
+            start_sample, end_sample = int(start * sr), int(end * sr)
+            chunk = (
+                y16k[start_sample:end_sample]
+                if isinstance(y16k, np.ndarray)
+                else y16k(start_sample, end_sample)
+            )
             if len(chunk) < int(MIN_WINDOW_SEC * sr):
                 continue
             feat = _fbank(torch.from_numpy(chunk.astype(np.float32)))

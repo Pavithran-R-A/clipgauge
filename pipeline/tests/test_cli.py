@@ -1,6 +1,9 @@
+from types import SimpleNamespace
+
 import pytest
 
 from clipgauge_pipeline import __version__
+from clipgauge_pipeline import cli
 from clipgauge_pipeline.cli import main
 
 
@@ -31,3 +34,12 @@ def test_help_flag_remains_successful(capsys):
     assert 'usage: clipgauge' in stdout
     assert 'process a YouTube URL or local video file' in stdout
     assert stderr == ''
+
+
+def test_disk_warning_is_actionable_when_free_space_is_low(monkeypatch):
+    monkeypatch.setattr(cli.config, 'home_dir', lambda: cli.Path('C:/managed'))
+    monkeypatch.setattr(cli.shutil, 'disk_usage', lambda _: SimpleNamespace(free=2 * 1024**3))
+    warning = cli._disk_warning()
+    assert warning is not None
+    assert 'free' in warning
+    assert 'Setup & Storage' in warning

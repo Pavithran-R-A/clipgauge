@@ -6,6 +6,8 @@ proxy remains deterministic until a verified local SER bundle is shipped.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import numpy as np
 
 WINDOW_SEC = 5.0
@@ -32,7 +34,7 @@ def _windows(segments: list[dict], duration: float) -> list[tuple[float, float]]
 
 
 def arousal_curve_ser(
-    y16k: np.ndarray,
+    y16k: np.ndarray | Iterable[np.ndarray] | None,
     segments: list[dict],
     cache_dir: str,
     progress=None,

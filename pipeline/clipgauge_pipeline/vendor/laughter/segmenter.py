@@ -64,6 +64,64 @@ def lowpass(sig: np.ndarray, filter_order: int = 2, cutoff: float = 0.01) -> np.
     return scipy.signal.filtfilt(B, A, sig)
 
 
+def predict_probs_stream(
+    model: torch.nn.Module,
+    chunks,
+    total_samples: int,
+    device: torch.device,
+    batch_size: int = 256,
+    progress=None,
+) -> np.ndarray:
+    """Infer compact probabilities from bounded waveform chunks."""
+    overlap_samples = SAMPLE_RATE
+    expected = max(0, int(np.ceil(total_samples / HOP_LENGTH)) - WINDOW_FRAMES)
+    parts: list[np.ndarray] = []
+    position = 0
+    previous_tail = np.zeros(0, dtype=np.float32)
+    for incoming in chunks:
+        incoming = np.asarray(incoming, dtype=np.float32)
+        if len(incoming) == 0:
+            continue
+        prefix = previous_tail if position else np.zeros(0, dtype=np.float32)
+        segment = np.concatenate((prefix, incoming)) if len(prefix) else incoming
+        features = featurize_melspec(segment, SAMPLE_RATE)
+        probabilities = _predict_feature_probs(model, features, device, batch_size)
+        lead = int(round(len(prefix) / HOP_LENGTH))
+        offset = max(0, int(round(position / HOP_LENGTH)))
+        remaining = max(0, expected - offset)
+        usable = probabilities[lead : lead + remaining]
+        if len(usable):
+            parts.append(usable)
+        position += len(incoming)
+        previous_tail = incoming[-overlap_samples:].copy()
+        if progress:
+            progress(min(1.0, position / max(1, total_samples)))
+        del features, probabilities, usable, segment
+    return np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
+
+
+def _predict_feature_probs(
+    model: torch.nn.Module,
+    features: np.ndarray,
+    device: torch.device,
+    batch_size: int,
+) -> np.ndarray:
+    n = len(features) - WINDOW_FRAMES
+    if n <= 0:
+        return np.zeros(0, dtype=np.float32)
+    view = np.lib.stride_tricks.sliding_window_view(features, WINDOW_FRAMES, axis=0)
+    probs: list[np.ndarray] = []
+    with torch.inference_mode():
+        for i in range(0, n, batch_size):
+            batch = np.ascontiguousarray(
+                view[i : min(i + batch_size, n)].transpose(0, 2, 1)[:, np.newaxis, :, :],
+                dtype=np.float32,
+            )
+            preds = model(torch.from_numpy(batch).to(device)).cpu().numpy().squeeze(-1)
+            probs.append(np.atleast_1d(preds))
+    return np.concatenate(probs)
+
+
 def get_laughter_instances(
     probs: np.ndarray, threshold: float = 0.5, min_length: float = 0.2, fps: float = 100.0
 ) -> list[tuple[float, float]]:
@@ -107,3 +165,30 @@ def segment(
         conf = float(np.mean(probs[i0:i1]))
         out.append({"start": round(start, 3), "end": round(end, 3), "confidence": round(conf, 3)})
     return out
+
+
+def segment_stream(
+    model: torch.nn.Module,
+    chunks,
+    total_samples: int,
+    duration_sec: float,
+    device: torch.device,
+    threshold: float = 0.5,
+    min_length: float = 0.2,
+    progress=None,
+) -> list[dict]:
+    """Run the same post-processing without retaining the waveform/features."""
+    probs = predict_probs_stream(model, chunks, total_samples, device, progress=progress)
+    if len(probs) == 0 or duration_sec <= 0:
+        return []
+    fps = len(probs) / duration_sec
+    smoothed = lowpass(probs)
+    spans = get_laughter_instances(smoothed, threshold=threshold, min_length=min_length, fps=fps)
+    return [
+        {
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "confidence": round(float(np.mean(probs[int(start * fps) : max(int(start * fps) + 1, int(end * fps))])), 3),
+        }
+        for start, end in spans
+    ]

@@ -11,6 +11,7 @@ import argparse
 import base64
 import json
 import os
+import shutil
 import sys
 import time
 from dataclasses import replace
@@ -97,6 +98,18 @@ def _emit_result(jsonl: bool, payload: dict) -> None:
         print(json.dumps({"event": "result", **payload}), flush=True)
     else:
         print(json.dumps(payload, indent=2))
+
+
+def _disk_warning() -> str | None:
+    """Warn before long work when managed storage is getting tight."""
+    try:
+        free_bytes = shutil.disk_usage(config.home_dir().parent).free
+    except OSError:
+        return "Free disk space could not be measured. Check storage before a long run."
+    warning_threshold = 4 * 1024**3
+    if free_bytes < warning_threshold:
+        return f"Only {free_bytes / 1024**3:.1f} GiB is free. Long analysis may need more storage; review Setup & Storage before continuing."
+    return None
 
 
 def _preflight_terminal(jsonl: bool, job_id: str | None, code: str, message: str, retryable: bool = False) -> int:
@@ -669,6 +682,9 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
         print(json.dumps({"event": "job", "job_id": job.id, "attempt_id": attempt_id}), flush=True)
     else:
         print(f"job {job.id} → {job.dir}", file=sys.stderr)
+    warning = _disk_warning()
+    if warning:
+        emit("pipeline", -1, warning)
     try:
         results = queue.run_stages(job, _stages(), emit)
     except queue.StageError as err:
