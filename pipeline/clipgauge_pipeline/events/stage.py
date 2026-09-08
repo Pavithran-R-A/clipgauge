@@ -27,6 +27,7 @@ from .. import config
 from ..jobs.queue import Stage, StageContext, StageError, _atomic_write_json
 from ..memory import release_cpu_memory
 from ..models import managed, registry, specs
+from .. import protocol
 from ..render import ffmpeg_bin
 
 
@@ -55,7 +56,7 @@ def select_inference_device(torch_module, *, force_cpu: bool = False):
 
 class EventsStage(Stage):
     name = "events"
-    schema_version = 4  # v4: use verified CUDA for PANNs when available
+    schema_version = 5  # v5: bounded long-form channels and typed resource failures
 
     def artifacts_ok(self, ctx: StageContext, data: dict) -> bool:
         return (ctx.job_dir / "curves.json").exists()
@@ -73,7 +74,7 @@ class EventsStage(Stage):
         import numpy as np
         import torch
 
-        from ..audio.io import load_mono, resample
+        from ..audio.io import iter_mono, resample, sample_count
         from ..vendor.laughter import model as laugh_model
         from ..vendor.laughter import segmenter as laugh_seg
         from ..vendor.panns import models as panns_models
@@ -86,8 +87,8 @@ class EventsStage(Stage):
         bench: dict[str, float | str | int] = {"device": str(device)}
         events: list[dict] = []
 
-        y16k, _ = load_mono(audio16, 16000)
-        duration = len(y16k) / 16000.0
+        audio16_samples = sample_count(audio16)
+        duration = audio16_samples / 16000.0
 
         # --- Channel 1 (optional): jrgillick laughter specialist ----------
         # OFF by default — PANNs' laughter classes cover the bus at a
@@ -97,10 +98,16 @@ class EventsStage(Stage):
             ctx.emit(-1, "Detecting laughter (specialist)…")
             t0 = time.monotonic()
             ckpt = registry.ensure(specs.LAUGHTER, lambda f, m: ctx.emit(f * 0.05, m))
-            y8k = resample(y16k, 16000, 8000)
             lmodel = laugh_model.load_model(str(ckpt), device)
-            laughs = laugh_seg.segment(
-                lmodel, y8k, duration, device,
+            laughs = laugh_seg.segment_stream(
+                lmodel,
+                (
+                    resample(chunk, 16000, 8000)
+                    for chunk in iter_mono(audio16, 16000, chunk_samples=480_000)
+                ),
+                int(audio16_samples * 8000 / 16000),
+                duration,
+                device,
                 progress=lambda f: ctx.emit(0.05 + f * 0.3, "Detecting laughter (specialist)…"),
             )
             for item in laughs:
@@ -127,19 +134,26 @@ class EventsStage(Stage):
         wav32 = ctx.job_dir / "audio32k.wav"
         if not wav32.exists():
             _extract_wav(media, wav32, panns_models.SAMPLE_RATE)
-        y32k, _ = load_mono(wav32, panns_models.SAMPLE_RATE)
+        audio32_samples = sample_count(wav32)
         pmodel = panns_models.load_model(str(ckpt), device)
-        probs_by_type, fps = panns_channel.framewise_probs(
-            pmodel, y32k, device,
+        spans_by_type, fps = panns_channel.framewise_spans(
+            pmodel,
+            iter_mono(wav32, panns_models.SAMPLE_RATE, chunk_samples=int(panns_channel.CHUNK_SEC * panns_models.SAMPLE_RATE)),
+            device,
             progress=lambda f: ctx.emit(0.45 + f * 0.35, "Detecting audio events…"),
+            total_samples=audio32_samples,
+            on_memory_error=lambda payload: protocol.write_json_diagnostic(
+                ctx.job_dir,
+                "events",
+                {**payload, "duration_sec": round(duration, 3), "stage": "events"},
+            ),
         )
         del pmodel
         gc.collect()
         if device.type == "cuda":
             torch.cuda.empty_cache()
-        for etype, probs in probs_by_type.items():
-            enter, stay = panns_channel.THRESHOLDS.get(etype, (0.15, 0.08))
-            for start, end, peak in post.postprocess(probs, fps, enter=enter, stay=stay):
+        for etype, spans in spans_by_type.items():
+            for start, end, peak in spans:
                 events.append(
                     {
                         "type": etype,
@@ -150,20 +164,49 @@ class EventsStage(Stage):
                     }
                 )
         bench["panns_sec"] = round(time.monotonic() - t0, 1)
-        bench["panns_chunks"] = int(max(1, len(y32k) // (panns_models.SAMPLE_RATE * 30) + 1))
+        bench["panns_chunks"] = int(max(1, audio32_samples // (panns_models.SAMPLE_RATE * 30) + 1))
         wav32.unlink(missing_ok=True)  # 32k wav is only needed here
 
         # --- Channel 3: transcript long pauses ----------------------------
+        ctx.emit(0.81, "Finding pauses…")
         events.extend(dsp.long_pauses(asr["segments"]))
 
         # --- Fusion --------------------------------------------------------
-        ctx.emit(0.85, "Fusing event timeline…")
+        ctx.emit(0.84, "Fusing event timeline…")
         timeline = post.fuse(events)
 
         # --- Continuous curves (side file: big arrays stay out of the
         #     checkpoint JSON that other stages read constantly) ------------
         t0 = time.monotonic()
-        curves = dsp.energy_curves(y16k)
+        ctx.emit(0.86, "Analyzing energy and dynamics…")
+        try:
+            curves = dsp.energy_curves(
+                iter_mono(audio16, 16000, chunk_samples=160_000),
+                total_samples=audio16_samples,
+                progress=lambda fraction, message: ctx.emit(
+                    0.86 + (max(0.0, fraction) * 0.07 if fraction >= 0 else 0.0),
+                    message,
+                ),
+            )
+        except MemoryError as exc:
+            diagnostic_id = protocol.write_json_diagnostic(
+                ctx.job_dir,
+                "events",
+                {
+                    "code": "EVENT_DSP_MEMORY_EXHAUSTED",
+                    "duration_sec": round(duration, 3),
+                    "sample_rate": 16000,
+                    "frame_count": audio16_samples // int(16000 * dsp.GRID_SEC) + 1,
+                    "chunk_frames": dsp.ENERGY_CHUNK_FRAMES,
+                    "stage": "events",
+                    "error_type": type(exc).__name__,
+                },
+            )
+            raise StageError(
+                "Audio event analysis ran out of memory. Close other applications and retry; completed earlier stages remain reusable.",
+                code="EVENT_DSP_MEMORY_EXHAUSTED",
+                diagnostic_id=diagnostic_id,
+            ) from exc
         bench["curves_sec"] = round(time.monotonic() - t0, 1)
 
         # --- Arousal (DSP fallback; remote SER disabled) ------------------
@@ -172,7 +215,7 @@ class EventsStage(Stage):
         from . import ser
 
         arousal = ser.arousal_curve_ser(
-            y16k, asr["segments"], str(config.models_dir() / "ser"),
+            None, asr["segments"], str(config.models_dir() / "ser"),
             progress=lambda f: ctx.emit(0.9 + f * 0.08, "Estimating arousal…"),
         )
         arousal_source = "ser"
@@ -183,6 +226,7 @@ class EventsStage(Stage):
         curves["arousal"] = [round(float(v), 4) for v in arousal]
         curves["arousal_grid_sec"] = ser.GRID_SEC
         curves["arousal_source"] = arousal_source
+        ctx.emit(0.99, "Finalizing audio analysis…")
 
         curves_path = ctx.job_dir / "curves.json"
         _atomic_write_json(curves_path, curves)
@@ -191,7 +235,7 @@ class EventsStage(Stage):
         for event in timeline:
             by_type[event["type"]] = by_type.get(event["type"], 0) + 1
 
-        del y16k, y32k, curves, probs_by_type, events
+        del curves, spans_by_type, events
         release_cpu_memory()
         return {
             "timeline": timeline,

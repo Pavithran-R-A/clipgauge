@@ -1,10 +1,37 @@
 """DCASE post-processing chain + fusion tests — pure numpy, no models."""
 
 import numpy as np
+import random
 
 from clipgauge_pipeline.events import post
 from clipgauge_pipeline.events import stage as events_stage
 from clipgauge_pipeline.events.dsp import long_pauses
+
+
+def _reference_fuse(events, iou_threshold=post.FUSION_IOU):
+    out = []
+    for event in sorted(events, key=lambda e: (e["type"], e["start"])):
+        merged = False
+        for existing in out:
+            if existing["type"] != event["type"]:
+                continue
+            if post._iou(existing, event) >= iou_threshold:
+                existing["start"] = min(existing["start"], event["start"])
+                existing["end"] = max(existing["end"], event["end"])
+                sources = set(existing["sources"]) | set(event["sources"])
+                base = max(existing["confidence"], event["confidence"])
+                if len(sources) > len(existing["sources"]):
+                    base = min(0.99, base * post.AGREEMENT_BOOST)
+                existing["confidence"] = round(base, 3)
+                existing["sources"] = sorted(sources)
+                merged = True
+                break
+        if not merged:
+            out.append(dict(event, sources=sorted(event["sources"])))
+    for event in out:
+        event["start"] = round(event["start"], 3)
+        event["end"] = round(event["end"], 3)
+    return sorted(out, key=lambda e: e["start"])
 
 
 def test_hysteresis_enters_high_stays_low():
@@ -66,6 +93,24 @@ def test_fuse_disjoint_same_type_stay_separate():
     fused = post.fuse(events)
     assert len(fused) == 2
     assert all(len(e["sources"]) == 1 for e in fused)
+
+
+def test_optimized_fuse_matches_reference_on_randomized_inputs():
+    rng = random.Random(11)
+    for _ in range(100):
+        events = []
+        for index in range(rng.randint(0, 80)):
+            start = round(rng.random() * 60, 3)
+            events.append(
+                {
+                    "type": rng.choice(["laugh", "gasp", "shout"]),
+                    "start": start,
+                    "end": round(start + 0.1 + rng.random() * 3, 3),
+                    "confidence": round(0.1 + rng.random() * 0.89, 3),
+                    "sources": [rng.choice(["panns", "jrgillick", "transcript"])],
+                }
+            )
+        assert post.fuse(events) == _reference_fuse(events)
 
 
 def test_long_pauses_span_segments():

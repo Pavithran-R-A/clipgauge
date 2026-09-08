@@ -40,6 +40,7 @@ export default function App() {
   const [, setSetup] = useState<SetupState | null>(null)
   const [jobs, setJobs] = useState<JobSummary[]>([])
   const [activeJob, setActiveJob] = useState<string | null>(null)
+  const [activeDiagnosticId, setActiveDiagnosticId] = useState<string | null>(null)
   const [results, setResults] = useState<JobResults | null>(null)
   const [stages, setStages] = useState<Record<string, StageProgress>>({})
   const [running, setRunning] = useState(false)
@@ -65,6 +66,7 @@ export default function App() {
     activeAttemptRef.current = null
     setActiveJob(jobId)
     setResults(null)
+    setActiveDiagnosticId(null)
   }, [])
 
   const refreshJobs = useCallback(() => { api.listJobs().then(setJobs).catch(() => setJobs([])) }, [])
@@ -128,6 +130,7 @@ export default function App() {
       } else if (payload.event === 'progress' && payload.stage) {
         setStages((previous) => ({ ...previous, [payload.stage!]: { fraction: payload.fraction ?? -1, message: payload.message ?? '', displayStage: payload.display_stage, operation: payload.operation, indeterminate: payload.indeterminate ?? (payload.fraction ?? -1) < 0, elapsedSeconds: payload.elapsed_seconds, stageElapsedSeconds: payload.stage_elapsed_seconds, etaSeconds: payload.eta_seconds, bytesDone: payload.bytes_done, bytesTotal: payload.bytes_total, bytesPerSecond: payload.bytes_per_second, accelerator: payload.accelerator, oneTimeDownload: payload.one_time_download } }))
       } else if (payload.event === 'terminal') {
+        setActiveDiagnosticId(payload.diagnostic_id ?? null)
         setRunning(false)
         setCancelling(false)
         setRunStartedAt(null)
@@ -139,7 +142,7 @@ export default function App() {
         } else if (payload.ok && activeJobRef.current) {
           setRunState('SUCCEEDED')
           setRunNotice(payload.code === 'NO_RECOMMENDED_CLIPS' ? (payload.message ?? 'No recommended clips were found.') : null)
-          api.jobResults(activeJobRef.current).then((result) => { setResults(result); setView('review') }).catch((error) => setRunError(String(error)))
+          api.jobResults(activeJobRef.current).then((result) => { setActiveDiagnosticId(result.score?.diagnostic_id ?? payload.diagnostic_id ?? null); setResults(result); setView('review') }).catch((error) => setRunError(String(error)))
         } else if (!payload.ok) {
           setRunState('FAILED')
           setRunErrorCode(payload.code ?? null)
@@ -154,7 +157,7 @@ export default function App() {
         setRunNotice(null)
         setRunState(payload.ok ? 'SUCCEEDED' : 'FAILED')
         refreshJobs()
-        if (payload.ok && activeJobRef.current && payload.stages) api.jobResults(activeJobRef.current).then((result) => { setResults(result); setView('review') }).catch((error) => setRunError(String(error)))
+        if (payload.ok && activeJobRef.current && payload.stages) api.jobResults(activeJobRef.current).then((result) => { setActiveDiagnosticId(result.score?.diagnostic_id ?? payload.diagnostic_id ?? null); setResults(result); setView('review') }).catch((error) => setRunError(String(error)))
         else if (!payload.ok) setRunError(String(payload.message ?? payload.error ?? 'The video could not be processed.'))
       } else if (payload.event === 'exited') {
         setRunning(false)
@@ -207,6 +210,7 @@ export default function App() {
   const openJob = useCallback(async (jobId: string) => {
     const result = await api.jobResults(jobId)
     setActiveJob(jobId)
+    setActiveDiagnosticId(result.score?.diagnostic_id ?? null)
     setResults(result)
     if (result.render?.outputs?.length || result.outcome === 'SUCCESS_NO_RECOMMENDATIONS') setView('review')
   }, [])
@@ -282,7 +286,7 @@ export default function App() {
   else if (section === 'providers') content = <ProviderCenter selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onBack={() => setSection('create')} onOpenSetup={() => setSection('setup')} />
   else if (section === 'integrations') content = <Integrations onBack={() => setSection('create')} onOpenLoop={() => setView('loop')} />
   else if (section === 'privacy') content = <PrivacyPanel provider={selectedProvider} onBack={() => setSection('create')} />
-  else if (section === 'help') content = <SupportPage onBack={() => setSection('create')} onNavigate={(next) => setSection(next)} provider={selectedProvider} />
+  else if (section === 'help') content = <SupportPage onBack={() => setSection('create')} onNavigate={(next) => setSection(next)} provider={selectedProvider} currentJobId={activeJob} currentDiagnosticId={activeDiagnosticId} />
   else content = <About onBack={() => setSection('create')} />
 
   return <AppShell active={section} onNavigate={navigate} jobs={jobs} running={running} onOpenJob={openJob} onResume={resumeFromSessions} onSupport={() => setSection('help')}>{content}</AppShell>

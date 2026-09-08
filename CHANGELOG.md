@@ -2,6 +2,14 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.14] - 2026-09-08
+
+ClipGauge v0.5.14 bounds long-form analysis memory and reports actionable resource failures.
+
+- Bound event DSP, PANNs, laughter, and diarization memory for long recordings.
+- Added typed resource failures, progress detail, resume-safe Events recompute, and disk-pressure warnings.
+- Added truthful GPU terminal states and support bundles scoped to the active job.
+
 ## [0.5.13] — 2026-09-07
 
 ClipGauge v0.5.13 makes zero-recommendation analysis explicit and preserves valid finalists through camera and render.
