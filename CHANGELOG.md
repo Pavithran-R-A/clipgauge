@@ -2,6 +2,15 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.15] - 2026-09-08
+
+ClipGauge v0.5.15 hardens local scoring recovery, YouTube fallback, and Windows qualification.
+
+- Added bounded local-scoring recovery with truthful terminal diagnostics.
+- Preserved valid partial results during recoverable scoring failures.
+- Hardened public YouTube metadata recovery without cookie requirements.
+- Added Tauri bridge readiness polling and Windows contract coverage.
+
 ## [0.5.14] - 2026-09-08
 
 ClipGauge v0.5.14 bounds long-form analysis memory and reports actionable resource failures.
