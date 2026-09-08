@@ -217,7 +217,7 @@ wheels = [
 
 [[package]]
 name = "clipgauge-pipeline"
-version = "0.5.14"
+version = "0.5.15"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
