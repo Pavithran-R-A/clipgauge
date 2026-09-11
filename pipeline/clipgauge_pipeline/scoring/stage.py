@@ -519,7 +519,7 @@ def rank_scored_candidates(entries: list[dict]) -> list[dict]:
 
 class ScoreStage(Stage):
     name = "score"
-    schema_version = 29  # v29: bounded payoff-tail ranking compensation
+    schema_version = 30  # v30: transcript-verified candidate evidence hints
 
     def dependency_settings(self, ctx: StageContext) -> dict:
         settings = super().dependency_settings(ctx)
@@ -628,6 +628,12 @@ class ScoreStage(Stage):
             context = {
                 "duration": end - start,
                 "events_desc": _events_desc(window_events),
+                "candidate_evidence": {
+                    "hook_sentence": cand.get("hook_sentence"),
+                    "payoff_sentence": cand.get("payoff_sentence"),
+                    "story_shape": cand.get("story_shape"),
+                    "central_premise": cand.get("central_premise"),
+                },
             }
             try:
                 t1_calls += 1

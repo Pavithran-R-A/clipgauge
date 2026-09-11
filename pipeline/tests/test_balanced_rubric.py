@@ -62,6 +62,25 @@ def test_balanced_prompt_calibrates_rich_editorial_scores():
     assert "quality_tier must agree" in prompt
 
 
+def test_balanced_prompt_exposes_verifiable_story_hints():
+    prompt = rubric.t1_prompt(
+        "S0001 (speaker 0): The result is finally revealed.",
+        {
+            "duration": 12,
+            "candidate_evidence": {
+                "hook_sentence": "Why did this happen?",
+                "payoff_sentence": "The result is finally revealed.",
+                "story_shape": "question_answer",
+            },
+        },
+    )
+
+    assert "algorithmic hints" in prompt.lower()
+    assert "Why did this happen?" in prompt
+    assert "The result is finally revealed." in prompt
+    assert "verify against the transcript" in prompt.lower()
+
+
 def test_contradictory_balanced_scores_use_independent_floor():
     quality = short_quality.assess(
         "This reveal answers the question completely.",

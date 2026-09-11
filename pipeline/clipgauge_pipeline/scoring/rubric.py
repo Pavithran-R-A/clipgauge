@@ -176,11 +176,34 @@ def t1_prompt(transcript_text: str, context: dict) -> str:
     numbers it will later be checked against. Judge and evidence stay
     independent; that's what makes the cross-validation meaningful."""
     events_desc = context.get("events_desc", "none detected")
+    candidate_evidence = context.get("candidate_evidence")
+    hint_lines: list[str] = []
+    if isinstance(candidate_evidence, dict):
+        for label, key in (
+            ("detected opening", "hook_sentence"),
+            ("detected payoff", "payoff_sentence"),
+            ("detected story shape", "story_shape"),
+            ("detected premise", "central_premise"),
+        ):
+            value = candidate_evidence.get(key)
+            if value is None or not str(value).strip():
+                continue
+            compact = " ".join(str(value).split())[:400]
+            hint_lines.append(f"- {label}: {compact}")
+    hints = ""
+    if hint_lines:
+        hints = (
+            "\nAlgorithmic hints are not ground truth. "
+            "Verify against the transcript before using them.\n"
+            + "\n".join(hint_lines)
+            + "\n"
+        )
     return (
         "You are rating a candidate short-form clip cut from a longer video. "
         "Rate ONLY what is in this transcript — do not assume missing context makes it better.\n\n"
         f"Speakers and transcript ({context.get('duration', 0):.0f} seconds):\n"
         f"{transcript_text}\n\n"
+        f"{hints}"
         f"Audio events detected in this span: {events_desc}\n\n"
         "Score each dimension honestly. Most clips are mediocre; 8+ on any "
         "dimension should be rare. hook rates ONLY the first ~3 seconds. "
