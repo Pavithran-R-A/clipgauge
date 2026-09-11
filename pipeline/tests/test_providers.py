@@ -62,6 +62,29 @@ def test_cache_identity_includes_resolved_model_and_contract_versions():
     assert providers.cache_key(auto, request, actual_model="model-a", rubric_version="r1") != providers.cache_key(auto, request, actual_model="model-a", rubric_version="r2")
 
 
+def test_local_scoring_generation_uses_stable_seed():
+    adapter = providers.ProviderAdapter(profile(kind="clipgauge-local"))
+    captured: dict[str, providers.InferenceRequest] = {}
+
+    def fake_infer(request, *, use_cache=True):
+        captured["request"] = request
+        return providers.InferenceResult(
+            data={"ok": True},
+            provider_profile_id=adapter.profile.id,
+            provider_kind=adapter.profile.kind,
+            model=adapter.model,
+            capabilities_used={},
+            degraded_signals=[],
+            structured_level="native_schema",
+            latency_ms=0,
+        )
+
+    adapter.infer = fake_infer
+    adapter.generate_json("return ok", {"type": "object"}, purpose="scoring")
+
+    assert captured["request"].seed == 0
+
+
 def test_openai_compatible_native_schema_and_secret_never_enters_url(monkeypatch):
     seen: dict[str, object] = {}
 
@@ -86,6 +109,30 @@ def test_openai_compatible_native_schema_and_secret_never_enters_url(monkeypatch
     assert "secret-value" not in str(seen["url"])
     body = seen["json"]
     assert body["response_format"]["type"] == "json_schema"
+
+
+def test_local_scoring_sends_stable_seed(monkeypatch):
+    seen: dict[str, object] = {}
+
+    def fake_post(url, *, headers, json, timeout, follow_redirects):
+        seen["json"] = json
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"ok": true}'}}]},
+        )
+
+    monkeypatch.setattr(providers.httpx, "post", fake_post)
+    adapter = providers.OpenAICompatibleAdapter(
+        profile(kind="clipgauge-local"),
+        "secret-value",
+    )
+    adapter.generate_json(
+        "return ok",
+        {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
+        purpose="scoring",
+    )
+
+    assert seen["json"]["seed"] == 0
 
 
 def test_groq_qwen_scoring_caps_output_budget_for_provider_limits(monkeypatch):

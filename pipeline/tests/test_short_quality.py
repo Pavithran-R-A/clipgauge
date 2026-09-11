@@ -360,6 +360,24 @@ def test_complete_question_can_lack_semantic_closure():
     assert "WEAK_SEMANTIC_CLOSURE" in quality["quality_flags"]
 
 
+def test_explicit_model_closure_overrides_story_shape_inference():
+    quality = short_quality.assess(
+        "The contract was signed and the team celebrated.",
+        [],
+        8.0,
+        llm={
+            "story_shape": "open_ended",
+            "open_loop_at_end": False,
+            "semantic_closure": 8,
+            "payoff_relevance_to_premise": 8,
+            "quality_tier": "GOOD",
+        },
+    )
+
+    assert quality["open_loop_at_end"] is False
+    assert "WEAK_SEMANTIC_CLOSURE" not in quality["quality_flags"]
+
+
 def test_late_topic_is_not_a_relevant_payoff():
     quality = short_quality.assess(
         "The bunker has rooms and a refrigerator. The 100-day challenge asks contestants to win money?",

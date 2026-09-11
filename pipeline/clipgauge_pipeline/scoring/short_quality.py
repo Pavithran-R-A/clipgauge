@@ -342,9 +342,11 @@ def assess(
         str(text).rstrip().endswith(_PUNCTUATION)
         or (ending_evidence or {}).get("semantic_complete", False)
     )
-    open_loop_at_end = bool(
-        str(text).rstrip().endswith("?")
-        or story_name == "open_ended"
+    model_open_loop = fields.get("open_loop_at_end")
+    open_loop_at_end = (
+        model_open_loop
+        if isinstance(model_open_loop, bool)
+        else bool(str(text).rstrip().endswith("?") or story_name == "open_ended")
     )
     semantic_closure = 82.0 if syntactic_complete else 35.0
     if open_loop_at_end:

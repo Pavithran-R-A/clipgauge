@@ -271,6 +271,7 @@ class InferenceRequest:
     schema: dict[str, Any]
     images: list[bytes] = field(default_factory=list)
     temperature: float = 0.2
+    seed: int | None = None
     purpose: str = "scoring"
     job_id: str | None = None
     require_vision: bool = False
@@ -434,6 +435,7 @@ class ProviderAdapter:
                 prompt=prompt,
                 schema=schema,
                 images=images or [],
+                seed=0 if purpose == "scoring" and self.profile.kind == "clipgauge-local" else None,
                 purpose=purpose,
                 job_id=job_id,
             )
@@ -676,6 +678,7 @@ def cache_key(
         "schema": request.schema,
         "rubric_version": rubric_version,
         "temperature": request.temperature,
+        "seed": request.seed,
         "purpose": request.purpose,
         "require_vision": request.require_vision,
     }
@@ -890,6 +893,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             "temperature": request.temperature,
             "stream": False,
         }
+        if request.seed is not None and self.profile.kind == "clipgauge-local":
+            body["seed"] = request.seed
         if request.purpose == "scoring" and self.profile.kind == "groq" and self.model.casefold().startswith("qwen/"):
             body["max_tokens"] = GROQ_QWEN_SCORING_MAX_OUTPUT_TOKENS
         if content != request.prompt:
