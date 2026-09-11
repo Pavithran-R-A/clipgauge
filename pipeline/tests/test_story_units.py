@@ -335,6 +335,39 @@ def test_dedupe_keeps_a_strong_new_topic_separate():
     assert [item["candidate_id"] for item in result] == ["setup", "game"]
 
 
+def test_dedupe_preserves_earlier_payoff_aligned_opening():
+    def candidate(candidate_id: str, start: float, end: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": "shared-anchor",
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A result is revealed after setup.",
+            "sentence_ids": ["S1", "S2", "S3"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": 0.9 if start > 20 else 0.8,
+            "information_density": 1.0,
+            "curve_score": 0.5,
+            "hook_strength": 0.7,
+            "payoff_candidate": True,
+            "payoff_boundary_explicit": True,
+            "payoff_time": 39.0,
+            "topic_coherence": 90.0,
+            "topic_key": ["result", "setup"],
+            "payoff_sentence": "The result is revealed.",
+            "start_topic_boundary": 0.8,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("late-opening", 38.0, 66.0),
+        candidate("setup-opening", 15.0, 62.0),
+    ], limit=10)
+
+    assert [item["candidate_id"] for item in result] == ["setup-opening"]
+
+
 def test_anchor_selection_spreads_across_long_sources():
     segments = [
         {

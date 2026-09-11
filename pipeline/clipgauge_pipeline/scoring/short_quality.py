@@ -555,8 +555,10 @@ def refine_boundaries(
     fields: dict[str, Any] | None = None,
     *,
     max_extension: float = 7.0,
+    preserve_candidate_opening: bool = False,
+    preserve_candidate_payoff: bool = False,
 ) -> tuple[float, float]:
-    """Apply bounded T1 offsets, then snap against aligned words."""
+    """Apply bounded T1 offsets, preserving trusted candidate evidence."""
     words = [
         word for segment in segments
         for word in segment.get("words", [])
@@ -576,6 +578,10 @@ def refine_boundaries(
             requested_end = start + float(offset_end)
         if requested_end <= requested_start:
             requested_start, requested_end = start, end
+    if preserve_candidate_opening:
+        requested_start = min(requested_start, start)
+    if preserve_candidate_payoff:
+        requested_end = max(requested_end, end)
     if requested_start > start and fields:
         setup_strength = float(fields.get("setup_strength", 0.0) or 0.0)
         standalone = float(fields.get("standalone_comprehension", 0.0) or 0.0)

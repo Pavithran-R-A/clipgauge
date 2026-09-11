@@ -146,6 +146,41 @@ def test_refine_boundaries_recovers_deterministic_landing_setup():
     assert end >= 426.0
 
 
+def test_refine_boundaries_preserves_trusted_candidate_edges():
+    segments = [
+        {
+            "start": 10.0,
+            "end": 20.0,
+            "text": "The reveal starts here and ends now.",
+            "words": [
+                {"word": word, "start": 10.0 + index, "end": 10.8 + index}
+                for index, word in enumerate("The reveal starts here and ends now.".split())
+            ],
+        },
+        {
+            "start": 20.0,
+            "end": 30.0,
+            "text": "Everyone reacts to the result!",
+            "words": [
+                {"word": word, "start": 20.0 + index, "end": 20.8 + index}
+                for index, word in enumerate("Everyone reacts to the result!".split())
+            ],
+        },
+    ]
+
+    start, end = short_quality.refine_boundaries(
+        segments,
+        10.0,
+        30.0,
+        {"recommended_start_offset": 6.0, "recommended_end_offset": 8.0},
+        preserve_candidate_opening=True,
+        preserve_candidate_payoff=True,
+    )
+
+    assert start == 10.0
+    assert end >= 24.8
+
+
 def test_quality_ranking_is_deterministic():
     items = [
         {"start": 4.0, "end": 8.0, "short_quality": {"score": 80}},

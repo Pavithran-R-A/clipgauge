@@ -328,7 +328,7 @@ def _story_metadata(candidate: dict) -> dict:
         "topic_shift_count", "standalone_comprehension", "story_shape", "syntactic_complete",
         "story_variant", "topic_key", "boundary_confidence", "editorial_signal",
         "hook_strength", "information_density",
-        "duration_fit",
+        "duration_fit", "start_topic_boundary", "payoff_boundary_explicit", "source_final_boundary",
     )
     return {key: candidate.get(key) for key in keys if key in candidate}
 
@@ -488,7 +488,7 @@ def rank_scored_candidates(entries: list[dict]) -> list[dict]:
 
 class ScoreStage(Stage):
     name = "score"
-    schema_version = 27  # v27: diversity-aware scored review ordering
+    schema_version = 28  # v28: preserve trusted boundaries during scoring
 
     def dependency_settings(self, ctx: StageContext) -> dict:
         settings = super().dependency_settings(ctx)
@@ -855,6 +855,10 @@ class ScoreStage(Stage):
                 original_start,
                 original_end,
                 entry.get("t1_raw"),
+                preserve_candidate_opening=float(entry.get("start_topic_boundary") or 0.0) >= 0.62,
+                preserve_candidate_payoff=bool(
+                    entry.get("payoff_boundary_explicit") or entry.get("source_final_boundary")
+                ),
             )
             refined_end, segment_boundary = _repair_to_segment_boundary(
                 segments, refined_start, refined_end

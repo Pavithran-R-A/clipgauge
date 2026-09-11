@@ -587,11 +587,30 @@ def cheap_filter_and_dedupe(
                 and float(candidate.get("payoff_time") or 0.0)
                 > float(other.get("payoff_time") or 0.0)
             )
+            better_opening_boundary = (
+                candidate.get("payoff_boundary_explicit")
+                and other.get("payoff_boundary_explicit")
+                and candidate.get("anchor_sentence_id") == other.get("anchor_sentence_id")
+                and float(candidate["start"]) + 3.0 < float(other["start"])
+                and abs(
+                    float(candidate.get("payoff_time") or 0.0)
+                    - float(other.get("payoff_time") or 0.0)
+                ) <= 2.0
+                and float(candidate["end"]) - float(candidate.get("payoff_time") or 0.0) <= 30.0
+            )
             final_payoff_boundary = (
                 candidate.get("source_final_boundary")
                 and candidate.get("payoff_boundary_explicit")
                 and float(candidate["end"]) > float(other["end"])
             )
+            if better_opening_boundary:
+                kept[duplicate_index] = candidate
+                previous_entry = audit_entries.get(id(other))
+                if previous_entry is not None:
+                    previous_entry["status"] = "rejected"
+                    previous_entry["rejection_reasons"] = ["DUPLICATE_STORY_REPLACED"]
+                record(candidate, [], "kept")
+                continue
             if strong_new_topic or better_payoff_boundary or final_payoff_boundary:
                 duplicate_index = None
             if not same_start and _iou(candidate, other) < 0.35 and not shared_sentence_unit:
