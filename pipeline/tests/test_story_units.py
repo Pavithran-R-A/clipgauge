@@ -311,7 +311,7 @@ def test_dedupe_keeps_a_strong_new_topic_separate():
             "start": start,
             "end": start + 30.0,
             "syntactic_complete": True,
-            "central_premise": "The NFL game begins.",
+            "central_premise": "The tournament game begins.",
             "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
             "editorial_signal": True,
             "story_variant": "det",
@@ -322,8 +322,8 @@ def test_dedupe_keeps_a_strong_new_topic_separate():
             "payoff_candidate": True,
             "payoff_time": start + 28.0,
             "topic_coherence": 90.0,
-            "topic_key": ["nfl", "game"],
-            "payoff_sentence": "The NFL game begins.",
+            "topic_key": ["tournament", "game"],
+            "payoff_sentence": "The tournament game begins.",
             "start_topic_boundary": boundary,
         }
 
@@ -674,7 +674,7 @@ def test_positive_story_has_cheap_payoff_evidence():
 def test_common_outcome_phrases_have_cheap_payoff_evidence():
     units = build_sentence_units(_segments([
         "The pilot is too close to the runway.",
-        "I landed a plane!",
+        "I won the final round!",
     ], seconds=5.0))
 
     candidate = _story_candidate(units, units[0], "outcome")
@@ -683,10 +683,34 @@ def test_common_outcome_phrases_have_cheap_payoff_evidence():
     assert candidate["payoff_candidate"] is True
 
 
+def test_domain_agnostic_outcome_verbs_have_cheap_payoff_evidence():
+    units = build_sentence_units(_segments([
+        "Can I finish the final round?",
+        "I won the final round!",
+    ], seconds=5.0))
+
+    candidate = _story_candidate(units, units[0], "generic-outcome")
+
+    assert candidate is not None
+    assert candidate["payoff_candidate"] is True
+
+
+def test_editorial_signal_accepts_generic_outcome_language():
+    units = build_sentence_units(_segments([
+        "The team won the final match.",
+        "The result surprised everyone.",
+    ], seconds=5.0))
+
+    candidate = _story_candidate(units, units[0], "generic-signal")
+
+    assert candidate is not None
+    assert candidate["editorial_signal"] is True
+
+
 def test_explicit_payoff_can_close_a_contextual_opening():
     units = build_sentence_units(_segments([
-        "They say if you get up by one hundred, I can play.",
-        "And since this is the only NFL game I'll ever be a part of, the team let me lead them out the tunnel.",
+        "Can I compete in the final round?",
+        "I finally won the final round and led the team out.",
     ], seconds=5.0))
 
     candidate = _story_candidate(units, units[0], "contextual-outcome")

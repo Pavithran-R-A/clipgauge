@@ -41,6 +41,16 @@ _FILLER_STARTS = {"all", "alright", "okay", "ok", "so", "well", "yeah", "yo"}
 _PREMISE_WORDS = {"billion", "million", "secret", "dangerous", "hidden", "survive", "infinite", "classified"}
 _DEICTIC_WORDS = {"this", "that", "these", "those", "he", "she", "they", "it", "there", "here"}
 _CONTEXT_REFERENCES = ("as i said", "like before", "again", "then", "so far", "as before")
+_OUTCOME_PHRASES = ("turns out", "ended up", "managed to")
+_OUTCOME_VERBS = {
+    "built", "completed", "discovered", "earned", "failed", "finished", "found",
+    "landed", "lost", "made", "passed", "received", "signed", "sold", "won",
+}
+_EDITORIAL_TERMS = {
+    "challenge", "complete", "completed", "discovered", "earned", "failed", "final",
+    "finished", "found", "game", "job", "money", "passed", "price", "result",
+    "signed", "survive", "team", "won", "worth",
+}
 
 
 @dataclass(frozen=True)
@@ -97,6 +107,17 @@ def _tokens(text: str) -> frozenset[str]:
         if token and token not in _STOPWORDS and len(token) > 2:
             tokens.add(token)
     return frozenset(tokens)
+
+
+def _has_explicit_outcome(text: str) -> bool:
+    """Recognize generic completed outcomes without domain-specific phrases."""
+    normalized = text.lower().strip()
+    if any(phrase in normalized for phrase in _OUTCOME_PHRASES):
+        return True
+    subject = r"(?:i|we|they|he|she|you|the team|the pilot|the speaker)"
+    modifier = r"(?:(?:actually|finally|successfully|just|also|then)\s+)*"
+    verbs = "|".join(sorted(_OUTCOME_VERBS))
+    return bool(re.search(rf"\b{subject}\s+{modifier}(?<![\w'])({verbs})(?![\w'])", normalized))
 
 
 def _scene_id(start: float, scene_times: list[float]) -> int:
@@ -287,10 +308,7 @@ def _payoff_evidence(
     starts_with_resolution = text.startswith((
         "because", "which means", "that means", "that's why", "therefore", "as a result",
     ))
-    explicit_outcome = any(phrase in text for phrase in (
-        "turns out", "ended up", "managed to", "real contract",
-        "join the nfl", "only nfl game", "landed a plane", "found gold",
-    ))
+    explicit_outcome = _has_explicit_outcome(text)
     if starts_with_resolution or explicit_outcome:
         confidence += 0.45
         reasons.append("cause_or_outcome")
@@ -403,13 +421,7 @@ def _story_candidate(
         _payoff_evidence(payoff_unit, units[:units.index(payoff_unit)])[1]
         if payoff_unit is not None else 0.0
     )
-    explicit_payoff = bool(
-        payoff_unit is not None
-        and any(phrase in payoff_unit.text.lower() for phrase in (
-            "real contract", "join the nfl", "only nfl game",
-            "landed a plane", "found gold",
-        ))
-    )
+    explicit_payoff = bool(payoff_unit is not None and _has_explicit_outcome(payoff_unit.text))
     coherence = round(100.0 * sum(1.0 - min(1.0, unit.topic_boundary_before) for unit in units[1:]) / max(1, len(units) - 1), 1)
     topic_shifts = len({unit.topic_id for unit in units}) - 1
     start_words = set(_TOKEN_RE.findall(first.text.lower()))
@@ -429,9 +441,7 @@ def _story_candidate(
         any(char.isdigit() for char in " ".join(unit.text for unit in units))
         or any("?" in unit.text for unit in units)
         or any(set(_TOKEN_RE.findall(unit.text.lower())) & (_REACTION_WORDS | {"secret", "dangerous", "survive", "infinite"}) for unit in units)
-        or any(phrase in unit.text.lower() for unit in units for phrase in (
-            "game day", "nfl game", "official nfl player",
-        ))
+        or any(set(_TOKEN_RE.findall(unit.text.lower())) & _EDITORIAL_TERMS for unit in units)
         or any(unit.audio_events for unit in units)
     )
     return {
