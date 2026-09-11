@@ -402,6 +402,8 @@ class Stage:
                     "provider_model",
                     "provider_endpoint_identity",
                     "provider_capabilities",
+                    "quality_mode",
+                    "output_preference",
                 )
             }
         if self.name == "camera":

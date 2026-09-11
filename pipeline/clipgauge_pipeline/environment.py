@@ -7,6 +7,7 @@ import json
 import platform
 import sys
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -45,16 +46,25 @@ def expected() -> dict[str, Any]:
 
 def _write(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
+    temporary: Path | None = None
     try:
-        with temporary.open("w", encoding="utf-8") as handle:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
             handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        temporary.replace(path)
+        os.replace(temporary, path)
+        temporary = None
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def write_identity(data_root: Path | None = None) -> dict[str, Any]:

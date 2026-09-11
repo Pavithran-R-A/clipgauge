@@ -1,5 +1,24 @@
 """Stage 1A terminal-protocol regressions; intentionally added before fixes."""
 
+import pytest
+
+from clipgauge_pipeline import protocol
+
+
+def test_diagnostic_write_cleans_failed_temporary(monkeypatch, tmp_path):
+    destination = tmp_path / "diagnostic.json"
+    destination.write_text("previous", encoding="utf-8")
+
+    def fail_replace(*_args):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(protocol.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        protocol._atomic_write_text(destination, "new")
+
+    assert destination.read_text(encoding="utf-8") == "previous"
+    assert list(tmp_path.glob(".diagnostic.json.*.tmp")) == []
+
 import json
 import os
 from pathlib import Path
@@ -27,6 +46,7 @@ def _events(capsys):
 
 
 def _run(monkeypatch, stage, source="/tmp/input.mp4"):
+    monkeypatch.setattr(cli, "_disk_block", lambda _source: None)
     monkeypatch.setattr(cli, "_stages", lambda: [stage])
     return cli.main(["--jsonl", "run", source])
 
@@ -205,6 +225,7 @@ def test_real_ingest_translates_fake_ytdlp_failure(monkeypatch, tmp_path, capsys
     from clipgauge_pipeline.ingest import stage as ingest_stage
 
     fake = _fake_ytdlp(tmp_path, "video unavailable after extractor failure")
+    monkeypatch.setattr(cli, "_disk_block", lambda _source: None)
     monkeypatch.setattr(ingest_stage.ytdlp, "ensure_ytdlp", lambda _progress: fake)
     monkeypatch.setattr(cli, "_stages", lambda: [ingest_stage.IngestStage()])
     code = cli.main(["--jsonl", "run", "https://example.test/video"])

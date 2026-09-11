@@ -10,8 +10,8 @@ from pathlib import Path
 
 import httpx
 
-from . import config, environment, hardware, local_runtime, protocol, readiness, runtime
-from .ingest import ytdlp
+from . import config, environment, hardware, local_runtime, protocol, readiness, runtime, storage_estimate
+from .ingest import normalize, ytdlp
 from .models import registry, specs  # noqa: F401 - register concrete models
 from .render import ffmpeg_bin
 from .scoring import providers as providers_mod
@@ -227,6 +227,40 @@ def _storage_estimate(checks: list[dict], free_bytes: int | None) -> dict:
     }
 
 
+def _source_storage_check(checks: list[dict], source: str | None, free_bytes: int | None) -> None:
+    if not source or _is_youtube_source(source) or free_bytes is None:
+        return
+    try:
+        source_path = Path(source).expanduser().resolve()
+        source_bytes = max(0, source_path.stat().st_size)
+    except OSError:
+        return
+    try:
+        duration_seconds = normalize.probe(source_path).duration_sec
+    except (OSError, ValueError, normalize.FfmpegError):
+        duration_seconds = None
+    estimate = storage_estimate.for_source(source_bytes, duration_seconds=duration_seconds)
+    required_bytes = int(estimate["required_bytes"])
+    details = {**estimate, "available_bytes": free_bytes}
+    if free_bytes < required_bytes:
+        _check(
+            checks,
+            "source-storage",
+            "blocked",
+            f"This source needs about {required_bytes / 1024**3:.1f} GiB of free space for safe analysis.",
+            "Free disk space or choose a smaller source before starting.",
+            **details,
+        )
+    else:
+        _check(
+            checks,
+            "source-storage",
+            "ready",
+            "The source has enough estimated working space.",
+            **details,
+        )
+
+
 def run(selected_llm: providers_mod.ProviderProfile | str = "gemini", source: str | None = None) -> dict:
     checks: list[dict] = []
     system = platform.system()
@@ -242,6 +276,7 @@ def run(selected_llm: providers_mod.ProviderProfile | str = "gemini", source: st
             _check(checks, "disk", "ready", "Sufficient free disk space is available for setup.", free_bytes=usage.free)
     except OSError as error:
         _check(checks, "disk", "warning", "Free disk space could not be measured.", "Check the volume manually before starting a large render.", error=str(error))
+    _source_storage_check(checks, source, free_bytes)
     _writable_root(checks)
     runtime_identity = environment.status(config.home_dir())
     _check(

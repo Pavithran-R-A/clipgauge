@@ -1,6 +1,26 @@
 import json
 
-from clipgauge_pipeline import preflight
+from clipgauge_pipeline import preflight, storage_estimate
+
+
+def test_source_storage_estimate_accounts_for_working_space_components():
+    estimate = storage_estimate.for_source(2 * 1024**3, duration_seconds=600)
+
+    assert estimate["source_copy_bytes"] == 2 * 1024**3
+    assert estimate["temporary_audio_bytes"] == 600 * 32_000
+    assert estimate["checkpoint_bytes"] == 256 * 1024**2
+    assert estimate["render_bytes"] == 1 * 1024**3
+    assert estimate["safety_margin_bytes"] > 0
+    assert estimate["required_bytes"] == sum(
+        estimate[key]
+        for key in (
+            "source_copy_bytes",
+            "temporary_audio_bytes",
+            "checkpoint_bytes",
+            "render_bytes",
+            "safety_margin_bytes",
+        )
+    )
 
 
 def test_preflight_aggregates_blocked_state(monkeypatch, tmp_path):
@@ -31,6 +51,19 @@ def test_preflight_warning_is_not_blocked(monkeypatch, tmp_path):
     monkeypatch.setenv("CLIPGAUGE_GEMINI_API_KEY", "test-key")
     result = preflight.run("gemini")
     assert result["state"] == "warning"
+
+
+def test_preflight_blocks_source_storage_shortfall(monkeypatch, tmp_path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"0" * (2 * 1024 * 1024))
+    monkeypatch.setattr(preflight.normalize, "probe", lambda _path: type("Probe", (), {"duration_sec": 600.0})())
+    checks = []
+    preflight._source_storage_check(checks, str(source), 400 * 1024 * 1024)
+    assert checks[0]["name"] == "source-storage"
+    assert checks[0]["state"] == "blocked"
+    assert checks[0]["details"]["source_bytes"] == 2 * 1024 * 1024
+    assert checks[0]["details"]["duration_seconds"] == 600.0
+    assert checks[0]["details"]["temporary_audio_bytes"] == 600 * 32_000
 
 
 def test_ollama_probe_is_loopback_and_reports_missing_models(monkeypatch):

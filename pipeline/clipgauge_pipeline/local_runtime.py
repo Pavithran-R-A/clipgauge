@@ -474,7 +474,11 @@ class LocalRuntime:
                     except (httpx.HTTPError, ValueError, TypeError, KeyError):
                         slots_keys = []
                         slots_status = None
-                    inference = self.probe_inference(api, model_id, backend=backend)
+                    try:
+                        inference = self.probe_inference(api, model_id, backend=backend)
+                    except BaseException:
+                        self.stop_process(process)
+                        raise
                     _qa_trace(
                         self.root,
                         "inference_probe",

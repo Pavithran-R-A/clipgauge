@@ -28,6 +28,11 @@ _TOPIC_STOPWORDS = {
 _PUNCTUATION = (".", "!", "?")
 _FRAGMENT_FUNCTION_WORDS = {"and", "because", "but", "here", "or", "so", "these", "then", "to", "with"}
 _GRAMMATICAL_TERMINAL_MARKERS = {"my", "our", "his", "her", "its", "their", "your", "than"}
+_SETUP_CONTEXT_MARKERS = {
+    "before", "challenge", "challenging", "crash", "crashed", "danger",
+    "failed", "failure", "first", "finally", "hard", "risk", "simulator",
+    "training", "try", "tried", "trying", "every",
+}
 _STORY_SCORES = {
     "hook_setup_payoff": 92.0,
     "question_answer": 86.0,
@@ -537,6 +542,12 @@ def smart_boundaries(
     return round(float(words[first]["start"]), 3), round(float(words[last]["end"]), 3)
 
 
+def _is_context_setup_segment(segment: dict[str, Any]) -> bool:
+    """Recognize bounded, explicit setup evidence before a strong payoff."""
+    tokens = set(_words(str(segment.get("text", ""))))
+    return bool(tokens & _SETUP_CONTEXT_MARKERS)
+
+
 def refine_boundaries(
     segments: list[dict[str, Any]],
     start: float,
@@ -565,6 +576,44 @@ def refine_boundaries(
             requested_end = start + float(offset_end)
         if requested_end <= requested_start:
             requested_start, requested_end = start, end
+    if requested_start > start and fields:
+        setup_strength = float(fields.get("setup_strength", 0.0) or 0.0)
+        standalone = float(fields.get("standalone_comprehension", 0.0) or 0.0)
+        if setup_strength >= 6.0 or standalone >= 7.0:
+            containing = next(
+                (
+                    segment for segment in segments
+                    if float(segment.get("start", 0.0)) <= start < float(segment.get("end", 0.0))
+                ),
+                None,
+            )
+            if containing is not None:
+                # Strong setup evidence makes the model offset advisory. Keep
+                # the complete source sentence that carries the premise.
+                requested_start = min(requested_start, float(containing.get("start", start)))
+    story_shape = str(fields.get("story_shape", "")) if fields else ""
+    payoff_strength = float(fields.get("payoff_strength", 0.0) or 0.0) if fields else 0.0
+    setup_strength = float(fields.get("setup_strength", 0.0) or 0.0) if fields else 0.0
+    standalone = float(fields.get("standalone_comprehension", 0.0) or 0.0) if fields else 0.0
+    if (
+        fields
+        and requested_start <= start
+        and story_shape in {"conflict_reaction", "question_answer", "hook_setup_payoff"}
+        and payoff_strength >= 5.0
+        and max(setup_strength, standalone) >= 5.0
+    ):
+        preceding = sorted(
+            (
+                segment for segment in segments
+                if float(segment.get("end", 0.0)) <= start
+                and start - float(segment.get("end", 0.0)) <= max_extension
+            ),
+            key=lambda segment: float(segment.get("start", 0.0)),
+            reverse=True,
+        )
+        setup_segment = next((segment for segment in preceding if _is_context_setup_segment(segment)), None)
+        if setup_segment is not None:
+            requested_start = min(requested_start, float(setup_segment.get("start", start)))
     return smart_boundaries(words, requested_start, requested_end, max_extension=max_extension)
 
 

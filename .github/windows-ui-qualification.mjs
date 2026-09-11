@@ -97,6 +97,58 @@ async function invokeVaultScope(page) {
   })
 }
 
+async function verifyNativeBridgeContract(page, outputDir, state, suffix, vaultScope) {
+  const evidence = await page.evaluate(async (expectedScope) => {
+    const tauri = globalThis.__TAURI__
+    const internals = globalThis.__TAURI_INTERNALS__
+    const invoke = tauri?.core?.invoke ?? internals?.invoke
+    const facts = {
+      tauri_global: Boolean(tauri),
+      tauri_core: Boolean(tauri?.core),
+      tauri_core_invoke: typeof tauri?.core?.invoke === 'function',
+      internals_global: Boolean(internals),
+      internals_invoke: typeof internals?.invoke === 'function',
+    }
+    const setupState = await invoke('get_setup_state')
+    const setupStateKeys = Object.keys(setupState).sort()
+    const providerKeys = setupState.provider_keys ?? {}
+    let deniedOperation
+    try {
+      await invoke('b02_out_of_scope_probe')
+      deniedOperation = { denied: false }
+    } catch (error) {
+      deniedOperation = {
+        denied: true,
+        command: 'b02_out_of_scope_probe',
+        error: String(error).slice(0, 240),
+      }
+    }
+    return {
+      runner: 'Playwright chromium.connectOverCDP against packaged Tauri WebView2',
+      facts,
+      vault_scope: expectedScope,
+      authorized_operation: {
+        command: 'get_setup_state',
+        payload_schema: {
+          type: typeof setupState,
+          keys: setupStateKeys,
+          provider_keys_type: typeof setupState.provider_keys,
+          provider_key_values_are_boolean: Object.values(providerKeys).every((value) => typeof value === 'boolean'),
+        },
+      },
+      denied_operation: deniedOperation,
+      credential_values_exposed: false,
+    }
+  }, vaultScope)
+  if (evidence.vault_scope !== 'qualification') throw new Error(`native bridge qualification scope mismatch: ${String(evidence.vault_scope)}`)
+  if (!evidence.facts.tauri_core_invoke && !evidence.facts.internals_invoke) throw new Error('native bridge qualification invoke was unavailable')
+  const schema = evidence.authorized_operation.payload_schema
+  if (schema.type !== 'object' || schema.provider_keys_type !== 'object' || !schema.provider_key_values_are_boolean) throw new Error('native bridge setup-state payload schema was unsafe')
+  if (!evidence.denied_operation.denied) throw new Error('out-of-scope native bridge operation was accepted')
+  writeFileSync(`${outputDir}/bridge-${state}-${suffix}.json`, `${JSON.stringify(evidence, null, 2)}\n`)
+  console.log(`NATIVE_BRIDGE_CONTRACT_PASS ${outputDir}/bridge-${state}-${suffix}.json`)
+}
+
 async function text(page, value, label = value) {
   return visible(page.getByText(value, { exact: true }).first(), label)
 }
@@ -250,7 +302,11 @@ async function helpState(page) {
 }
 
 async function setupState(page) {
+  const navigationStartedAt = Date.now()
   await clickNav(page, 'Setup & Storage')
+  const heading = await visible(page.locator('.setup-page h1').first(), 'Setup heading')
+  const firstMeaningfulRenderMs = Date.now() - navigationStartedAt
+  let readyAtMs = null
   const inventoryDiagnostic = await page.evaluate(async () => {
     const invoke = window.__TAURI__?.core?.invoke ?? window.__TAURI_INTERNALS__?.invoke
     if (typeof invoke !== 'function') return { available: false }
@@ -265,13 +321,15 @@ async function setupState(page) {
     }
   })
   console.log(`SETUP_INVENTORY_DIAGNOSTIC ${JSON.stringify(inventoryDiagnostic)}`)
-  const heading = await visible(page.locator('.setup-page h1').first(), 'Setup heading')
   let headingText = ''
   const setupDeadline = Date.now() + 180_000
   while (Date.now() < setupDeadline) {
     headingText = (await heading.innerText()).trim()
     console.log(`SETUP_HEADING ${headingText}`)
-    if (headingText === 'Ready to create clips') break
+    if (headingText === 'Ready to create clips') {
+      readyAtMs = Date.now() - navigationStartedAt
+      break
+    }
     await page.waitForTimeout(500)
   }
   if (headingText !== 'Ready to create clips') {
@@ -282,6 +340,12 @@ async function setupState(page) {
   if (!readyLabels.some(isSetupReadyLabel)) throw new Error(`setup ready marker missing: ${JSON.stringify(readyLabels)}`)
   const reuseLabels = (await page.locator('.reuse-note').allTextContents()).map((value) => value.trim())
   if (!reuseLabels.some(isSetupReuseLabel)) throw new Error(`setup reuse marker missing: ${JSON.stringify(reuseLabels)}`)
+  console.log(`SETUP_TIMING first_meaningful_render_ms=${firstMeaningfulRenderMs} ready_state_ms=${readyAtMs}`)
+  await writeLayoutEvidence('setup-timing', {
+    first_meaningful_render_ms: firstMeaningfulRenderMs,
+    ready_state_ms: readyAtMs,
+    cached_state_visible_before_native_inventory: firstMeaningfulRenderMs < 250,
+  })
   await text(page, 'Core components are ready.', 'core setup completion marker')
   await capture(`setup-${suffix}`)
 }
@@ -392,7 +456,12 @@ async function openRouterConnected(page) {
   await clickNav(page, 'AI Providers')
   await clickProvider(page, 'OpenRouter Free')
   await page.getByRole('button', { name: 'Test connection', exact: true }).click()
-  await text(page, 'Connected', 'OpenRouter connected state')
+  try {
+    await text(page, 'Connected', 'OpenRouter connected state')
+  } catch (error) {
+    const body = (await page.locator('body').innerText()).replaceAll(sentinel, '[REDACTED]')
+    throw new Error(`OpenRouter connection state did not become Connected; page=${body.slice(0, 3000)}`, { cause: error })
+  }
   const body = await page.locator('body').innerText()
   if (body.includes(sentinel)) throw new Error('sentinel appeared in connected DOM')
   await capture(`openrouter-connected-${suffix}`)
@@ -583,7 +652,9 @@ try {
     await visible(page.getByRole('button', { name: 'Setup & Storage', exact: true }).first(), 'application navigation')
   }
   const vaultScope = await invokeVaultScope(page)
-  if (vaultScope !== 'qualification') throw new Error(`qualification build required, got ${String(vaultScope)}`)
+  const productionSetupOnly = state === 'setup' && process.env.CLIPGAUGE_QA_ALLOW_PRODUCTION_SCOPE === '1'
+  if (vaultScope !== 'qualification' && !productionSetupOnly) throw new Error(`qualification build required, got ${String(vaultScope)}`)
+  if (state === 'setup') await verifyNativeBridgeContract(page, outputDir, state, suffix, vaultScope)
   await setLogicalSize(page)
   const displayFacts = await collectDisplayFacts(page)
   writeFileSync(`${outputDir}/display-${state}-${suffix}.json`, `${JSON.stringify(displayFacts, null, 2)}\n`)

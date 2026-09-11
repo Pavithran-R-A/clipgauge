@@ -121,6 +121,18 @@ def test_cloud_scoring_keeps_the_existing_richer_budget():
     assert budget["t1_limit"] == 35
     assert budget["finalist_limit"] == 12
     assert budget["music_llm"] is True
+    assert budget["wall_time_seconds"] == scoring_stage.CLOUD_T1_WALL_BUDGET_SECONDS
+
+
+def test_output_preference_keeps_best_recommended_and_more_distinct():
+    finalists = [{"start": index, "recommendation_score": 100 - index} for index in range(4)]
+    borderline = [{"start": 10, "recommendation_score": 70}]
+
+    assert len(scoring_stage.apply_output_preference(finalists, "best", borderline, limit=6)) == 2
+    assert scoring_stage.apply_output_preference(finalists, "recommended", borderline, limit=6) == finalists
+    more = scoring_stage.apply_output_preference(finalists, "more", borderline, limit=6)
+    assert len(more) == 5
+    assert more[-1] is borderline[0]
 
 
 def test_finalist_selection_spreads_candidates_across_long_source():

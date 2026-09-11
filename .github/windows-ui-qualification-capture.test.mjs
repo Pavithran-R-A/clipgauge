@@ -1,0 +1,23 @@
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import test from 'node:test'
+
+const qualificationScript = readFileSync(new URL('./windows-ui-qualification.ps1', import.meta.url), 'utf8')
+
+test('client capture uses the ClipGauge HWND before cropping client pixels', () => {
+  const captureBody = qualificationScript.match(/function Invoke-ClientCapture[\s\S]*?\n}\r?\n\r?\nfunction Validate-DisplayEvidence/)
+  assert.ok(captureBody, 'Invoke-ClientCapture function must remain discoverable')
+  const body = captureBody[0]
+  assert.match(body, /SetForegroundWindow\(\[IntPtr\]\$proc\.MainWindowHandle\)/)
+  assert.match(body, /ui screenshot -w/)
+  assert.doesNotMatch(body, /CopyFromScreen/)
+})
+
+test('packaged qualification records native bridge authorization and denial', () => {
+  const qualificationScript = readFileSync(new URL('./windows-ui-qualification.mjs', import.meta.url), 'utf8')
+  assert.match(qualificationScript, /chromium\.connectOverCDP\(`http:\/\/127\.0\.0\.1:\$\{port\}`\)/)
+  assert.match(qualificationScript, /invoke\('vault_scope'\)/)
+  assert.match(qualificationScript, /invoke\('get_setup_state'\)/)
+  assert.match(qualificationScript, /invoke\('b02_out_of_scope_probe'\)/)
+  assert.match(qualificationScript, /credential_values_exposed: false/)
+})

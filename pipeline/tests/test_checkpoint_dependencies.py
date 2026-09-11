@@ -3,6 +3,9 @@ from types import SimpleNamespace
 
 from clipgauge_pipeline import config
 from clipgauge_pipeline.jobs import queue
+from clipgauge_pipeline.scoring import constants
+from clipgauge_pipeline.scoring import providers
+from clipgauge_pipeline.scoring.stage import ScoreStage
 
 
 class _AsrLikeStage(queue.Stage):
@@ -74,3 +77,28 @@ def test_checkpoint_rejects_stale_dependency_fingerprint(monkeypatch, tmp_path):
     assert cached is None
     assert issue is not None
     assert issue.code == "CHECKPOINT_DEPENDENCY_STALE"
+
+
+def test_score_dependency_fingerprint_includes_quality_versions(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLIPGAUGE_HOME", str(tmp_path / "profile with spaces"))
+    settings = config.Settings()
+    job = SimpleNamespace(id="job", source_type="file", source="C:\\Videos\\source.mp4", dir=config.jobs_dir() / "job")
+    ctx = queue.StageContext(job=job, settings=settings, progress=lambda *_: None)
+    stage = ScoreStage()
+
+    before = queue._dependency_fingerprint(stage, ctx, {})
+    settings.quality_mode = "best"
+    quality_changed = queue._dependency_fingerprint(stage, ctx, {})
+    settings.quality_mode = "private"
+    settings.output_preference = "more"
+    output_changed = queue._dependency_fingerprint(stage, ctx, {})
+    settings.output_preference = "recommended"
+    monkeypatch.setattr(constants, "active", lambda: {"version": 2})
+    calibration_changed = queue._dependency_fingerprint(stage, ctx, {})
+    monkeypatch.setattr(providers, "RUBRIC_CACHE_VERSION", "balanced-v2")
+    rubric_changed = queue._dependency_fingerprint(stage, ctx, {})
+
+    assert before != quality_changed
+    assert before != output_changed
+    assert before != calibration_changed
+    assert before != rubric_changed

@@ -64,6 +64,88 @@ def test_smart_boundaries_complete_nearby_sentence():
     assert (start, end) == (0.0, 1.9)
 
 
+def test_refine_boundaries_keeps_high_context_setup_before_payoff():
+    segments = [
+        {
+            "start": 0.0,
+            "end": 12.0,
+            "text": "The landing stakes are higher than they look.",
+            "words": [
+                {"word": word, "start": index * 2.0, "end": index * 2.0 + 1.0}
+                for index, word in enumerate("The landing stakes are higher than they look.".split())
+            ],
+        },
+        {
+            "start": 12.0,
+            "end": 20.0,
+            "text": "We landed safely on the short runway.",
+            "words": [
+                {"word": word, "start": 12.0 + index * 1.5, "end": 12.0 + index * 1.5 + 1.0}
+                for index, word in enumerate("We landed safely on the short runway.".split())
+            ],
+        },
+    ]
+
+    start, end = short_quality.refine_boundaries(
+        segments,
+        0.0,
+        20.0,
+        {"recommended_start_offset": 12.0, "recommended_end_offset": 20.0, "setup_strength": 8, "standalone_comprehension": 8},
+    )
+
+    assert start == 0.0
+    assert end >= 19.0
+
+
+def test_refine_boundaries_recovers_deterministic_landing_setup():
+    segments = [
+        {
+            "start": 396.1,
+            "end": 398.5,
+            "text": "This is the part I crashed in every time in the simulator.",
+            "words": [
+                {"word": word, "start": 396.1 + index * 0.25, "end": 396.1 + index * 0.25 + 0.2}
+                for index, word in enumerate("This is the part I crashed in every time in the simulator.".split())
+            ],
+        },
+        {
+            "start": 400.5,
+            "end": 403.9,
+            "text": "We're gonna land right there on top of that runway.",
+            "words": [
+                {"word": word, "start": 400.5 + index * 0.25, "end": 400.5 + index * 0.25 + 0.2}
+                for index, word in enumerate("We're gonna land right there on top of that runway.".split())
+            ],
+        },
+        {
+            "start": 425.4,
+            "end": 426.3,
+            "text": "I landed a plane!",
+            "words": [
+                {"word": word, "start": 425.4 + index * 0.2, "end": 425.4 + index * 0.2 + 0.15}
+                for index, word in enumerate("I landed a plane!".split())
+            ],
+        },
+    ]
+
+    start, end = short_quality.refine_boundaries(
+        segments,
+        400.51,
+        427.514,
+        {
+            "story_shape": "conflict_reaction",
+            "payoff_strength": 5,
+            "setup_strength": 5,
+            "standalone_comprehension": 5,
+            "recommended_start_offset": 0,
+            "recommended_end_offset": 27,
+        },
+    )
+
+    assert start == 396.1
+    assert end >= 426.0
+
+
 def test_quality_ranking_is_deterministic():
     items = [
         {"start": 4.0, "end": 8.0, "short_quality": {"score": 80}},

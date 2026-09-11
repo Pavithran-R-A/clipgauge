@@ -9,6 +9,8 @@ from __future__ import annotations
 import gc
 import importlib.metadata
 import json
+import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,28 @@ def _package_version(name: str) -> str:
         return importlib.metadata.version(name)
     except importlib.metadata.PackageNotFoundError:
         return "unknown"
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".part",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def run_cuda_probe(audio_path: Path, evidence_path: Path, *, align: bool) -> dict[str, Any]:
@@ -113,7 +137,5 @@ def run_cuda_probe(audio_path: Path, evidence_path: Path, *, align: bool) -> dic
         "alignment_asset_id": alignment_policy_result.asset_id,
     }
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = evidence_path.with_name(f".{evidence_path.name}.part")
-    temporary.write_text(json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8")
-    temporary.replace(evidence_path)
+    _atomic_write_text(evidence_path, json.dumps(evidence, indent=2, sort_keys=True))
     return evidence

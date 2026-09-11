@@ -106,9 +106,30 @@ export interface ProviderTestResult {
   model?: string
   code?: string
   message?: string
-  models?: string[]
+  models?: Array<ProviderModel | string>
   capabilities?: Record<string, unknown>
   degraded_signals?: string[]
+}
+
+export type ModelCompatibility = 'FULL' | 'TEXT-ONLY' | 'NO STRUCTURED OUTPUT' | 'UNSUPPORTED'
+
+export interface ProviderModel {
+  id: string
+  compatibility: ModelCompatibility
+  capabilities?: Record<string, unknown>
+  price?: Record<string, unknown>
+  available?: boolean
+  deprecated?: boolean
+  local?: boolean
+}
+
+export interface ProviderModelsResult {
+  state: 'PASS' | 'WARNING' | 'FAIL'
+  provider?: string
+  requested_model?: string
+  models?: ProviderModel[]
+  code?: string
+  message?: string
 }
 
 export interface ClipLedger {
@@ -199,6 +220,7 @@ export interface JobResults {
     scored_count: number
     counts?: RecommendationCounts
     best_candidate?: { start: number; end: number; recommendation_score: number } | null
+    borderline_candidates?: Array<{ start: number; end: number; recommendation_score: number; reasons?: string[]; quality?: Record<string, unknown> }>
     diagnostic_id?: string
     provider_profile_id?: string
     provider_kind?: string
@@ -246,7 +268,7 @@ export interface JobSummary {
   lifecycle_state?: string
   last_stage?: string | null
   resume_safe?: boolean
-  outcome?: PipelineOutcome
+  outcome?: PipelineOutcome | null
 }
 
 export interface PreflightCheck {
@@ -385,6 +407,9 @@ export interface SetupProgressEvent {
 
 export interface LocalSetupInventory {
   state: 'ready' | 'setup-required' | string
+  last_verified_at?: number | null
+  platform?: string
+  runtime_manifest_digest?: string
   video_tools?: VideoToolReadiness
   local_ai?: LocalAiReadiness
   runtime: Record<string, unknown> & { installed?: boolean; display_name?: string; size_bytes?: number; installed_size_bytes?: number; version?: string; readiness?: ReadinessContract }

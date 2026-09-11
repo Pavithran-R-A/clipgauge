@@ -50,7 +50,7 @@ def select_inference_device(torch_module, *, force_cpu: bool = False):
     try:
         managed.activate_cuda_runtime()
     except Exception:
-        pass
+        return torch_module.device("cpu")
     return torch_module.device("cuda" if torch_module.cuda.is_available() else "cpu")
 
 

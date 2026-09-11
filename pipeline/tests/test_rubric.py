@@ -51,17 +51,58 @@ def test_shock_without_arousal_discounted_unless_heatmap_high():
 
 def test_bait_penalty_applies_to_all_subscores():
     t1 = _t1(funniness=2, bait_phrases=["smash that like button"])
-    sub, adj = rubric.cross_validate(t1, laughs_near=[], arousal_pct=0.5, heatmap_pct=None)
+    sub, adj = rubric.cross_validate(
+        t1,
+        transcript="Smash that like button if you enjoyed this video.",
+        laughs_near=[],
+        arousal_pct=0.5,
+        heatmap_pct=None,
+    )
     assert sub["hook"] == 6 * rubric.BAIT_PENALTY
     assert any(a["rule"] == "bait_penalty" for a in adj)
+
+
+def test_normal_dialogue_returned_as_bait_is_rejected():
+    t1 = _t1(funniness=2, bait_phrases=["we're gonna land right there"])
+    sub, adj = rubric.cross_validate(
+        t1,
+        transcript="We're gonna land right there before the runway ends.",
+        laughs_near=[],
+        arousal_pct=0.5,
+        heatmap_pct=None,
+    )
+    assert sub["hook"] == 6.0
+    assert not any(item["rule"] == "bait_penalty" for item in adj)
+    assert adj[-1]["rule"] == "bait_verification"
+    assert adj[-1]["verified_bait"] == []
+
+
+def test_verified_viewer_directed_bait_is_recorded():
+    t1 = _t1(funniness=2, bait_phrases=["subscribe"])
+    _, adj = rubric.cross_validate(
+        t1,
+        transcript="Subscribe for more aviation stories.",
+        laughs_near=[],
+        arousal_pct=0.5,
+        heatmap_pct=None,
+    )
+    verification = next(item for item in adj if item["rule"] == "bait_verification")
+    assert verification["model_reported_bait"] == ["subscribe"]
+    assert verification["verified_bait"] == ["subscribe"]
 
 
 def test_every_adjustment_is_recorded():
     laughs = [{"type": "laugh", "start": 5, "end": 7, "sources": ["jrgillick", "panns"]}]
     t1 = _t1(shock=8, bait_phrases=["subscribe"])
-    sub, adj = rubric.cross_validate(t1, laughs_near=laughs, arousal_pct=0.1, heatmap_pct=None)
+    sub, adj = rubric.cross_validate(
+        t1,
+        transcript="Subscribe for more.",
+        laughs_near=laughs,
+        arousal_pct=0.1,
+        heatmap_pct=None,
+    )
     rules = {a["rule"] for a in adj}
-    assert rules == {"funny_corroborated", "shock_no_arousal", "bait_penalty"}
+    assert rules == {"funny_corroborated", "shock_no_arousal", "bait_verification", "bait_penalty"}
 
 
 def test_composite_heatmap_boost_recorded():

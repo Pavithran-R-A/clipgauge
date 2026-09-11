@@ -11,6 +11,19 @@ wheel is `2.8.0+cu126`; the Windows audit did not emit Torch records for that
 local-version build. The lock still retains the reviewed Torch 2.8.0 advisory
 coverage from the earlier platform-neutral audit.
 
+A project-environment audit on 2026-09-10 reported 12 records across four packages:
+Lightning 2.6.5, NLTK 3.10.3, PyTorch Lightning 2.6.5, and Transformers
+4.57.6. The records below remain reachability-reviewed. The audit is clean
+only when these documented advisory IDs are explicitly ignored; the raw
+audit must remain visible and non-zero.
+
+The current host-global audit is separate. On 2026-09-11, the installed
+Python 3.13 `pip-audit --local` reported 40 records across Pillow 11.3.0,
+pip 26.1.1, and uv 0.11.14. That executable is outside the project’s locked
+Python 3.12 environment. The project lock pins Pillow 12.3.0 and does not
+declare pip or uv as runtime dependencies. `pip-audit --locked` does not
+recognize `pipeline/uv.lock`, so this audit does not claim a locked result.
+
 ClipGauge imports these packages through WhisperX and its analysis stack. Its
 managed loading path verifies asset identity, size, and SHA-256 first. Model
 metadata rejects repository redirects, URLs, remote code, and trust flags.
@@ -41,7 +54,8 @@ attacker-controlled repository or checkpoint metadata.
 | `PYSEC-2026-2288` | transformers 4.57.6 | `CVE-2026-1839`, `GHSA-69w3-r845-3855` | existing | Trainer and RNG-state loading are absent. | NOT_AFFECTED |
 | `PYSEC-2026-2289` | transformers 4.57.6 | `CVE-2026-4372`, `GHSA-29pf-2h5f-8g72` | existing | Alignment uses a pinned local asset and cache-only loading. | MITIGATED |
 | `PYSEC-2026-2290` | transformers 4.57.6 | duplicate of the row above; audit reported fix 5.5.0 | existing | No additional execution path. | DUPLICATE |
-| `CVE-2026-9856` | transformers 4.57.6 | `GHSA-xrqw-3rrv-vx5w` | new | Affected loader path is absent. | NOT_AFFECTED |
+| `PYSEC-2026-3929` | transformers 4.57.6 | `CVE-2026-9856`, `GHSA-xrqw-3rrv-vx5w` | new | Affected loader path is absent. | NOT_AFFECTED |
+| `PYSEC-2026-3967` | pytorch-lightning 2.6.5 | `CVE-2026-58659` | new | ClipGauge does not call Lightning checkpoint loaders. | NOT_AFFECTED |
 
 ## Lock-only Torch coverage
 

@@ -210,18 +210,55 @@ def _anchor_strength(unit: SentenceUnit) -> float:
 def generate_anchors(units: list[SentenceUnit], limit: int = ANCHOR_LIMIT) -> list[SentenceUnit]:
     """Choose diverse editorial anchors, rather than fixed peak windows."""
     selected: list[SentenceUnit] = []
-    bucket_best: dict[int, SentenceUnit] = {}
+    max_anchors = max(0, int(limit))
+    if max_anchors == 0:
+        return []
+    topic_best: dict[int, SentenceUnit] = {}
     for unit in units:
-        bucket = int(unit.start // 60)
-        if bucket not in bucket_best or _anchor_strength(unit) > _anchor_strength(bucket_best[bucket]):
-            bucket_best[bucket] = unit
-    prioritized = list(sorted(bucket_best.values(), key=lambda item: item.start))
+        if unit.topic_id not in topic_best or _anchor_strength(unit) > _anchor_strength(topic_best[unit.topic_id]):
+            topic_best[unit.topic_id] = unit
+
+    topic_starts = sorted(unit.start for unit in topic_best.values())
+    topic_gaps = [right - left for left, right in zip(topic_starts, topic_starts[1:])]
+    dense_topic_gap = (
+        sorted(topic_gaps)[len(topic_gaps) // 2]
+        if topic_gaps else (
+            max((unit.end for unit in units), default=0.0)
+            - min((unit.start for unit in units), default=0.0)
+        ) / max(1, max_anchors - 1)
+    )
+    minimum_anchor_gap = min(
+        15.0,
+        max(0.0, dense_topic_gap),
+    )
+    # Keep every topic when it fits. Otherwise seed source-wide coverage.
+    if len(topic_best) <= max_anchors:
+        selected.extend(sorted(topic_best.values(), key=lambda item: item.start))
+    else:
+        topics = sorted(topic_best.values(), key=lambda item: item.start)
+        indexes = [
+            (slot * (len(topics) - 1)) // max(1, max_anchors - 1)
+            for slot in range(max_anchors)
+        ]
+        selected.extend(topics[index] for index in indexes)
+    prioritized = sorted(topic_best.values(), key=lambda item: (_anchor_strength(item), item.start), reverse=True)
     prioritized.extend(sorted(units, key=lambda item: (_anchor_strength(item), item.start), reverse=True))
     for unit in prioritized:
-        if all(abs(unit.start - other.start) >= 15.0 for other in selected):
-            selected.append(unit)
-        if len(selected) >= max(0, int(limit)):
+        if len(selected) >= max_anchors:
             break
+        if unit not in selected and all(
+            abs(unit.start - other.start) >= minimum_anchor_gap for other in selected
+        ):
+            selected.append(unit)
+    if len(selected) < max_anchors:
+        for unit in sorted(units, key=lambda item: (_anchor_strength(item), item.start), reverse=True):
+            if unit in selected or any(
+                abs(unit.start - other.start) < minimum_anchor_gap for other in selected
+            ):
+                continue
+            selected.append(unit)
+            if len(selected) >= max_anchors:
+                break
     return sorted(selected, key=lambda item: item.start)
 
 
@@ -444,17 +481,46 @@ def _story_similarity(left: dict[str, Any], right: dict[str, Any]) -> float:
     return max(topic, payoff)
 
 
-def cheap_filter_and_dedupe(candidates: list[dict[str, Any]], limit: int = SHORTLIST_LIMIT) -> list[dict[str, Any]]:
-    """Filter weak shapes, then dedupe story identity and timestamp overlap."""
-    viable = [
-        candidate for candidate in candidates
-        if candidate["end"] - candidate["start"] >= MIN_STORY_SECONDS
-        and candidate.get("syntactic_complete")
-        and candidate.get("central_premise")
-        and len(candidate.get("sentence_ids", [])) >= 2
-        and candidate.get("editorial_signal")
-        and not candidate.get("context_dependency", False)
-    ]
+def cheap_filter_and_dedupe(
+    candidates: list[dict[str, Any]],
+    limit: int = SHORTLIST_LIMIT,
+    *,
+    audit: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Filter weak shapes, dedupe identity, and explain every discard."""
+    viable: list[dict[str, Any]] = []
+    audit_entries: dict[int, dict[str, Any]] = {}
+
+    def record(candidate: dict[str, Any], reasons: list[str], status: str) -> None:
+        if audit is not None:
+            entry = {
+                "candidate_id": candidate.get("candidate_id"),
+                "start": candidate.get("start"),
+                "end": candidate.get("end"),
+                "status": status,
+                "rejection_reasons": list(reasons),
+            }
+            audit.append(entry)
+            audit_entries[id(candidate)] = entry
+
+    for candidate in candidates:
+        reasons: list[str] = []
+        if candidate["end"] - candidate["start"] < MIN_STORY_SECONDS:
+            reasons.append("TOO_SHORT")
+        if not candidate.get("syntactic_complete"):
+            reasons.append("INCOMPLETE_ENDING")
+        if not candidate.get("central_premise"):
+            reasons.append("MISSING_PREMISE")
+        if len(candidate.get("sentence_ids", [])) < 2:
+            reasons.append("TOO_FEW_SENTENCES")
+        if not candidate.get("editorial_signal"):
+            reasons.append("NO_EDITORIAL_SIGNAL")
+        if candidate.get("context_dependency", False):
+            reasons.append("CONTEXT_DEPENDENT")
+        if reasons:
+            record(candidate, reasons, "rejected")
+            continue
+        viable.append(candidate)
     viable.sort(key=lambda item: (
         item.get("story_variant", "").startswith("llm-"),
         float(item.get("duration_fit", 0.0)),
@@ -475,7 +541,18 @@ def cheap_filter_and_dedupe(candidates: list[dict[str, Any]], limit: int = SHORT
             other = kept[duplicate_index]
             same_start = abs(float(candidate["start"]) - float(other["start"])) < 0.1
             materially_different_end = abs(float(candidate["end"]) - float(other["end"])) >= 8.0
+            # Semantic overlap alone cannot prove duplicate identity.  A
+            # repeated topic can contain several independent moments across
+            # a long source, so only temporally related or shared-unit spans
+            # are duplicates.
+            shared_sentence_unit = bool(
+                set(candidate.get("sentence_ids") or [])
+                & set(other.get("sentence_ids") or [])
+            )
+            if not same_start and _iou(candidate, other) < 0.35 and not shared_sentence_unit:
+                duplicate_index = None
             if same_start and not materially_different_end:
+                record(candidate, ["DUPLICATE_STORY"], "rejected")
                 continue
             if same_start and materially_different_end:
                 duplicate_index = None
@@ -486,8 +563,16 @@ def cheap_filter_and_dedupe(candidates: list[dict[str, Any]], limit: int = SHORT
                 and float(candidate.get("payoff_time") or 0.0) > float(other.get("payoff_time") or 0.0)
             ):
                 kept[duplicate_index] = candidate
+                previous_entry = audit_entries.get(id(other))
+                if previous_entry is not None:
+                    previous_entry["status"] = "rejected"
+                    previous_entry["rejection_reasons"] = ["DUPLICATE_STORY_REPLACED"]
+                record(candidate, [], "kept")
+            else:
+                record(candidate, ["DUPLICATE_STORY"], "rejected")
             continue
         if any(_story_similarity(candidate, other) >= 0.82 and _iou(candidate, other) >= 0.35 for other in kept):
+            record(candidate, ["DUPLICATE_OVERLAP"], "rejected")
             continue
         nearby_index = next(
             (
@@ -499,15 +584,22 @@ def cheap_filter_and_dedupe(candidates: list[dict[str, Any]], limit: int = SHORT
             None,
         )
         if nearby_index is not None:
+            record(candidate, ["NEARBY_SIMILAR"], "rejected")
             continue
         bucket = int(float(candidate["start"]) // 60)
         if bucket_counts.get(bucket, 0) >= MAX_CANDIDATES_PER_TIME_BUCKET:
+            record(candidate, ["TIME_BUCKET_LIMIT"], "rejected")
             continue
         kept.append(candidate)
         bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
-        if len(kept) >= max(0, int(limit)):
-            break
-    return sorted(kept, key=lambda item: item["start"])
+        record(candidate, [], "kept")
+    shortlist_limit = max(0, int(limit))
+    for candidate in kept[shortlist_limit:]:
+        entry = audit_entries.get(id(candidate))
+        if entry is not None:
+            entry["status"] = "rejected"
+            entry["rejection_reasons"] = ["SHORTLIST_LIMIT"]
+    return sorted(kept[:shortlist_limit], key=lambda item: item["start"])
 
 
 def synthesize(
@@ -523,6 +615,8 @@ def synthesize(
     """Generate story variants, optionally using bounded local proposals."""
     anchors = generate_anchors(units, anchor_limit)
     raw: list[dict[str, Any]] = []
+    deterministic_proposals = 0
+    llm_proposals = 0
     boundary_calls = 0
     for anchor in anchors:
         neighborhood = [unit for unit in units if anchor.start - 45.0 <= unit.start <= anchor.start + 45.0]
@@ -563,6 +657,7 @@ def synthesize(
                 candidate = _story_candidate(units[start_index:end_index + 1], anchor, f"det-{offset}-{start_offset}")
                 if candidate:
                     raw.append(candidate)
+                    deterministic_proposals += 1
         for proposal_index, proposal in enumerate(proposals[:3]):
             valid_ids = {unit.sentence_id for unit in neighborhood}
             if proposal.best_start_sentence_id not in valid_ids or proposal.best_end_sentence_id not in valid_ids:
@@ -573,13 +668,19 @@ def synthesize(
                 candidate = _story_candidate(units[start_index:end_index + 1], anchor, f"llm-{proposal_index}", proposal)
                 if candidate:
                     raw.append(candidate)
+                    llm_proposals += 1
     for candidate in raw:
         candidate["channel_scores"] = {
             name: round(sum(values[int(candidate["start"]):max(int(candidate["start"]) + 1, int(candidate["end"]))]) / max(1, len(values[int(candidate["start"]):max(int(candidate["start"]) + 1, int(candidate["end"]))])), 4)
             for name, values in (channels or {}).items()
             if values and int(candidate["start"]) < len(values)
         }
-    survivors = cheap_filter_and_dedupe(raw, shortlist_limit)
+    filter_audit: list[dict[str, Any]] = []
+    survivors = cheap_filter_and_dedupe(raw, shortlist_limit, audit=filter_audit)
+    deduped_count = sum(
+        item["status"] == "kept" or item.get("rejection_reasons") == ["SHORTLIST_LIMIT"]
+        for item in filter_audit
+    )
     return {
         "units": [unit.to_json() for unit in units],
         "topic_segment_count": len({unit.topic_id for unit in units}),
@@ -588,6 +689,17 @@ def synthesize(
         "cheap_survivors": len(survivors),
         "boundary_calls": boundary_calls,
         "candidates": survivors,
+        "candidate_audit": {
+            "raw_proposals": len(raw),
+            "deterministic_proposals": deterministic_proposals,
+            "llm_proposals": llm_proposals,
+            "story_unit_proposals": deterministic_proposals,
+            "deduped_proposals": deduped_count,
+            "shortlisted_proposals": len(survivors),
+            "rejection_reasons": [
+                item for item in filter_audit if item["status"] == "rejected"
+            ],
+        },
     }
 
 

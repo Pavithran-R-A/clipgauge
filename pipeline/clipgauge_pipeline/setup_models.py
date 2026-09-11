@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,28 @@ from .readiness import contract
 
 RECOMMENDED_MODEL_ID = "clipgauge-local/qwen3-4b-q4_k_m"
 SELECTION_FILENAME = "local-ai-settings.json"
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".part",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def load_selected_model(root: Path) -> str | None:
@@ -25,9 +49,7 @@ def load_selected_model(root: Path) -> str | None:
 def save_selected_model(root: Path, model_id: str) -> None:
     root.mkdir(parents=True, exist_ok=True)
     path = root / SELECTION_FILENAME
-    temporary = path.with_name(f".{path.name}.part")
-    temporary.write_text(json.dumps({"selected_model_id": model_id}, sort_keys=True), encoding="utf-8")
-    temporary.replace(path)
+    _atomic_write_text(path, json.dumps({"selected_model_id": model_id}, sort_keys=True))
 
 
 def _is_repair(row: Mapping[str, Any]) -> bool:

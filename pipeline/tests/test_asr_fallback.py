@@ -4,8 +4,24 @@ import pytest
 import sys
 
 from clipgauge_pipeline.asr import stage as asr_stage
+from clipgauge_pipeline.asr import probe as asr_probe
 from clipgauge_pipeline.asr.stage import _transcribe_with_fallback
 from clipgauge_pipeline.jobs.queue import StageError
+
+
+def test_cuda_probe_evidence_write_cleans_failed_temporary(monkeypatch, tmp_path):
+    destination = tmp_path / "cuda-probe.json"
+    destination.write_text("previous", encoding="utf-8")
+
+    def fail_replace(*_args):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(asr_probe.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        asr_probe._atomic_write_text(destination, "new")
+
+    assert destination.read_text(encoding="utf-8") == "previous"
+    assert list(tmp_path.glob(".cuda-probe.json.*.part")) == []
 
 
 class _Model:

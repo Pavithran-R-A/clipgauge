@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import shutil
 import sqlite3
@@ -21,6 +23,7 @@ CATEGORIES = (
 _JOB_ID = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$")
 _TEMP_SUFFIXES = (".part", ".tmp")
 _TARGETS = {"session", "failed-session", "safe-cache", "obsolete-runtime-archives"}
+_SIGNATURE_PATHS = ("models", "runtimes", "jobs", "downloads", "temp", "diagnostics", "bin")
 
 
 def _size(path: Path) -> int:
@@ -111,6 +114,20 @@ def breakdown(root: Path) -> list[dict[str, object]]:
             "requires_confirmation": True,
         })
     return rows
+
+
+def breakdown_signature(root: Path) -> str:
+    """Return a cheap signature for cached storage accounting."""
+    root = root.resolve()
+    facts = []
+    for name in _SIGNATURE_PATHS:
+        path = root / name
+        try:
+            stat = path.stat()
+            facts.append((name, True, stat.st_mtime_ns, stat.st_size, stat.st_ino))
+        except OSError:
+            facts.append((name, False, 0, 0, 0))
+    return hashlib.sha256(json.dumps(facts, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _relative(root: Path, path: Path) -> str:

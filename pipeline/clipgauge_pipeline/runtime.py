@@ -16,12 +16,43 @@ import stat
 import tarfile
 import time
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterable
 
 import httpx
 
 ProgressFn = Callable[[float, str], None]
+_DOWNLOAD_RETRY_DELAYS = (1.0, 4.0, 16.0)
+
+
+def _retryable_http_status(status_code: int) -> bool:
+    return status_code in {408, 425, 429} or 500 <= status_code <= 599
+
+
+@contextmanager
+def _download_stream(
+    url: str,
+    *,
+    headers: dict[str, str],
+    timeout: float,
+    cancelled: Callable[[], bool] | None,
+):
+    """Open a managed stream with bounded retries for transient HTTP status."""
+    for attempt in range(len(_DOWNLOAD_RETRY_DELAYS) + 1):
+        if cancelled and cancelled():
+            raise RuntimeDownloadCancelled("runtime download cancelled before start")
+        with httpx.stream("GET", url, headers=headers, follow_redirects=True, timeout=timeout) as response:
+            if _retryable_http_status(response.status_code) and attempt < len(_DOWNLOAD_RETRY_DELAYS):
+                time.sleep(_DOWNLOAD_RETRY_DELAYS[attempt])
+                continue
+            if _retryable_http_status(response.status_code):
+                raise RuntimeIntegrityError(
+                    f"runtime download failed after retries: HTTP {response.status_code}"
+                )
+            yield response
+            return
+    raise AssertionError("bounded download retry loop exhausted unexpectedly")
 
 
 class RuntimeIntegrityError(RuntimeError):
@@ -80,13 +111,13 @@ def download_verified(
     try:
         if cancelled and cancelled():
             raise RuntimeDownloadCancelled("runtime download cancelled before start")
-        with httpx.stream("GET", url, headers=headers, follow_redirects=True, timeout=timeout) as response:
+        with _download_stream(url, headers=headers, timeout=timeout, cancelled=cancelled) as response:
             if offset and response.status_code in (200, 416):
                 # The server cannot safely continue this partial; restart cleanly.
                 part.unlink(missing_ok=True)
                 offset = 0
                 response.close()
-                with httpx.stream("GET", url, follow_redirects=True, timeout=timeout) as restart:
+                with _download_stream(url, headers={}, timeout=timeout, cancelled=cancelled) as restart:
                     if restart.status_code != 200:
                         raise RuntimeIntegrityError(f"runtime download failed: HTTP {restart.status_code}")
                     announced = _safe_size(0, restart.headers.get("content-length"), max_bytes)
@@ -238,8 +269,13 @@ def extract_archive_verified(
         if archive_type == "zip":
             with zipfile.ZipFile(archive) as handle:
                 members = handle.infolist()
+                seen: set[str] = set()
                 for info in members:
                     path = safe_member(info.filename)
+                    key = path.as_posix().casefold() if os.name == "nt" else path.as_posix()
+                    if key in seen:
+                        raise RuntimeIntegrityError(f"duplicate archive member: {path}")
+                    seen.add(key)
                     mode = (info.external_attr >> 16) & 0o170000
                     if mode == stat.S_IFLNK:
                         raise RuntimeIntegrityError("archive contains an unexpected symlink entry")
@@ -259,8 +295,13 @@ def extract_archive_verified(
                 members = handle.getmembers()
                 regular: dict[Path, tarfile.TarInfo] = {}
                 aliases: dict[Path, Path] = {}
+                seen: set[str] = set()
                 for member in members:
                     path = safe_member(member.name)
+                    key = path.as_posix().casefold() if os.name == "nt" else path.as_posix()
+                    if key in seen:
+                        raise RuntimeIntegrityError(f"duplicate archive member: {path}")
+                    seen.add(key)
                     if member.isdir():
                         (staging / path).mkdir(parents=True, exist_ok=True)
                         continue
@@ -367,10 +408,19 @@ def extract_zip_verified(
     extracted: list[Path] = []
     try:
         with zipfile.ZipFile(archive) as handle:
-            members = [_validate_member(info.filename, info, expected) for info in handle.infolist()]
+            infos = handle.infolist()
+            members: list[str] = []
+            seen: set[str] = set()
+            for info in infos:
+                member = _validate_member(info.filename, info, expected)
+                key = member.casefold() if os.name == "nt" else member
+                if key in seen:
+                    raise RuntimeIntegrityError(f"duplicate archive member: {member}")
+                seen.add(key)
+                members.append(member)
             if set(members) != expected:
                 raise RuntimeIntegrityError("archive does not contain exactly the expected members")
-            for info, member in zip(handle.infolist(), members):
+            for info, member in zip(infos, members):
                 output = staging / member
                 output.parent.mkdir(parents=True, exist_ok=True)
                 with handle.open(info) as source, output.open("wb") as target:

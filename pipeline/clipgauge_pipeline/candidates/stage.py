@@ -7,6 +7,7 @@ story spans before bounded local editorial boundary selection.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 
 from ..jobs.queue import Stage, StageContext, StageError, _atomic_write_json
@@ -29,7 +30,7 @@ def detect_scenes(media_path: str, progress=None) -> list[float]:
 
 class CandidatesStage(Stage):
     name = "candidates"
-    schema_version = 15  # v15: favor thirty-second payoff variants
+    schema_version = 16  # v16: source-wide anchors and temporal dedupe
 
     def run(self, ctx: StageContext) -> dict:
         import numpy as np
@@ -127,10 +128,6 @@ class CandidatesStage(Stage):
             shortlist_limit=story_units.SHORTLIST_LIMIT,
         )
         candidates = synthesis["candidates"]
-        if not candidates:
-            raise StageError(
-                "No complete story candidates found — the video may be too quiet or fragmented."
-            )
 
         # Persist the curve for the review UI's timeline visualization.
         interest_curve_path = ctx.job_dir / "interest_curve.json"
@@ -139,7 +136,7 @@ class CandidatesStage(Stage):
             {"per_sec": np.round(curve, 4).tolist()},
         )
 
-        return {
+        result = {
             "candidates": candidates,
             "count": len(candidates),
             "sentence_units": synthesis["units"],
@@ -147,6 +144,7 @@ class CandidatesStage(Stage):
             "anchors": synthesis["anchors"],
             "raw_span_variants": synthesis["raw_span_variants"],
             "cheap_survivors": synthesis["cheap_survivors"],
+            "candidate_audit": synthesis["candidate_audit"],
             "boundary_calls": boundary_attempts,
             "effective_weights": effective_weights,
             "scene_count": len(scene_times),
@@ -156,3 +154,27 @@ class CandidatesStage(Stage):
                 "interest_curve_path": str(interest_curve_path),
             },
         }
+        if not candidates:
+            audit = synthesis.get("candidate_audit", {})
+            rejection_reason_counts = Counter(
+                reason
+                for entry in audit.get("rejection_reasons", [])
+                for reason in entry.get("rejection_reasons", [])
+            )
+            result.update({
+                "outcome": "SUCCESS_NO_RECOMMENDATIONS",
+                "code": "NO_RECOMMENDED_CLIPS",
+                "counts": {
+                    "candidate_count": 0,
+                    "eligible_candidate_count": 0,
+                    "scored_count": 0,
+                    "score_clip_count": 0,
+                    "camera_trajectory_count": 0,
+                    "render_attempt_count": 0,
+                    "render_output_count": 0,
+                    "rejection_reason_counts": dict(rejection_reason_counts),
+                },
+                "clips": [],
+                "best_candidate": None,
+            })
+        return result

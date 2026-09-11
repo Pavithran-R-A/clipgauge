@@ -5,12 +5,15 @@ import { api as rawApi } from '../api'
 import type { LocalSetupInventory, SetupProgressEvent } from '../types'
 import { formatBytes, formatDuration, formatRate, meaningfulEta, progressPercent } from '../setupFormatting'
 import { isLocalAiUnavailable, shouldAdvanceSetupQueue, summarizeSetupQueue, type SetupQueueSummary } from '../setupState'
+import { readCachedSetupInventory, writeCachedSetupInventory } from '../setupInventoryCache'
+import { isLocalSetupInventory, isOnboardingInventory } from '../nativeValidation'
+import { friendlyErrorMessage } from '../errorMessaging'
 
 interface Props { onDone: () => void }
 
 export default function Onboarding({ onDone }: Props) {
   const [step, setStep] = useState(0)
-  const [inventory, setInventory] = useState<LocalSetupInventory | null>(null)
+  const [inventory, setInventory] = useState<LocalSetupInventory | null>(() => readCachedSetupInventory())
   const [approved, setApproved] = useState(false)
   const [busy, setBusy] = useState(false)
   const [operationId, setOperationId] = useState<string | null>(null)
@@ -21,14 +24,31 @@ export default function Onboarding({ onDone }: Props) {
   const [, setQueueSummary] = useState<SetupQueueSummary>({ state: 'pending', completed: 0, failed: 0, cancelled: false })
   const queueRef = useRef<string[][]>([])
   const outcomesRef = useRef<Array<'success' | 'failed' | 'cancelled'>>([])
-  const api = { ...rawApi, cancelSetup: (id: string) => { queueRef.current = []; return rawApi.cancelSetup(id) } }
+  const mountedRef = useRef(true)
+  const inventoryRequestRef = useRef(0)
+  const api = { ...rawApi, cancelSetup: async (id: string) => { queueRef.current = []; try { await rawApi.cancelSetup(id) } catch (error) { if (mountedRef.current) setMessage(friendlyErrorMessage(error, 'Setup could not be cancelled. Retry the action.')) } } }
 
-  const refresh = () => api.setupInventory().then((value) => setInventory(value as unknown as LocalSetupInventory)).catch(() => setInventory(null))
+  const refresh = () => {
+    const requestId = ++inventoryRequestRef.current
+    return api.setupInventory().then((value) => {
+      if (mountedRef.current && requestId === inventoryRequestRef.current) {
+        if (!isOnboardingInventory(value)) throw new Error('Setup inventory is malformed.')
+        setInventory(value as LocalSetupInventory)
+        if (isLocalSetupInventory(value)) writeCachedSetupInventory(value)
+      }
+    }).catch(() => {
+      if (mountedRef.current && requestId === inventoryRequestRef.current) {
+        setMessage(readCachedSetupInventory() ? 'Live setup refresh unavailable. Showing the last verified setup.' : 'Setup information is unavailable. Retry the setup check.')
+      }
+    })
+  }
 
   useEffect(() => {
+    mountedRef.current = true
     refresh()
     let stop: (() => void) | undefined
     void listen<SetupProgressEvent>('setup-event', ({ payload }) => {
+      if (!mountedRef.current) return
       setProgress(payload)
       if (payload.event === 'terminal') {
         setOperationId(null)
@@ -46,8 +66,10 @@ export default function Onboarding({ onDone }: Props) {
           void refresh()
         }
       }
-    }).then((unlisten) => { stop = unlisten })
-    return () => stop?.()
+    }).then((unlisten) => { if (mountedRef.current) stop = unlisten; else unlisten() }).catch(() => {
+      if (mountedRef.current) setMessage('Setup progress events are unavailable. Restart ClipGauge and retry.')
+    })
+    return () => { mountedRef.current = false; stop?.() }
   }, [])
 
   useEffect(() => {
@@ -70,7 +92,14 @@ export default function Onboarding({ onDone }: Props) {
     setStartedAt((value) => value ?? Date.now())
     setProgress({ event: 'progress', operation: 'Preparing setup…', message: 'Checking the approved local downloads…', state: 'STARTING', elapsed_seconds: 0, one_time_download: true })
     setMessage(text)
-    try { setOperationId(await api.startSetup(args)) } catch (error) { setBusy(false); setStartedAt(null); setProgress(null); setQueueSummary({ state: 'failed', completed: 0, failed: 1, cancelled: false }); setMessage(`Setup could not start: ${String(error)}`) }
+    try {
+      const id = await api.startSetup(args)
+      if (typeof id !== 'string' || !id.trim()) throw new Error('Setup returned an invalid operation id.')
+      if (mountedRef.current) setOperationId(id)
+    } catch (error) {
+      if (!mountedRef.current) return
+      setBusy(false); setStartedAt(null); setProgress(null); setQueueSummary({ state: 'failed', completed: 0, failed: 1, cancelled: false }); setMessage(friendlyErrorMessage(error, 'Setup could not start. Retry the setup.'))
+    }
   }
 
   async function installLocal() {

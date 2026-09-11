@@ -1,16 +1,20 @@
+import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { chromium } from 'playwright-core'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const args = new Map()
 for (let index = 2; index < process.argv.length; index += 2) args.set(process.argv[index].replace(/^--/, ''), process.argv[index + 1])
 const output = args.get('output')
+const outputPath = resolve(output ?? '')
 const port = Number(args.get('port') || '9222')
 const jobId = args.get('job-id') || '20260829-202013-296b18'
 const sessionTitle = args.get('session-title') || 'v041-controlled'
 const fixture = args.get('fixture')
 if (!output || !fixture) throw new Error('output and fixture are required')
 const localFixture = fixture.replaceAll('\\', '/')
+const windowProbe = fileURLToPath(new URL('./windows-window-probe.ps1', import.meta.url))
 
 async function connect() {
   const deadline = Date.now() + 60_000
@@ -29,10 +33,26 @@ async function connect() {
 async function waitForVideo(page, testId) {
   const video = page.getByTestId(testId)
   await video.waitFor({ state: 'visible', timeout: 120_000 })
-  await page.waitForFunction((id) => {
-    const element = document.querySelector(`[data-testid="${id}"]`)
-    return element instanceof HTMLVideoElement && element.readyState >= 1 && Number.isFinite(element.duration) && element.duration > 0
-  }, testId, { timeout: 120_000 })
+  try {
+    await page.waitForFunction((id) => {
+      const element = document.querySelector(`[data-testid="${id}"]`)
+      return element instanceof HTMLVideoElement && element.readyState >= 1 && Number.isFinite(element.duration) && element.duration > 0
+    }, testId, { timeout: 120_000 })
+  } catch (error) {
+    const diagnostics = await page.evaluate((id) => ({
+      requested: id,
+      location: window.location.href,
+      videos: [...document.querySelectorAll('video')].map((element) => ({
+        testId: element.getAttribute('data-testid'),
+        readyState: element.readyState,
+        networkState: element.networkState,
+        duration: element.duration,
+        currentSrc: Boolean(element.currentSrc),
+        errorCode: element.error?.code ?? null,
+      })),
+    }), testId)
+    throw new Error(`${error.message}; video diagnostics=${JSON.stringify(diagnostics)}`)
+  }
   return video
 }
 
@@ -65,6 +85,58 @@ function findRunningJob(minStartedAtMs = 0) {
 function responsiveness(samples) {
   const ordered = [...samples].sort((left, right) => left - right)
   return { samples: samples.length, max_ms: Math.max(...samples), p95_ms: ordered[Math.max(0, Math.ceil(ordered.length * 0.95) - 1)] }
+}
+
+function nativeWindows() {
+  const raw = execFileSync('powershell.exe', ['-NoProfile', '-File', windowProbe, '-ProcessId', '0', '-AllVisible'], { encoding: 'utf8' }).trim()
+  if (!raw) return []
+  const parsed = JSON.parse(raw)
+  return (Array.isArray(parsed) ? parsed : [parsed]).map(String).map((record) => {
+    const [handle, ownerPid, title, className] = record.split('|')
+    return { handle, ownerPid, title, className }
+  }).filter((record) => record.handle)
+}
+
+async function saveNativeExport() {
+  const deadline = Date.now() + 30_000
+  let dialog = null
+  while (Date.now() < deadline) {
+    dialog = nativeWindows().find((record) => record.title === 'Save ClipGauge clip' && record.className === '#32770') ?? null
+    if (dialog) break
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  if (!dialog) throw new Error('native Save As dialog was not observed')
+  const destination = join(dirname(outputPath), 'exported-clip.mp4')
+  execFileSync('winapp', ['ui', 'set-value', 'FileNameControlHost', destination, '-w', dialog.handle], { stdio: 'inherit' })
+  const tree = execFileSync('winapp', ['ui', 'inspect', '-w', dialog.handle, '--depth', '8'], { encoding: 'utf8' })
+  const saveButton = tree.match(/^\s*(\S+)\s+Button\s+"Save"\s+\(/m)?.[1]
+  if (!saveButton) throw new Error(`native Save As Save button was not found: ${tree}`)
+  execFileSync('winapp', ['ui', 'invoke', saveButton, '-w', dialog.handle], { stdio: 'inherit' })
+  const closeDeadline = Date.now() + 30_000
+  const handledConfirmations = new Set()
+  while (Date.now() < closeDeadline) {
+    const dialogs = nativeWindows().filter((record) => record.title === 'Save ClipGauge clip' && record.className === '#32770')
+    if (!dialogs.some((record) => record.handle === dialog.handle)) return destination
+    for (const confirmation of dialogs) {
+      if (confirmation.handle === dialog.handle || handledConfirmations.has(confirmation.handle)) continue
+      let confirmationTree = ''
+      try {
+        confirmationTree = execFileSync('winapp', ['ui', 'inspect', '-w', confirmation.handle, '--depth', '4'], { encoding: 'utf8' })
+      } catch {}
+      const okButton = confirmationTree.match(/^\s*(\S+)\s+Button\s+"OK"\s+\(/m)?.[1]
+      if (!okButton) continue
+      handledConfirmations.add(confirmation.handle)
+      execFileSync('winapp', ['ui', 'invoke', okButton, '-w', confirmation.handle], { stdio: 'inherit' })
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  let state = ''
+  try {
+    state = execFileSync('winapp', ['ui', 'inspect', '-w', dialog.handle, '--depth', '4'], { encoding: 'utf8' })
+  } catch (error) {
+    state = `inspect failed: ${error.message}`
+  }
+  throw new Error(`native Save As dialog did not close after Save; destination_exists=${existsSync(destination)}; dialog_state=${state}`)
 }
 
 async function playback(page, video) {
@@ -134,10 +206,11 @@ try {
   evidence.process_states.push('RERENDERED_REVIEW')
   evidence.review_after_rerender = await playback(page, reviewVideoAfter)
   await page.getByRole('button', { name: 'EXPORT MP4', exact: true }).click()
+  const requestedExportPath = await saveNativeExport()
   await page.locator('.export-path').waitFor({ state: 'visible', timeout: 120_000 })
   const exportPath = await page.locator('.export-path').innerText()
-  evidence.export = { path_present: exportPath.trim().length > 0, exists: existsSync(exportPath.trim()) }
-  if (!evidence.export.path_present || !evidence.export.exists) throw new Error('export path was not created')
+  evidence.export = { path_present: exportPath.trim().length > 0, exists: existsSync(exportPath.trim()), requested_path: requestedExportPath, requested_path_exists: existsSync(requestedExportPath) }
+  if (!evidence.export.path_present || !evidence.export.exists || !evidence.export.requested_path_exists) throw new Error('export path was not created')
   await page.getByRole('button', { name: /studio/ }).click()
   await page.getByRole('button', { name: 'Sessions', exact: true }).click()
   await page.locator('.session-row').filter({ hasText: sessionTitle }).first().getByRole('button', { name: 'Open clips', exact: true }).click()
@@ -176,8 +249,8 @@ try {
   evidence.process_states.push('CANCELLED')
   evidence.editor = { before: editorBefore, style_changed: 'minimal' }
   evidence.total_duration_ms = Date.now() - startedAt
-  writeFileSync(output, `${JSON.stringify(evidence, null, 2)}\n`)
-  console.log(`CREATOR_LIFECYCLE_PASS ${output}`)
+  writeFileSync(outputPath, `${JSON.stringify(evidence, null, 2)}\n`)
+  console.log(`CREATOR_LIFECYCLE_PASS ${outputPath}`)
 } finally {
   await browser.close()
 }

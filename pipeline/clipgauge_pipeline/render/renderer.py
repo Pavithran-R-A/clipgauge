@@ -301,11 +301,13 @@ def render_clip(
         "-map_metadata", "-1",  # metadata scrub (openshorts ffmpeg_utils)
         str(out_path),
     ]
-    proc, used_encoder = run_ffmpeg_with_encoder_fallback(args, vcodec, timeout)
-    cmd_path.unlink(missing_ok=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"Render failed: {(proc.stderr or '')[-800:]}")
-    return used_encoder
+    try:
+        proc, used_encoder = run_ffmpeg_with_encoder_fallback(args, vcodec, timeout)
+        if proc.returncode != 0:
+            raise RuntimeError(f"Render failed: {(proc.stderr or '')[-800:]}")
+        return used_encoder
+    finally:
+        cmd_path.unlink(missing_ok=True)
 
 
 def verify_output(out_path: Path, expected_duration: float) -> dict:

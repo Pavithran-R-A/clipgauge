@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from clipgauge_pipeline.candidates.story_units import (
     BOUNDARY_SCHEMA,
     BoundaryProposal,
@@ -99,6 +101,29 @@ def test_fixture_f_payoff_extension_reaches_later_sentence():
     ], seconds=5.0))
     result = synthesize(units, anchor_limit=8, shortlist_limit=20)
     assert any(item["end"] >= units[-1].end for item in result["candidates"])
+    audit = result["candidate_audit"]
+    assert audit["raw_proposals"] == audit["story_unit_proposals"]
+    assert audit["deduped_proposals"] >= audit["shortlisted_proposals"]
+    assert audit["rejection_reasons"]
+
+
+def test_anchor_generation_preserves_distinct_story_topics():
+    units = build_sentence_units(_segments([
+        "The first story reveals a hidden bunker.",
+        "The second story reveals a secret elevator.",
+        "The third story reveals an underground pool.",
+    ], seconds=10.0))
+    labeled = [replace(unit, topic_id=index) for index, unit in enumerate(units)]
+
+    anchors = generate_anchors(labeled, limit=3)
+
+    assert {anchor.topic_id for anchor in anchors} == {0, 1, 2}
+
+
+def test_anchor_generation_respects_zero_limit():
+    units = build_sentence_units(_segments(["A complete story starts here.", "The story ends clearly."], seconds=5.0))
+
+    assert generate_anchors(units, limit=0) == []
 
 
 def test_fixture_g_quiet_video_can_have_no_survivors():
@@ -108,6 +133,219 @@ def test_fixture_g_quiet_video_can_have_no_survivors():
     assert cheap_filter_and_dedupe([]) == []
     result = synthesize(units, anchor_limit=3, shortlist_limit=10)
     assert result["candidates"] == []
+
+
+def test_candidate_filter_reports_every_discard_reason():
+    def candidate(candidate_id: str, topic: str, *, complete: bool = True) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "start": 0.0 if topic == "alpha" else 60.0,
+            "end": 20.0 if topic == "alpha" else 80.0,
+            "syntactic_complete": complete,
+            "central_premise": topic,
+            "sentence_ids": ["S1", "S2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": 1.0,
+            "information_density": 1.0,
+            "curve_score": 1.0,
+            "hook_strength": 1.0,
+            "payoff_candidate": True,
+            "topic_coherence": 100.0,
+            "topic_key": [topic],
+            "payoff_sentence": f"{topic} payoff",
+        }
+
+    audit: list[dict] = []
+    result = cheap_filter_and_dedupe(
+        [
+            candidate("incomplete", "alpha", complete=False),
+            candidate("kept", "alpha"),
+            candidate("duplicate", "alpha"),
+            candidate("over_limit", "beta"),
+            candidate("over_limit_two", "gamma"),
+        ],
+        limit=2,
+        audit=audit,
+    )
+
+    assert [item["candidate_id"] for item in result] == ["kept", "over_limit"]
+    reasons = {reason for item in audit for reason in item.get("rejection_reasons", [])}
+    assert {"INCOMPLETE_ENDING", "DUPLICATE_STORY", "SHORTLIST_LIMIT"} <= reasons
+
+
+def test_candidate_filter_keeps_distant_story_units_with_shared_terms():
+    def candidate(candidate_id: str, start: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "start": start,
+            "end": start + 20.0,
+            "syntactic_complete": True,
+            "central_premise": "A surprising result",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": 1.0,
+            "information_density": 1.0,
+            "curve_score": 1.0,
+            "hook_strength": 1.0,
+            "payoff_candidate": True,
+            "topic_coherence": 100.0,
+            "topic_key": ["challenge", "result"],
+            "payoff_sentence": "The result changes everything.",
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("early-story", 0.0),
+        candidate("late-story", 180.0),
+    ], limit=10)
+
+    assert [item["candidate_id"] for item in result] == ["early-story", "late-story"]
+
+
+def test_anchor_selection_spreads_across_long_sources():
+    segments = [
+        {
+            "start": index * 5.0,
+            "end": index * 5.0 + 4.8,
+            "speaker": 0,
+            "text": f"Alpha{index} beta{index} gamma{index} delta{index} epsilon{index}.",
+            "words": [],
+        }
+        for index in range(120)
+    ]
+
+    anchors = generate_anchors(
+        build_sentence_units(segments, scene_times=[index * 5.0 for index in range(1, 120)]),
+        limit=12,
+    )
+
+    assert len(anchors) == 12
+    assert anchors[-1].start >= 500.0
+    assert len({int(anchor.start // 60) for anchor in anchors}) >= 8
+
+
+def test_anchor_selection_keeps_dense_topics_over_anchor_limit():
+    segments = [
+        {
+            "start": index * 8.0,
+            "end": index * 8.0 + 7.5,
+            "speaker": 0,
+            "text": f"Topic {index} reveals a distinct result.",
+            "words": [],
+        }
+        for index in range(21)
+    ]
+    units = build_sentence_units(segments)
+    labeled = [replace(unit, topic_id=index) for index, unit in enumerate(units)]
+
+    anchors = generate_anchors(labeled, limit=20)
+
+    assert len(anchors) == 20
+    assert len({anchor.topic_id for anchor in anchors}) == 20
+    assert anchors[-1].start >= 152.0
+
+
+def test_anchor_selection_ignores_sparse_tail_for_dense_topic_capacity():
+    segments = [
+        {
+            "start": index * 8.0,
+            "end": index * 8.0 + 7.5,
+            "speaker": 0,
+            "text": f"Topic {index} reveals a distinct result.",
+            "words": [],
+        }
+        for index in range(21)
+    ]
+    segments.append({
+        "start": 1000.0,
+        "end": 1007.5,
+        "speaker": 0,
+        "text": "The epilogue reveals a distant result.",
+        "words": [],
+    })
+    units = build_sentence_units(segments)
+    labeled = [replace(unit, topic_id=index) for index, unit in enumerate(units)]
+
+    anchors = generate_anchors(labeled, limit=20)
+
+    assert len(anchors) == 20
+    assert sum(anchor.start < 200.0 for anchor in anchors) >= 19
+
+
+def test_anchor_selection_keeps_uneven_dense_topics_over_anchor_limit():
+    starts = [0.0]
+    for index in range(1, 21):
+        starts.append(starts[-1] + (1.0 if index % 2 else 9.0))
+    segments = [
+        {
+            "start": start,
+            "end": start + 0.8,
+            "speaker": 0,
+            "text": f"Topic {index} reveals a distinct result.",
+            "words": [],
+        }
+        for index, start in enumerate(starts)
+    ]
+    units = build_sentence_units(segments)
+    labeled = [replace(unit, topic_id=index) for index, unit in enumerate(units)]
+
+    anchors = generate_anchors(labeled, limit=20)
+
+    assert len(anchors) == 20
+
+
+def test_candidate_audit_distinguishes_deduped_from_shortlisted():
+    units = build_sentence_units(_segments([
+        "The first room hides a bunker.",
+        "A secret elevator opens below.",
+        "The underground pool is worth millions.",
+        "The second room grows food indoors.",
+        "Hydroponics feeds seventy five people.",
+        "That keeps the entire shelter alive.",
+    ], seconds=5.0))
+
+    result = synthesize(units, anchor_limit=8, shortlist_limit=1)
+
+    assert len(result["candidates"]) == 1
+    audit = result["candidate_audit"]
+    assert audit["deduped_proposals"] > audit["shortlisted_proposals"]
+    assert any("SHORTLIST_LIMIT" in item["rejection_reasons"] for item in audit["rejection_reasons"])
+
+
+def test_candidate_audit_separates_deterministic_and_llm_proposals():
+    units = build_sentence_units(_segments([
+        "Why is this bunker hidden?", "Because it is underground.",
+        "The secret elevator opens below.", "Whoa, there is a pool underground.",
+    ], seconds=5.0))
+
+    def proposer(neighborhood, _anchor):
+        return [BoundaryProposal(
+            neighborhood[0].sentence_id,
+            neighborhood[1].sentence_id,
+            "A hidden bunker is underground.",
+            neighborhood[0].sentence_id,
+            neighborhood[1].sentence_id,
+            "question_answer",
+            "question",
+            "answer",
+        )]
+
+    result = synthesize(
+        units,
+        boundary_proposer=proposer,
+        anchor_limit=2,
+        boundary_limit=1,
+        shortlist_limit=20,
+    )
+
+    audit = result["candidate_audit"]
+    assert audit["deterministic_proposals"] > 0
+    assert audit["llm_proposals"] > 0
+    assert audit["raw_proposals"] == (
+        audit["deterministic_proposals"] + audit["llm_proposals"]
+    )
+    assert audit["story_unit_proposals"] == audit["deterministic_proposals"]
 
 
 def test_boundary_schema_and_ids_are_strict():

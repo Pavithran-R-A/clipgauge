@@ -1,8 +1,12 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -380,6 +384,72 @@ fn selected_model(home: &Path, requested: Option<&str>) -> String {
     "clipgauge-local/qwen3-4b-q4_k_m".to_string()
 }
 
+fn temporary_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("state");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    parent.join(format!(".{name}.{}.{}.part", std::process::id(), nonce))
+}
+
+#[cfg(windows)]
+fn replace_file(temporary: &Path, destination: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
+    }
+
+    let from: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    let moved = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(std::io::Error::last_os_error().to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file(temporary: &Path, destination: &Path) -> Result<(), String> {
+    fs::rename(temporary, destination).map_err(|error| error.to_string())
+}
+
+pub(crate) fn atomic_write(path: &Path, payload: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let temporary = temporary_path(path);
+    let result = (|| {
+        let mut file = fs::File::create(&temporary).map_err(|error| error.to_string())?;
+        file.write_all(payload).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        replace_file(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 pub fn valid_model_id(model_id: &str) -> bool {
     matches!(
         model_id,
@@ -393,11 +463,9 @@ pub fn save_selected_model(home: &Path, model_id: &str) -> Result<(), String> {
     }
     fs::create_dir_all(home).map_err(|error| error.to_string())?;
     let path = home.join("local-ai-settings.json");
-    let temporary = home.join(".local-ai-settings.json.part");
     let payload = serde_json::to_vec_pretty(&json!({"selected_model_id": model_id}))
         .map_err(|error| error.to_string())?;
-    fs::write(&temporary, payload).map_err(|error| error.to_string())?;
-    fs::rename(&temporary, &path).map_err(|error| error.to_string())
+    atomic_write(&path, &payload)
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -415,54 +483,328 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{digest:x}"))
 }
 
-fn installed_details(home: &Path, spec: &AssetSpec) -> (bool, Option<String>) {
-    let mut first_digest = None;
+fn digest_json(value: &Value) -> String {
+    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    let mut digest = Sha256::new();
+    digest.update(bytes);
+    format!("{:x}", digest.finalize())
+}
+
+fn cache_platform() -> &'static str {
+    platform_key()
+}
+
+fn cache_asset_digest(spec: &AssetSpec) -> String {
+    digest_json(&json!({
+        "asset_id": spec.asset_id,
+        "destination": spec.destination,
+        "installed_paths": spec.installed_paths,
+        "installed_hashes": spec.installed_hashes,
+        "size_bytes": spec.size_bytes,
+        "sha256": spec.sha256,
+        "installed_size_bytes": spec.installed_size_bytes,
+        "platform": cache_platform(),
+    }))
+}
+
+fn cache_mtime_ns(metadata: &fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos()
+        .try_into()
+        .ok()
+}
+
+#[cfg(unix)]
+fn cache_file_identity(_path: &Path, metadata: &fs::Metadata) -> Value {
+    json!([metadata.dev(), metadata.ino()])
+}
+
+#[cfg(windows)]
+fn cache_file_identity(path: &Path, _metadata: &fs::Metadata) -> Value {
+    use std::ffi::c_void;
+    use std::mem::MaybeUninit;
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+
+    #[repr(C)]
+    struct ByHandleFileInformation {
+        attributes: u32,
+        creation_time: FileTime,
+        last_access_time: FileTime,
+        last_write_time: FileTime,
+        volume_serial_number: u32,
+        file_size_high: u32,
+        file_size_low: u32,
+        number_of_links: u32,
+        file_index_high: u32,
+        file_index_low: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandle(
+            file: *mut c_void,
+            information: *mut ByHandleFileInformation,
+        ) -> i32;
+    }
+
+    let Some(file) = fs::File::open(path).ok() else {
+        return Value::Null;
+    };
+    let mut information = MaybeUninit::<ByHandleFileInformation>::uninit();
+    let read =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+    if read == 0 {
+        return Value::Null;
+    }
+    let information = unsafe { information.assume_init() };
+    json!([
+        information.volume_serial_number,
+        information.file_index_high,
+        information.file_index_low
+    ])
+}
+
+#[cfg(not(any(unix, windows)))]
+fn cache_file_identity(_path: &Path, _metadata: &fs::Metadata) -> Value {
+    Value::Null
+}
+
+fn cache_canonical_path(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn cache_file_snapshot(path: &Path, expected_hash: &str) -> Option<Value> {
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    Some(json!({
+        "canonical_path": cache_canonical_path(path),
+        "expected_hash": expected_hash,
+        "size": metadata.len(),
+        "mtime_ns": cache_mtime_ns(&metadata),
+        "file_identity": cache_file_identity(path, &metadata),
+    }))
+}
+
+fn cache_expected_hash<'a>(spec: &'a AssetSpec, path: &str) -> &'a str {
+    spec.installed_hashes
+        .iter()
+        .find(|(expected_path, _)| expected_path == path)
+        .map(|(_, expected)| expected.as_str())
+        .unwrap_or_default()
+}
+
+fn cache_now() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or_default()
+}
+
+struct InventoryCache {
+    payload: Value,
+    in_run: HashMap<String, (bool, Vec<String>)>,
+}
+
+impl InventoryCache {
+    const SCHEMA_VERSION: u64 = 1;
+
+    fn empty(manifest_digest: &str) -> Value {
+        json!({
+            "schema_version": Self::SCHEMA_VERSION,
+            "app_version": env!("CARGO_PKG_VERSION"),
+            "runtime_manifest_digest": manifest_digest,
+            "platform": cache_platform(),
+            "last_verified_at": Value::Null,
+            "entries": {},
+        })
+    }
+
+    fn load(home: &Path, manifest_digest: &str) -> Self {
+        let path = home.join("inventory-cache.json");
+        let payload = fs::read_to_string(path)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
+            .filter(|value| {
+                value.get("schema_version").and_then(Value::as_u64) == Some(Self::SCHEMA_VERSION)
+                    && value.get("app_version").and_then(Value::as_str)
+                        == Some(env!("CARGO_PKG_VERSION"))
+                    && value.get("platform").and_then(Value::as_str) == Some(cache_platform())
+            })
+            .unwrap_or_else(|| Self::empty(manifest_digest));
+        let mut cache = Self {
+            payload,
+            in_run: HashMap::new(),
+        };
+        if !cache
+            .payload
+            .get("entries")
+            .map(Value::is_object)
+            .unwrap_or(false)
+        {
+            cache.payload["entries"] = json!({});
+        }
+        cache.payload["runtime_manifest_digest"] = json!(manifest_digest);
+        cache
+    }
+
+    fn key(spec: &AssetSpec) -> String {
+        format!("{}|{}", spec.asset_id, spec.destination)
+    }
+
+    fn lookup(&self, home: &Path, spec: &AssetSpec) -> Option<(bool, Vec<String>)> {
+        let key = Self::key(spec);
+        let entry = self.payload.get("entries")?.get(&key)?;
+        if entry.get("asset_manifest_digest").and_then(Value::as_str)
+            != Some(cache_asset_digest(spec).as_str())
+        {
+            return None;
+        }
+        let files = entry.get("files")?.as_array()?;
+        if files.len() != spec.installed_paths.len() {
+            return None;
+        }
+        let mut hashes = Vec::with_capacity(files.len());
+        for (path, cached_file) in spec.installed_paths.iter().zip(files) {
+            let expected_hash = cache_expected_hash(spec, path);
+            let current_file = cache_file_snapshot(&home.join(path), expected_hash)?;
+            if current_file.get("file_identity") == Some(&Value::Null) {
+                return None;
+            }
+            for field in [
+                "canonical_path",
+                "expected_hash",
+                "size",
+                "mtime_ns",
+                "file_identity",
+            ] {
+                if current_file.get(field) != cached_file.get(field) {
+                    return None;
+                }
+            }
+            let verified_hash = cached_file.get("verified_hash")?.as_str()?;
+            if !expected_hash.is_empty() && !verified_hash.eq_ignore_ascii_case(expected_hash) {
+                return None;
+            }
+            hashes.push(verified_hash.to_string());
+        }
+        Some((true, hashes))
+    }
+
+    fn record(&mut self, home: &Path, spec: &AssetSpec, details: &(bool, Vec<String>)) {
+        if !details.0 || details.1.len() != spec.installed_paths.len() {
+            return;
+        }
+        let Some(files) = spec
+            .installed_paths
+            .iter()
+            .zip(&details.1)
+            .map(|(path, verified_hash)| {
+                let mut snapshot =
+                    cache_file_snapshot(&home.join(path), cache_expected_hash(spec, path))?;
+                snapshot["verified_hash"] = json!(verified_hash);
+                Some(snapshot)
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            return;
+        };
+        let verified_at = cache_now();
+        let runtime_manifest_digest = self.payload["runtime_manifest_digest"].clone();
+        let key = Self::key(spec);
+        self.payload["entries"][&key] = json!({
+            "asset_manifest_digest": cache_asset_digest(spec),
+            "runtime_manifest_digest": runtime_manifest_digest,
+            "verified_at": verified_at,
+            "files": files,
+        });
+    }
+
+    fn save(&mut self, home: &Path) -> Result<(), String> {
+        let verified_times = self
+            .payload
+            .get("entries")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flat_map(|entries| entries.values())
+            .filter_map(|entry| entry.get("verified_at").and_then(Value::as_f64));
+        if let Some(last_verified_at) = verified_times.reduce(f64::max) {
+            self.payload["last_verified_at"] = json!(last_verified_at);
+        }
+        self.payload["updated_at"] = json!(cache_now());
+        let path = home.join("inventory-cache.json");
+        let payload =
+            serde_json::to_vec_pretty(&self.payload).map_err(|error| error.to_string())?;
+        atomic_write(&path, &payload)
+    }
+}
+
+fn installed_details(home: &Path, spec: &AssetSpec) -> (bool, Vec<String>) {
+    let mut digests = Vec::new();
     for path in &spec.installed_paths {
         let full_path = home.join(path);
         if !full_path.is_file() {
-            return (false, first_digest);
+            return (false, digests);
         }
         let Ok(digest) = sha256_file(&full_path) else {
-            return (false, first_digest);
+            return (false, digests);
         };
-        if first_digest.is_none() {
-            first_digest = Some(digest.clone());
-        }
-        let expected = spec
-            .installed_hashes
-            .iter()
-            .find(|(expected_path, _)| expected_path == path)
-            .map(|(_, expected)| expected.as_str())
-            .unwrap_or_default();
+        digests.push(digest.clone());
+        let expected = cache_expected_hash(spec, path);
         if !expected.is_empty() && !digest.eq_ignore_ascii_case(expected) {
-            return (false, first_digest);
+            return (false, digests);
         }
     }
     if spec.installed_paths.len() == 1 && !spec.installed_hashes.is_empty() {
         let Ok(metadata) = fs::metadata(home.join(&spec.installed_paths[0])) else {
-            return (false, first_digest);
+            return (false, digests);
         };
         let size_ready = spec
             .installed_size_bytes
             .map(|size| metadata.len() == size)
             .unwrap_or_else(|| spec.size_bytes == 0 || metadata.len() == spec.size_bytes);
         if !size_ready {
-            return (false, first_digest);
+            return (false, digests);
         }
     }
-    (true, first_digest)
+    (true, digests)
 }
 
 fn asset_row(
     home: &Path,
     states: &HashMap<String, Value>,
     spec: &AssetSpec,
-    cache: &mut HashMap<String, (bool, Option<String>)>,
+    cache: &mut InventoryCache,
 ) -> Value {
-    let (is_installed, installed_sha256) = cache
-        .entry(spec.asset_id.clone())
-        .or_insert_with(|| installed_details(home, spec))
-        .clone();
+    let details = if let Some(details) = cache.in_run.get(&spec.asset_id) {
+        details.clone()
+    } else if let Some(details) = cache.lookup(home, spec) {
+        cache.in_run.insert(spec.asset_id.clone(), details.clone());
+        details
+    } else {
+        let details = installed_details(home, spec);
+        if details.0 {
+            cache.record(home, spec, &details);
+        }
+        cache.in_run.insert(spec.asset_id.clone(), details.clone());
+        details
+    };
+    let (is_installed, installed_hashes) = details;
+    let installed_sha256 = installed_hashes.first().cloned();
     let persisted_status = states
         .get(&spec.asset_id)
         .and_then(|state| state.get("status"))
@@ -1206,7 +1548,7 @@ pub fn native_inventory(
             (ready, source, Some(path), version, capabilities, reason)
         })
         .unwrap_or_else(|| (false, "missing".to_string(), None, None, HashMap::new(), "No FFmpeg executable was found in the configured, managed, bundled, or system locations.".to_string()));
-    let mut installed_cache = HashMap::new();
+    let mut installed_cache = InventoryCache::load(home, &digest_json(&manifest));
     let mut rows = specs
         .iter()
         .map(|spec| asset_row(home, &states, spec, &mut installed_cache))
@@ -1253,12 +1595,13 @@ pub fn native_inventory(
         .map(|model| model.asset_id.clone())
         .unwrap_or(selected_id);
     let runtime_ready = runtime_spec
-        .and_then(|spec| installed_cache.get(&spec.asset_id))
+        .and_then(|spec| installed_cache.in_run.get(&spec.asset_id))
         .map(|(ready, _)| *ready)
         .unwrap_or(false);
     let model_ready = selected
         .map(|model| {
             installed_cache
+                .in_run
                 .get(&model.asset_id)
                 .map(|(ready, _)| *ready)
                 .unwrap_or(false)
@@ -1339,8 +1682,22 @@ pub fn native_inventory(
         "selected_model": selected_id.clone(),
         "actual_additional_bytes": (if runtime_ready { 0 } else { runtime_spec.map(|spec| spec.size_bytes).unwrap_or_default() }) + (if model_ready { 0 } else { selected.map(|model| model.size_bytes).unwrap_or_default() }),
     });
+    let _ = installed_cache.save(home);
+    let last_verified_at = installed_cache
+        .payload
+        .get("last_verified_at")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let runtime_manifest_digest = installed_cache
+        .payload
+        .get("runtime_manifest_digest")
+        .cloned()
+        .unwrap_or(Value::String(String::new()));
     Ok(json!({
         "state": if required_ready { "ready" } else { "setup-required" },
+        "platform": cache_platform(),
+        "runtime_manifest_digest": runtime_manifest_digest,
+        "last_verified_at": last_verified_at,
         "runtime": runtime_row,
         "runtime_variants": runtime_rows,
         "runtime_selection": {
@@ -1400,8 +1757,10 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::native_inventory;
+    use serde_json::Value;
+
     use super::save_selected_model;
+    use super::{native_inventory, InventoryCache};
 
     fn temporary_home() -> PathBuf {
         let suffix = SystemTime::now()
@@ -1420,6 +1779,7 @@ mod tests {
         let inventory = native_inventory(&resources, &home, None).expect("inventory must load");
 
         assert_eq!(inventory["state"], "setup-required");
+        assert!(inventory.get("last_verified_at").is_some());
         assert!(inventory["storage"]["required_bytes"].as_u64().unwrap() > 0);
         assert!(inventory["managed_assets"].as_array().unwrap().len() >= 10);
         assert!(!home.join("downloads.json").exists());
@@ -1483,12 +1843,128 @@ mod tests {
             "test",
             None,
         );
-        let mut cache = HashMap::new();
+        let mut cache = InventoryCache::load(&home, "manifest-test");
         let row = super::asset_row(&home, &HashMap::new(), &spec, &mut cache);
 
         assert_eq!(row["status"], "needs-repair");
         assert_eq!(row["installed"], false);
         assert!(row["installed_sha256"].as_str().is_some());
+        fs::remove_dir_all(home).expect("temporary inventory home must be removable");
+    }
+
+    #[test]
+    fn persistent_inventory_cache_reuses_unchanged_files_and_invalidates_metadata_changes() {
+        let home = temporary_home();
+        let path = home.join("asset.bin");
+        fs::write(&path, b"verified").expect("test asset must be writable");
+        let expected = super::sha256_file(&path).expect("test asset must hash");
+        let spec = super::static_spec(
+            "test:cached-asset",
+            "Cached asset",
+            "Persistent cache test",
+            "downloads/asset.bin",
+            "asset.bin",
+            "https://example.com/asset.bin",
+            8,
+            &expected,
+            "Test",
+            "https://example.com",
+            "test",
+            None,
+        );
+        let mut cache = InventoryCache::load(&home, "manifest-a");
+        let first = super::asset_row(&home, &HashMap::new(), &spec, &mut cache);
+        assert_eq!(first["installed"], true);
+        cache.save(&home).expect("inventory cache must save");
+
+        let reloaded = InventoryCache::load(&home, "manifest-a");
+        assert!(reloaded.lookup(&home, &spec).is_some());
+        let changed_manifest = InventoryCache::load(&home, "manifest-b");
+        assert!(changed_manifest.lookup(&home, &spec).is_some());
+        let changed_spec = super::AssetSpec {
+            size_bytes: 9,
+            ..spec.clone()
+        };
+        assert!(changed_manifest.lookup(&home, &changed_spec).is_none());
+        fs::write(&path, b"tampered").expect("test asset must be replaceable");
+        assert!(reloaded.lookup(&home, &spec).is_none());
+        let payload = serde_json::from_str::<Value>(
+            &fs::read_to_string(home.join("inventory-cache.json")).expect("cache must be readable"),
+        )
+        .expect("cache must be valid JSON");
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["runtime_manifest_digest"], "manifest-a");
+        assert!(payload["last_verified_at"].as_f64().is_some());
+        assert!(payload["entries"]["test:cached-asset|downloads/asset.bin"]["files"].is_array());
+        assert!(
+            payload["entries"]["test:cached-asset|downloads/asset.bin"]["files"][0]
+                ["canonical_path"]
+                .is_string()
+        );
+
+        fs::remove_dir_all(home).expect("temporary inventory home must be removable");
+    }
+
+    #[test]
+    fn persistent_inventory_cache_rehashes_same_size_replacement_with_preserved_mtime() {
+        let home = temporary_home();
+        let path = home.join("asset.bin");
+        fs::write(&path, b"verified").expect("test asset must be writable");
+        let expected = super::sha256_file(&path).expect("test asset must hash");
+        let spec = super::static_spec(
+            "test:preserved-mtime-asset",
+            "Preserved mtime asset",
+            "Persistent cache tamper test",
+            "downloads/asset.bin",
+            "asset.bin",
+            "https://example.com/asset.bin",
+            8,
+            &expected,
+            "Test",
+            "https://example.com",
+            "test",
+            None,
+        );
+        let mut cache = InventoryCache::load(&home, "manifest-a");
+        let first = super::asset_row(&home, &HashMap::new(), &spec, &mut cache);
+        assert_eq!(first["installed"], true);
+        cache.save(&home).expect("inventory cache must save");
+
+        let metadata = fs::metadata(&path).expect("asset metadata must be readable");
+        super::atomic_write(&path, b"tampered").expect("test asset must be replaceable");
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("test asset must remain writable");
+        file.set_times(
+            fs::FileTimes::new()
+                .set_accessed(metadata.accessed().unwrap())
+                .set_modified(metadata.modified().unwrap()),
+        )
+        .expect("test asset timestamps must be restorable");
+
+        let reloaded = InventoryCache::load(&home, "manifest-a");
+        assert!(reloaded.lookup(&home, &spec).is_none());
+        fs::remove_dir_all(home).expect("temporary inventory home must be removable");
+    }
+
+    #[test]
+    fn atomic_inventory_write_replaces_existing_file_without_leaving_partials() {
+        let home = temporary_home();
+        let path = home.join("inventory-cache.json");
+        fs::write(&path, b"old").expect("existing cache must be writable");
+
+        super::atomic_write(&path, b"new").expect("cache replacement must succeed");
+
+        assert_eq!(fs::read(&path).expect("cache must remain readable"), b"new");
+        assert_eq!(
+            fs::read_dir(&home)
+                .expect("cache home must be readable")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".part"))
+                .count(),
+            0
+        );
         fs::remove_dir_all(home).expect("temporary inventory home must be removable");
     }
 

@@ -46,7 +46,7 @@ jobs:
         run: npm install --no-save --no-package-lock playwright-core@1.62.1
 
       - name: Test Tauri bridge qualification contract
-        run: node --test .github/windows-ui-bridge.test.mjs
+        run: node --test .github/windows-ui-bridge.test.mjs .github/windows-ui-qualification-capture.test.mjs .github/windows-ui-creator-lifecycle.test.mjs
 
       - name: Provide compatible system FFmpeg on PATH
         working-directory: pipeline
@@ -192,6 +192,11 @@ jobs:
             .github/windows-ui-json.mjs
             .github/windows-ui-bridge.mjs
             .github/windows-ui-bridge.test.mjs
+            .github/windows-ui-qualification-capture.test.mjs
+            .github/windows-ui-creator-lifecycle.test.mjs
+            .github/windows-ui-creator-lifecycle.mjs
+            .github/windows-ui-creator-lifecycle.ps1
+            .github/windows-window-probe.ps1
             .github/windows-ui-evidence-contract.mjs
             .github/windows-ui-evidence-contract.test.mjs
             scripts/qa_provider_fixture.py

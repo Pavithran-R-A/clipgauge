@@ -27,4 +27,27 @@ describe('support bundle context', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Create support bundle/i }))
     await waitFor(() => expect(api.generateSupportBundle).toHaveBeenCalledWith('job-123', 'diag-X'))
   })
+
+  it('shows when health checks cannot be loaded', async () => {
+    vi.mocked(api.preflight).mockRejectedValueOnce(new Error('preflight unavailable'))
+    vi.mocked(api.youtubeReadiness).mockRejectedValueOnce(new Error('YouTube check unavailable'))
+    render(<SupportPage onBack={() => undefined} />)
+
+    expect(await screen.findByText(/Health checks are unavailable\. Open Setup and retry\./)).toBeInTheDocument()
+  })
+
+  it('surfaces malformed preflight data safely', async () => {
+    vi.mocked(api.preflight).mockResolvedValueOnce({ checks: null } as never)
+    render(<SupportPage onBack={() => undefined} />)
+
+    expect(await screen.findByText(/Health checks are malformed\. Open Setup and retry\./)).toBeInTheDocument()
+  })
+
+  it('surfaces malformed YouTube status safely', async () => {
+    vi.mocked(api.preflight).mockResolvedValueOnce({ state: 'ready', selected_llm: 'local', checks: [] } as never)
+    vi.mocked(api.youtubeReadiness).mockResolvedValueOnce({ ready: true } as never)
+    render(<SupportPage onBack={() => undefined} />)
+
+    expect(await screen.findByText(/YouTube status is malformed\. Open Setup and retry\./)).toBeInTheDocument()
+  })
 })

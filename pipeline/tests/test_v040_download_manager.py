@@ -1,8 +1,20 @@
+import json
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from clipgauge_pipeline import downloads, runtime
+
+
+@pytest.fixture(autouse=True)
+def sufficient_test_disk(monkeypatch):
+    monkeypatch.setattr(
+        downloads.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=8 * 1024**3, total=8 * 1024**3, used=0),
+    )
 
 
 def _asset(destination: str = "assets/model.bin", *, group: str = "core") -> downloads.ManagedAsset:
@@ -17,6 +29,21 @@ def _asset(destination: str = "assets/model.bin", *, group: str = "core") -> dow
         required=True,
         consent_group=group,
     )
+
+
+def test_inventory_json_write_cleans_failed_temporary(monkeypatch, tmp_path):
+    destination = tmp_path / "inventory-cache.json"
+    destination.write_text("previous", encoding="utf-8")
+
+    def fail_replace(*_args):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(downloads.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        downloads._write_json_atomic(destination, {"state": "new"})
+
+    assert destination.read_text(encoding="utf-8") == "previous"
+    assert list(tmp_path.glob(".inventory-cache.json.*.part")) == []
 
 
 def test_grouped_consent_is_exactly_asset_scoped(tmp_path):
@@ -100,6 +127,156 @@ def test_corrupt_asset_is_needs_repair(tmp_path):
     row = manager.inventory([asset])[0]
     assert row["status"] == "needs-repair"
     assert row["state"] == "NEEDS_REPAIR"
+
+
+def test_inventory_cache_reuses_hash_when_file_metadata_is_unchanged(monkeypatch, tmp_path):
+    manager = downloads.DownloadManager(tmp_path)
+    destination = tmp_path / "assets/model.bin"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"verified")
+    asset = _asset()
+    asset = downloads.ManagedAsset(**{**asset.to_json(), "sha256": runtime.sha256_file(destination)})
+    original_hash = downloads.runtime.sha256_file
+    calls = 0
+
+    def counting_hash(path):
+        nonlocal calls
+        calls += 1
+        return original_hash(path)
+
+    monkeypatch.setattr(downloads.runtime, "sha256_file", counting_hash)
+    assert manager.inventory_cached([asset])[0]["verification"] == "fresh-hash"
+    assert manager.inventory_cached([asset])[0]["verification"] == "cached-hash"
+    assert calls == 1
+    cache = json.loads(manager.inventory_cache.path.read_text(encoding="utf-8"))
+    assert cache["app_version"]
+    assert cache["platform"]
+    assert cache["runtime_manifest_digest"]
+    assert cache["last_verified_at"]
+    assert cache["entries"][manager.inventory_cache.key(asset)]["verified_at"]
+
+    destination.write_bytes(b"changed!!")
+    manager.inventory_cached([asset])
+    assert calls == 2
+
+
+def test_inventory_cache_rehashes_same_size_replacement_with_preserved_mtime(tmp_path):
+    manager = downloads.DownloadManager(tmp_path)
+    destination = tmp_path / "assets/model.bin"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"verified")
+    asset = _asset()
+    asset = downloads.ManagedAsset(**{**asset.to_json(), "sha256": runtime.sha256_file(destination)})
+
+    assert manager.inventory_cached([asset])[0]["verification"] == "fresh-hash"
+    original_stat = destination.stat()
+    replacement = destination.with_name("replacement.bin")
+    replacement.write_bytes(b"tampered")
+    os.replace(replacement, destination)
+    os.utime(destination, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    row = manager.inventory_cached([asset])[0]
+    assert row["verification"] == "fresh-hash"
+    assert row["installed"] is False
+
+
+def test_sidecar_inventory_cache_does_not_collide_with_native_inventory_cache(tmp_path):
+    native_cache = tmp_path / "inventory-cache.json"
+    native_cache.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "app_version": "0.5.16",
+            "platform": "windows",
+            "entries": {"native": {"files": []}},
+        }),
+        encoding="utf-8",
+    )
+
+    manager = downloads.DownloadManager(tmp_path)
+
+    assert manager.inventory_cache.path == tmp_path / "pipeline-inventory-cache.json"
+    assert manager.inventory_cache.payload["entries"] == {}
+    assert native_cache.read_text(encoding="utf-8").find('"files"') >= 0
+
+
+def test_inventory_cache_survives_different_callers_and_invalidates_only_changed_asset(tmp_path):
+    manager = downloads.DownloadManager(tmp_path)
+    first_path = tmp_path / "assets/first.bin"
+    second_path = tmp_path / "assets/second.bin"
+    first_path.parent.mkdir(parents=True)
+    first_path.write_bytes(b"first")
+    second_path.write_bytes(b"second")
+    first = downloads.ManagedAsset(**{**_asset("assets/first.bin").to_json(), "sha256": runtime.sha256_file(first_path), "size_bytes": 5})
+    second = downloads.ManagedAsset(**{**_asset("assets/second.bin").to_json(), "sha256": runtime.sha256_file(second_path), "size_bytes": 6})
+
+    assert manager.inventory_cached([first])[0]["verification"] == "fresh-hash"
+    rows = manager.inventory_cached([second, first])
+    assert rows[0]["verification"] == "fresh-hash"
+    assert rows[1]["verification"] == "cached-hash"
+
+
+def test_cached_inventory_consent_does_not_rehash_verified_asset(monkeypatch, tmp_path):
+    manager = downloads.DownloadManager(tmp_path)
+    destination = tmp_path / "assets/model.bin"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"verified")
+    asset = downloads.ManagedAsset(**{**_asset().to_json(), "sha256": runtime.sha256_file(destination), "size_bytes": 8})
+    manager.grant_consent("core", [asset])
+    manager.inventory_cached([asset])
+    monkeypatch.setattr(manager, "_asset_ready", lambda *args: pytest.fail("cached consent must not rehash"))
+    assert manager.inventory_cached([asset])[0]["consent_granted"] is True
+
+
+def test_inventory_cache_invalidates_when_app_version_changes(tmp_path):
+    destination = tmp_path / "assets/model.bin"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"verified")
+    asset = _asset()
+    asset = downloads.ManagedAsset(**{**asset.to_json(), "sha256": runtime.sha256_file(destination)})
+    path = tmp_path / "inventory-cache.json"
+
+    first = downloads.VersionedInventoryCache(path, app_version="0.5.16")
+    first.set_context("manifest-a")
+    first.record(asset, destination, asset.sha256)
+    first.save()
+    second = downloads.VersionedInventoryCache(path, app_version="0.5.17")
+    second.set_context("manifest-a")
+
+    assert second.lookup(asset, destination) is None
+
+
+def test_inventory_cache_reuses_unaffected_asset_when_runtime_manifest_changes(tmp_path):
+    destination = tmp_path / "assets/model.bin"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"verified")
+    asset = _asset()
+    asset = downloads.ManagedAsset(**{**asset.to_json(), "sha256": runtime.sha256_file(destination)})
+    path = tmp_path / "inventory-cache.json"
+
+    cache = downloads.VersionedInventoryCache(path, app_version="0.5.16")
+    cache.set_context("manifest-a")
+    cache.record(asset, destination, asset.sha256)
+    cache.save()
+    changed = downloads.VersionedInventoryCache(path, app_version="0.5.16")
+    changed.set_context("manifest-b")
+
+    assert changed.payload["runtime_manifest_digest"] == "manifest-b"
+    assert changed.lookup(asset, destination) is not None
+
+
+def test_estimate_uses_metadata_aware_inventory(monkeypatch, tmp_path):
+    manager = downloads.DownloadManager(tmp_path)
+    monkeypatch.setattr(manager, "inventory", lambda *args, **kwargs: pytest.fail("full inventory must not run"))
+    monkeypatch.setattr(manager, "inventory_cached", lambda assets, **kwargs: [{
+        "required": True,
+        "installed": True,
+        "size_bytes": 8,
+        "installed_size_bytes": 8,
+    }])
+
+    estimate = manager.estimate([_asset()])
+
+    assert estimate["installed_bytes"] == 8
 
 
 def test_disk_space_check_blocks_before_download(monkeypatch, tmp_path):

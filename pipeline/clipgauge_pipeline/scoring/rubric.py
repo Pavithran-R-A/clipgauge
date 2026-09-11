@@ -16,6 +16,7 @@ against real outcomes (the M6 feedback loop exists to tune them).
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 # --- T1 structured-output schema (Gemini responseSchema / Ollama format) ---
@@ -213,15 +214,51 @@ FUNNY_CORROBORATED = 1.25   # laughter confirmed by 2+ independent detectors
 SHOCK_NO_AROUSAL = 0.6      # LLM says shocking, flat arousal + no heatmap lift
 HEATMAP_BOOST = 1.15        # real humans replayed this span (≥ p80)
 BAIT_PENALTY = 0.85         # per detected bait phrase, floor 0.6 (not fitted)
+_BAIT_PATTERNS = (
+    re.compile(r"\b(?:like|follow|share)\s+(?:this|that|the|my|it)\b"),
+    re.compile(r"\bcomment\s+(?:below|your|with|if)\b"),
+    re.compile(r"\bsubscribe(?:\s+(?:to|for|if|and))?\b"),
+    re.compile(r"\bfollow\s+(?:me|us|for|on)\b"),
+    re.compile(r"\b(?:smash|hit|press|tap|click|give)\b.{0,24}\blike\b"),
+    re.compile(r"\bhit\s+(?:the|that)\s+(?:bell|like)\b"),
+)
 
 
 def _c(constants: dict | None, key: str, default: float) -> float:
     return float(constants[key]) if constants and key in constants else default
 
 
+def _normalize_bait_text(value: str) -> str:
+    return " ".join(re.findall(r"[\w']+", str(value).casefold()))
+
+
+def verify_bait_phrases(reported: object, transcript: str) -> dict[str, Any]:
+    """Verify model bait claims against supplied viewer-directed dialogue."""
+    phrases = [str(value).strip() for value in reported or [] if str(value).strip()]
+    normalized_transcript = _normalize_bait_text(transcript)
+    verified: list[str] = []
+    rejected: list[dict[str, str]] = []
+    for phrase in phrases:
+        normalized_phrase = _normalize_bait_text(phrase)
+        if not normalized_phrase:
+            rejected.append({"phrase": phrase, "reason": "empty_phrase"})
+        elif not re.search(rf"(?<!\w){re.escape(normalized_phrase)}(?!\w)", normalized_transcript):
+            rejected.append({"phrase": phrase, "reason": "not_in_transcript"})
+        elif not any(pattern.search(normalized_phrase) for pattern in _BAIT_PATTERNS):
+            rejected.append({"phrase": phrase, "reason": "not_viewer_directed"})
+        else:
+            verified.append(phrase)
+    return {
+        "model_reported_bait": phrases,
+        "verified_bait": verified,
+        "rejected_bait": rejected,
+    }
+
+
 def cross_validate(
     t1: dict,
     *,
+    transcript: str = "",
     laughs_near: list[dict],
     arousal_pct: float,
     heatmap_pct: float | None,
@@ -269,7 +306,16 @@ def cross_validate(
             }
         )
 
-    bait = t1.get("bait_phrases") or []
+    bait_verification = verify_bait_phrases(t1.get("bait_phrases"), transcript)
+    bait = bait_verification["verified_bait"]
+    if bait_verification["model_reported_bait"]:
+        adjustments.append(
+            {
+                "rule": "bait_verification",
+                "factor": 1.0,
+                **bait_verification,
+            }
+        )
     if bait:
         factor = max(0.6, BAIT_PENALTY ** len(bait))
         for k in sub:

@@ -7,6 +7,8 @@ for a clip that has never been edited come from the score checkpoint."""
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from .timeline import ClipEdit
@@ -24,13 +26,40 @@ def load(job_dir: Path) -> dict[str, ClipEdit]:
         raw = json.loads(p.read_text())
     except (json.JSONDecodeError, OSError):
         return {}
-    return {k: ClipEdit.from_json(v) for k, v in raw.items()}
+    if not isinstance(raw, dict):
+        return {}
+    edits: dict[str, ClipEdit] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, dict):
+            continue
+        try:
+            edits[key] = ClipEdit.from_json(value)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return edits
 
 
 def save(job_dir: Path, edits: dict[str, ClipEdit]) -> None:
-    tmp = path_for(job_dir).with_suffix(".tmp")
-    tmp.write_text(json.dumps({k: e.to_json() for k, e in edits.items()}, indent=1))
-    tmp.replace(path_for(job_dir))
+    path = path_for(job_dir)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(json.dumps({k: e.to_json() for k, e in edits.items()}, indent=1))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _migrate_overlays(edit: ClipEdit) -> ClipEdit:

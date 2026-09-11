@@ -26,10 +26,12 @@ import json
 import os
 import secrets as pysecrets
 import threading
+import tempfile
 import time
 import urllib.parse
 import webbrowser
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 
@@ -61,13 +63,29 @@ class IgError(Exception):
     """User-actionable Instagram API failure."""
 
 
+def _safe_api_message(message: str, *secrets: str) -> str:
+    safe = protocol.safe_message(message)
+    for secret in secrets:
+        if secret:
+            safe = safe.replace(secret, "[REDACTED]")
+    return safe
+
+
 def load_connection() -> dict | None:
     raw = os.environ.get("CLIPGAUGE_INSTAGRAM_CONNECTION_JSON")
     if not raw:
         return None
     try:
         parsed = json.loads(raw)
-        return parsed if isinstance(parsed, dict) else None
+        if not isinstance(parsed, dict):
+            return None
+        required = ("user_id", "access_token")
+        if not all(
+            isinstance(parsed.get(field), str) and parsed[field].strip()
+            for field in required
+        ):
+            return None
+        return parsed
     except json.JSONDecodeError:
         return None
 
@@ -76,9 +94,30 @@ def save_connection(data: dict) -> None:
     bridge = os.environ.get("CLIPGAUGE_CONNECTION_OUTPUT")
     if not bridge:
         raise IgError("Instagram credential storage is available only through the desktop vault bridge.")
-    path = __import__("pathlib").Path(bridge)
+    path = Path(bridge)
     config.ensure_home()
-    path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(data, handle, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        raise
     try:
         path.chmod(0o600)
     except OSError:
@@ -179,7 +218,8 @@ def connect(app_id: str, app_secret: str, open_browser: bool = True) -> dict:
         timeout=HTTP_TIMEOUT,
     )
     if res.status_code != 200:
-        raise IgError(f"Token exchange failed ({res.status_code}): {protocol.safe_message(res.text)}")
+        message = _safe_api_message(res.text, app_secret)
+        raise IgError(f"Token exchange failed ({res.status_code}): {message}")
     short = res.json()
 
     res = httpx.get(
@@ -192,7 +232,8 @@ def connect(app_id: str, app_secret: str, open_browser: bool = True) -> dict:
         timeout=HTTP_TIMEOUT,
     )
     if res.status_code != 200:
-        raise IgError(f"Long-lived token exchange failed: {protocol.safe_message(res.text)}")
+        message = _safe_api_message(res.text, app_secret, short.get("access_token", ""))
+        raise IgError(f"Long-lived token exchange failed: {message}")
     long_lived = res.json()
 
     me = httpx.get(
@@ -267,7 +308,8 @@ def recent_media(
                 params["fields"] = trimmed
                 continue
         if res.status_code != 200:
-            raise IgError(f"Media list failed: {res.text[:300]}")
+            message = _safe_api_message(res.text, connection.get("access_token", ""))
+            raise IgError(f"Media list failed: {message}")
         body = res.json()
         page = body.get("data", [])
         for m in page:
@@ -290,7 +332,8 @@ def media_node(connection: dict, media_id: str, fields: str = MEDIA_FIELDS) -> d
         timeout=HTTP_TIMEOUT,
     )
     if res.status_code != 200:
-        raise IgError(f"Media fetch failed for {media_id}: {res.text[:300]}")
+        message = _safe_api_message(res.text, connection.get("access_token", ""))
+        raise IgError(f"Media fetch failed for {media_id}: {message}")
     return res.json()
 
 
@@ -309,7 +352,8 @@ def media_insights(connection: dict, media_id: str) -> dict:
             break
         trimmed = _drop_named_field(metrics, res.text) if res.status_code == 400 else None
         if trimmed is None:
-            raise IgError(f"Insights failed for {media_id}: {res.text[:300]}")
+            message = _safe_api_message(res.text, connection.get("access_token", ""))
+            raise IgError(f"Insights failed for {media_id}: {message}")
         metrics = trimmed
     out: dict = {}
     for item in res.json().get("data", []):
@@ -325,6 +369,30 @@ def thumbs_dir():
     d = config.home_dir() / "ig_thumbs"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        raise
 
 
 def cache_thumbnail(connection: dict, media: dict) -> str | None:
@@ -343,9 +411,9 @@ def cache_thumbnail(connection: dict, media: dict) -> str | None:
         if not url:
             return None
         try:
-            res = httpx.get(url, timeout=HTTP_TIMEOUT, follow_redirects=True)
+            res = httpx.get(url, timeout=HTTP_TIMEOUT, follow_redirects=False)
             if res.status_code == 200 and res.content:
-                dest.write_bytes(res.content)
+                _atomic_write_bytes(dest, res.content)
                 return str(dest)
         except httpx.HTTPError:
             pass

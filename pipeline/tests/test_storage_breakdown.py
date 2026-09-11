@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 
-from clipgauge_pipeline.storage import breakdown, cleanup, preview
+from clipgauge_pipeline.storage import breakdown, breakdown_signature, cleanup, preview
 
 
 def test_storage_breakdown_has_user_visible_categories_and_no_auto_delete(tmp_path):
@@ -34,6 +34,13 @@ def test_cleanup_requires_confirmation_and_only_removes_safe_cache(tmp_path):
     removed = cleanup(tmp_path, "safe-cache", confirmed=True)
     assert removed["removed"] == ["downloads/partial.part"]
     assert not partial.exists()
+
+
+def test_breakdown_signature_changes_when_top_level_storage_changes(tmp_path):
+    first = breakdown_signature(tmp_path)
+    (tmp_path / "jobs").mkdir()
+    second = breakdown_signature(tmp_path)
+    assert second != first
 
 
 def test_failed_session_cleanup_removes_artifacts_and_database_row(tmp_path):

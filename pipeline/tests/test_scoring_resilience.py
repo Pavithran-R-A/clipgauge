@@ -42,6 +42,125 @@ def test_local_t1_recovers_once_after_transient_provider_failure():
     assert client.recoveries == 1
 
 
+def test_private_scoring_rejects_cloud_provider_before_model_calls(tmp_path, monkeypatch):
+    profile = providers.preset_profile("gemini")
+    client = SimpleNamespace(model=profile.model, profile=profile)
+    curves_path = tmp_path / "curves.json"
+    curves_path.write_text(json.dumps({"arousal": [], "arousal_grid_sec": 0.5}), encoding="utf-8")
+    ctx = SimpleNamespace(
+        prior={
+            "ingest": {"probe": {"duration_sec": 1.0}},
+            "diarize": {"segments": []},
+            "events": {"timeline": [], "curves_path": str(curves_path)},
+            "candidates": {"candidates": []},
+        },
+        settings=SimpleNamespace(provider_snapshot=lambda: {}, quality_mode="private"),
+        job_dir=tmp_path,
+        emit=lambda *_args: None,
+    )
+    monkeypatch.setattr(stage.providers_mod, "profile_from_snapshot", lambda _snapshot: profile)
+    monkeypatch.setattr(stage.providers_mod, "make_adapter", lambda _profile: client)
+
+    with pytest.raises(StageError, match="private mode requires a local provider"):
+        stage.ScoreStage().run(ctx)
+
+
+def test_empty_candidate_set_is_typed_as_successful_no_recommendations(tmp_path, monkeypatch):
+    profile = providers.preset_profile("clipgauge-local", metadata={"managed": False})
+
+    class Client:
+        def __init__(self):
+            self.model = profile.model
+            self.requested_model = profile.model
+            self.actual_model = profile.model
+            self.profile = profile
+
+        def generate_json(self, *_args, **_kwargs):
+            raise AssertionError("empty candidate sets must skip model scoring")
+
+    curves_path = tmp_path / "curves.json"
+    curves_path.write_text(json.dumps({"arousal": [], "arousal_grid_sec": 0.5}), encoding="utf-8")
+    ctx = SimpleNamespace(
+        prior={
+            "ingest": {"probe": {"duration_sec": 1.0}},
+            "diarize": {"segments": []},
+            "events": {"timeline": [], "curves_path": str(curves_path)},
+            "candidates": {"candidates": []},
+        },
+        settings=SimpleNamespace(provider_snapshot=lambda: {}, quality_mode="private"),
+        job_dir=tmp_path,
+        emit=lambda *_args: None,
+    )
+    monkeypatch.setattr(stage.providers_mod, "profile_from_snapshot", lambda _snapshot: profile)
+    monkeypatch.setattr(stage.providers_mod, "make_adapter", lambda _profile: Client())
+
+    result = stage.ScoreStage().run(ctx)
+
+    assert result["outcome"] == "SUCCESS_NO_RECOMMENDATIONS"
+    assert result["code"] == "NO_RECOMMENDED_CLIPS"
+    assert result["counts"] == {
+        "candidate_count": 0,
+        "eligible_candidate_count": 0,
+        "scored_count": 0,
+        "score_clip_count": 0,
+        "camera_trajectory_count": 0,
+        "render_attempt_count": 0,
+        "render_output_count": 0,
+        "rejection_reason_counts": {},
+    }
+    assert result["scoring_degraded"] is False
+
+
+def test_cloud_scoring_failure_preserves_provider_error_code(tmp_path, monkeypatch):
+    profile = providers.preset_profile("groq", metadata={"managed": False})
+
+    class Client:
+        def __init__(self):
+            self.model = profile.model
+            self.requested_model = profile.model
+            self.actual_model = profile.model
+            self.profile = profile
+
+        def generate_json(self, *_args, **_kwargs):
+            raise providers.ProviderError(
+                "AUTH_INVALID",
+                "credential rejected",
+                details={"http_status": 401},
+            )
+
+    curves_path = tmp_path / "curves.json"
+    curves_path.write_text(json.dumps({"arousal": [], "arousal_grid_sec": 0.5}), encoding="utf-8")
+    words = [
+        {"word": f"word{i}", "start": i * 0.3, "end": i * 0.3 + 0.2}
+        for i in range(30)
+    ]
+    ctx = SimpleNamespace(
+        prior={
+            "ingest": {"probe": {"duration_sec": 9.0}},
+            "diarize": {"segments": [{"start": 0.0, "end": 9.0, "speaker": 0, "words": words}]},
+            "events": {"timeline": [], "curves_path": str(curves_path)},
+            "candidates": {"candidates": [{"start": 0.0, "end": 9.0, "curve_score": 0.8, "channel_scores": {}}]},
+        },
+        settings=SimpleNamespace(provider_snapshot=lambda: {}, quality_mode="best"),
+        job_dir=tmp_path,
+        emit=lambda *_args: None,
+    )
+    monkeypatch.setattr(stage.providers_mod, "profile_from_snapshot", lambda _snapshot: profile)
+    monkeypatch.setattr(stage.providers_mod, "make_adapter", lambda _profile: Client())
+
+    with pytest.raises(StageError) as exc_info:
+        stage.ScoreStage().run(ctx)
+
+    assert exc_info.value.code == "AUTH_INVALID"
+    assert "Local" not in str(exc_info.value)
+    diagnostic = next((tmp_path / "diagnostics").glob(f"{exc_info.value.diagnostic_id}.json"))
+    payload = json.loads(diagnostic.read_text(encoding="utf-8"))
+    diagnostic_payload = payload["diagnostic"]
+    assert diagnostic_payload["provider"] == "groq"
+    assert diagnostic_payload["code"] == "AUTH_INVALID"
+    assert diagnostic_payload["failures"][0]["provider_code"] == "AUTH_INVALID"
+
+
 @pytest.mark.parametrize("failure_code", ["TIMEOUT", "PROVIDER_UNAVAILABLE"])
 def test_local_t1_runtime_recovery_is_bounded(failure_code):
     class Client:

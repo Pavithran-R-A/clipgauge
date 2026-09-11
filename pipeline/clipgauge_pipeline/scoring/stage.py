@@ -15,8 +15,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .. import protocol
-from ..jobs.queue import Stage, StageContext, StageError
+from .. import config, protocol
+from ..jobs.queue import Stage, StageContext, StageError, _atomic_write_json
 from ..music import brief as music_brief
 from . import constants as constants_mod
 from . import frames as frames_mod
@@ -30,6 +30,7 @@ LOCAL_T1_ROUND_SIZE = 10
 LOCAL_T1_MIN_CALLS = 12
 LOCAL_STRONG_MINIMUM = 3
 LOCAL_T1_WALL_BUDGET_SECONDS = 180.0
+CLOUD_T1_WALL_BUDGET_SECONDS = 180.0
 LOCAL_FINALIST_LIMIT = 6
 LOCAL_RECOVERABLE_PROVIDER_CODES = {
     "PROVIDER_UNAVAILABLE",
@@ -41,7 +42,13 @@ LOCAL_RECOVERABLE_PROVIDER_CODES = {
 }
 
 
-def _scoring_failure_code(error: providers_mod.ProviderError) -> str:
+def _scoring_failure_code(
+    error: providers_mod.ProviderError,
+    *,
+    provider_kind: str = "clipgauge-local",
+) -> str:
+    if provider_kind != "clipgauge-local":
+        return error.code
     if error.code == "TIMEOUT":
         return "LOCAL_SCORING_TIMEOUT"
     if error.code in {"STRUCTURED_OUTPUT_INVALID", "PROVIDER_RESPONSE_INVALID"}:
@@ -54,7 +61,11 @@ def _scoring_failure_code(error: providers_mod.ProviderError) -> str:
     return "LOCAL_SCORING_UNAVAILABLE"
 
 
-def _safe_failure_record(error: providers_mod.ProviderError) -> dict:
+def _safe_failure_record(
+    error: providers_mod.ProviderError,
+    *,
+    provider_kind: str = "clipgauge-local",
+) -> dict:
     safe_keys = {
         "provider_code",
         "provider_kind",
@@ -73,12 +84,16 @@ def _safe_failure_record(error: providers_mod.ProviderError) -> dict:
         "http_status",
     }
     return {
-        "code": _scoring_failure_code(error),
+        "code": _scoring_failure_code(error, provider_kind=provider_kind),
         "provider_code": error.code,
         "details": {
             key: value for key, value in error.details.items() if key in safe_keys
         },
     }
+
+
+def _unexpected_scoring_failure_code(provider_kind: str) -> str:
+    return "LOCAL_SCORING_UNAVAILABLE" if provider_kind == "clipgauge-local" else "INTERNAL_PROVIDER_ERROR"
 
 
 def recommendation_outcome(
@@ -109,6 +124,18 @@ def recommendation_outcome(
     }
 
 
+def apply_output_preference(
+    finalists: list[dict], preference: str, borderline: list[dict] | None = None, limit: int = 12
+) -> list[dict]:
+    """Apply output controls without promoting rejected candidates."""
+    if preference == "best":
+        return finalists[:2]
+    if preference == "more":
+        extra = list(borderline or [])
+        return (finalists + extra)[: max(1, int(limit))]
+    return finalists
+
+
 def scoring_budget(*, local: bool, candidate_count: int) -> dict[str, int | float | bool]:
     """Return the deterministic expensive-work ceiling for one scoring run."""
     count = max(0, int(candidate_count))
@@ -116,7 +143,7 @@ def scoring_budget(*, local: bool, candidate_count: int) -> dict[str, int | floa
         "candidate_count": count,
         "t1_limit": count,
         "tier_two_limit": min(count, LOCAL_T1_CANDIDATE_LIMIT) if local else count,
-        "wall_time_seconds": LOCAL_T1_WALL_BUDGET_SECONDS if local else 0.0,
+        "wall_time_seconds": LOCAL_T1_WALL_BUDGET_SECONDS if local else CLOUD_T1_WALL_BUDGET_SECONDS,
         "finalist_limit": LOCAL_FINALIST_LIMIT if local else SELECT_COUNT,
         "music_llm": not local,
     }
@@ -454,6 +481,14 @@ class ScoreStage(Stage):
     name = "score"
     schema_version = 26  # v26: bounded local scoring recovery diagnostics
 
+    def dependency_settings(self, ctx: StageContext) -> dict:
+        settings = super().dependency_settings(ctx)
+        settings.update({
+            "rubric_version": providers_mod.RUBRIC_CACHE_VERSION,
+            "scoring_constants_version": constants_mod.active().get("version", 1),
+        })
+        return settings
+
     def run(self, ctx: StageContext) -> dict:
         prior = ctx.prior or {}
         ingest = prior.get("ingest")
@@ -470,6 +505,7 @@ class ScoreStage(Stage):
         except (llm_mod.LlmError, ValueError) as err:
             raise StageError(str(err)) from err
         llm_mode = profile.kind
+        requested_model = getattr(client, "requested_model", client.model)
         is_local = bool(profile.capabilities.local)
         t1_schema = (
             rubric.T1_SCHEMA
@@ -502,6 +538,12 @@ class ScoreStage(Stage):
 
         candidates = cands["candidates"]
         budget = scoring_budget(local=is_local, candidate_count=len(candidates))
+        output_preference = getattr(ctx.settings, "output_preference", "recommended")
+        quality_mode = getattr(ctx.settings, "quality_mode", "private")
+        try:
+            config.validate_quality_mode_for_provider(quality_mode, profile.locality)
+        except ValueError as err:
+            raise StageError(str(err)) from err
 
         # Slice transcripts first so short/non-speech windows do not consume the
         # local model-call budget.  Cloud mode retains the original candidate
@@ -530,12 +572,14 @@ class ScoreStage(Stage):
         failure_records: list[dict] = []
         t1_calls = 0
         scoring_started = time.monotonic()
+        if not is_local and isinstance(client, providers_mod.ProviderAdapter):
+            client.set_scoring_deadline(scoring_started + float(budget["wall_time_seconds"]))
         round_one = (
             select_diverse_scoring_batch(prepared, LOCAL_T1_ROUND_SIZE)
             if is_local else prepared
         )
         for i, (cand, labeled, flat) in enumerate(round_one):
-            if is_local and time.monotonic() - scoring_started >= LOCAL_T1_WALL_BUDGET_SECONDS:
+            if float(budget["wall_time_seconds"]) > 0 and time.monotonic() - scoring_started >= float(budget["wall_time_seconds"]):
                 break
             start, end = cand["start"], cand["end"]
             ctx.emit(i / max(1, len(prepared)) * 0.6, f"Scoring moment {i + 1}/{len(prepared)}…")
@@ -554,12 +598,13 @@ class ScoreStage(Stage):
                     set(cand.get("sentence_ids", [])),
                 )
             except providers_mod.ProviderError as err:
-                failure_records.append(_safe_failure_record(err))
+                failure_records.append(_safe_failure_record(err, provider_kind=profile.kind))
                 ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_records[-1]['code']}); skipping")
                 continue
             except Exception:  # noqa: BLE001
-                failure_records.append({"code": "LOCAL_SCORING_UNAVAILABLE", "provider_code": "UNEXPECTED_SCORING_ERROR", "details": {}})
-                ctx.emit(-1, f"moment {i + 1} scoring unavailable (LOCAL_SCORING_UNAVAILABLE); skipping")
+                failure_code = _unexpected_scoring_failure_code(profile.kind)
+                failure_records.append({"code": failure_code, "provider_code": "UNEXPECTED_SCORING_ERROR", "details": {}})
+                ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_code}); skipping")
                 continue
 
             quality = short_quality.assess(flat, window_events, end - start, llm=t1)
@@ -569,6 +614,7 @@ class ScoreStage(Stage):
             )
             sub, adjustments = rubric.cross_validate(
                 t1,
+                transcript=labeled,
                 laughs_near=near_laughs,
                 arousal_pct=arousal_pct,
                 heatmap_pct=heatmap_pct,
@@ -630,12 +676,13 @@ class ScoreStage(Stage):
                             set(cand.get("sentence_ids", [])),
                         )
                     except providers_mod.ProviderError as err:
-                        failure_records.append(_safe_failure_record(err))
+                        failure_records.append(_safe_failure_record(err, provider_kind=profile.kind))
                         ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_records[-1]['code']}); skipping")
                         continue
                     except Exception:  # noqa: BLE001
-                        failure_records.append({"code": "LOCAL_SCORING_UNAVAILABLE", "provider_code": "UNEXPECTED_SCORING_ERROR", "details": {}})
-                        ctx.emit(-1, f"moment {i + 1} scoring unavailable (LOCAL_SCORING_UNAVAILABLE); skipping")
+                        failure_code = _unexpected_scoring_failure_code(profile.kind)
+                        failure_records.append({"code": failure_code, "provider_code": "UNEXPECTED_SCORING_ERROR", "details": {}})
+                        ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_code}); skipping")
                         continue
                     quality = short_quality.assess(flat, window_events, end - start, llm=t1)
                     arousal_pct = _window_pct(arousal, arousal_grid, start, end)
@@ -644,6 +691,7 @@ class ScoreStage(Stage):
                     )
                     sub, adjustments = rubric.cross_validate(
                         t1,
+                        transcript=labeled,
                         laughs_near=near_laughs,
                         arousal_pct=arousal_pct,
                         heatmap_pct=heatmap_pct,
@@ -702,12 +750,13 @@ class ScoreStage(Stage):
                             set(cand.get("sentence_ids", [])),
                         )
                     except providers_mod.ProviderError as err:
-                        failure_records.append(_safe_failure_record(err))
+                        failure_records.append(_safe_failure_record(err, provider_kind=profile.kind))
                         ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_records[-1]['code']}); skipping")
                         continue
                     except Exception:  # noqa: BLE001
-                        failure_records.append({"code": "LOCAL_SCORING_UNAVAILABLE", "provider_code": "UNEXPECTED_SCORING_ERROR", "details": {}})
-                        ctx.emit(-1, f"moment {i + 1} scoring unavailable (LOCAL_SCORING_UNAVAILABLE); skipping")
+                        failure_code = _unexpected_scoring_failure_code(profile.kind)
+                        failure_records.append({"code": failure_code, "provider_code": "UNEXPECTED_SCORING_ERROR", "details": {}})
+                        ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_code}); skipping")
                         continue
                     quality = short_quality.assess(flat, window_events, end - start, llm=t1)
                     arousal_pct = _window_pct(arousal, arousal_grid, start, end)
@@ -716,6 +765,7 @@ class ScoreStage(Stage):
                     )
                     sub, adjustments = rubric.cross_validate(
                         t1,
+                        transcript=labeled,
                         laughs_near=near_laughs,
                         arousal_pct=arousal_pct,
                         heatmap_pct=heatmap_pct,
@@ -743,7 +793,7 @@ class ScoreStage(Stage):
                     refill_rounds = 2
 
         failure_reason_counts = dict(Counter(item["code"] for item in failure_records))
-        if not scored:
+        if not scored and prepared:
             if failure_reason_counts:
                 dominant_code = max(failure_reason_counts, key=failure_reason_counts.get)
             else:
@@ -762,7 +812,7 @@ class ScoreStage(Stage):
                 },
             )
             raise StageError(
-                "ClipGauge Local could not score any candidate.",
+                f"{profile.display_name} could not score any candidate.",
                 code=dominant_code,
                 diagnostic_id=diagnostic_id,
             )
@@ -863,6 +913,8 @@ class ScoreStage(Stage):
         ]
         borderline = [entry for entry in eligible if entry not in strong and entry not in good]
         finalists = select_diverse_finalists(strong + good, int(budget["finalist_limit"]))
+        borderline_for_more = borderline[: max(0, int(budget["finalist_limit"]) - len(finalists))]
+        review_entries = finalists + borderline_for_more if output_preference == "more" else finalists
 
         # T2 visual pass + music brief on finalists only.  Current local models
         # are text-only and intentionally skip extra music-model generations so
@@ -870,8 +922,8 @@ class ScoreStage(Stage):
         supports_vision = client.profile.capabilities.vision is True
         music_llm_calls = 0
         t2_calls = 0
-        for j, entry in enumerate(finalists):
-            ctx.emit(0.6 + j / max(1, len(finalists)) * 0.35, f"Visual pass {j + 1}/{len(finalists)}…")
+        for j, entry in enumerate(review_entries):
+            ctx.emit(0.6 + j / max(1, len(review_entries)) * 0.35, f"Visual pass {j + 1}/{len(review_entries)}…")
             visual = None
             if supports_vision:
                 times = frames_mod.sample_times(entry["start"], entry["end"], scene_times)
@@ -956,12 +1008,16 @@ class ScoreStage(Stage):
                     "llm_mode": llm_mode,
                     "provider_profile_id": profile.id,
                     "provider_kind": profile.kind,
-                    "model": client.model,
+                    "model": getattr(client, "actual_model", client.model),
+                    "requested_model": requested_model,
+                    "actual_model": getattr(client, "actual_model", client.model),
                     "endpoint_identity": profile.endpoint_identity,
                     "capabilities": profile.capabilities.to_dict(),
                     "structured_level": structured_level,
                     "degraded_signals": degraded_signals,
                     "scoring_config_version": scoring_config["version"],
+                    "rubric_version": providers_mod.RUBRIC_CACHE_VERSION,
+                    "quality_mode": quality_mode,
                     "arousal_source": arousal_source,
                     "visual_pass": supports_vision,
                 },
@@ -984,6 +1040,12 @@ class ScoreStage(Stage):
                 entry["music"] = None
 
         finalists.sort(key=lambda e: (float(e.get("recommendation_score", 0.0)), -float(e.get("start", 0.0))), reverse=True)
+        finalists = apply_output_preference(
+            finalists,
+            output_preference,
+            borderline_for_more,
+            int(budget["finalist_limit"]),
+        )
         for entry in finalists:
             entry.pop("transcript", None)  # bulky; review UI re-slices from diarize
 
@@ -1012,12 +1074,31 @@ class ScoreStage(Stage):
             best_candidate=best_candidate,
         )
 
+        actual_model = getattr(client, "actual_model", client.model)
+        provider_metadata = getattr(ctx.settings, "provider_metadata", None)
+        if isinstance(provider_metadata, dict):
+            provider_metadata.update({
+                "requested_model": requested_model,
+                "actual_model": actual_model,
+                "structured_output_mode": client.structured_level(),
+                "rubric_version": providers_mod.RUBRIC_CACHE_VERSION,
+                "scoring_constants_version": scoring_config["version"],
+            })
+        settings_snapshot = getattr(ctx.settings, "to_json", None)
+        if callable(settings_snapshot):
+            _atomic_write_json(ctx.job_dir / "settings.json", settings_snapshot())
+
         return {
             **outcome,
             "llm_mode": llm_mode,
             "provider_profile_id": profile.id,
             "provider_kind": profile.kind,
-            "model": client.model,
+            "model": actual_model,
+            "requested_model": requested_model,
+            "actual_model": actual_model,
+            "quality_mode": quality_mode,
+            "output_preference": output_preference,
+            "rubric_version": providers_mod.RUBRIC_CACHE_VERSION,
             "capabilities": profile.capabilities.to_dict(),
             "clips": finalists,
             "rejected_candidates": rejected,

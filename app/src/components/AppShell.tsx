@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import {
   Bot,
   Clock3,
@@ -19,6 +19,7 @@ interface Props {
   active: AppSection
   onNavigate: (section: AppSection) => void
   jobs: JobSummary[]
+  jobsError?: string | null
   running?: boolean
   onOpenJob: (id: string) => void
   onResume: (id: string) => void
@@ -76,27 +77,31 @@ function NavGroup({
   )
 }
 
-export default function AppShell({ active, onNavigate, jobs, running, onOpenJob, onResume, onSupport, children }: Props) {
+export default function AppShell({ active, onNavigate, jobs, jobsError, running, onOpenJob, onResume, onSupport, children }: Props) {
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const navigate = (section: AppSection) => {
+    setMobileNavOpen(false)
+    onNavigate(section)
+  }
   return (
-    <div className="app-shell">
-      <input className="nav-drawer-toggle" id="nav-drawer-toggle" type="checkbox" aria-label="Toggle navigation" />
-      <label className="mobile-nav-toggle" htmlFor="nav-drawer-toggle"><Menu size={19} aria-hidden="true" /><span>Menu</span></label>
-      <aside className="app-sidebar">
+    <div className={`app-shell ${mobileNavOpen ? 'mobile-nav-open' : ''}`}>
+      <button type="button" className="mobile-nav-toggle" aria-expanded={mobileNavOpen} aria-controls="app-sidebar" onClick={() => setMobileNavOpen((open) => !open)}><Menu size={19} aria-hidden="true" /><span>Menu</span></button>
+      <aside className="app-sidebar" id="app-sidebar">
         <div className="sidebar-topline">
           <div className="brand-lockup">
             <span className="brand-mark" aria-hidden="true"><span /></span>
             <div><strong>ClipGauge</strong><small>make moments worth sharing</small></div>
           </div>
-          <label className="mobile-nav-close" htmlFor="nav-drawer-toggle"><X size={19} aria-hidden="true" /><span>Close</span></label>
+          <button type="button" className="mobile-nav-close" onClick={() => setMobileNavOpen(false)}><X size={19} aria-hidden="true" /><span>Close</span></button>
         </div>
         <nav className="app-nav" aria-label="Main navigation">
-          <NavGroup label="Workspace" items={primary} active={active} onNavigate={onNavigate} />
-          <NavGroup label="Manage" items={workspace} active={active} onNavigate={onNavigate} />
-          <NavGroup label="Support" items={secondary} active={active} onNavigate={onNavigate} />
+          <NavGroup label="Workspace" items={primary} active={active} onNavigate={navigate} />
+          <NavGroup label="Manage" items={workspace} active={active} onNavigate={navigate} />
+          <NavGroup label="Support" items={secondary} active={active} onNavigate={navigate} />
         </nav>
         <div className="sidebar-sessions">
-          <div className="sidebar-section-head"><span>Recent sessions</span><button type="button" onClick={() => onNavigate('sessions')}>See all</button></div>
-          {jobs.length === 0 ? <p className="sidebar-empty">Your finished clips will appear here.</p> : jobs.slice(0, 3).map((job) => (
+          <div className="sidebar-section-head"><span>Recent sessions</span><button type="button" onClick={() => navigate('sessions')}>See all</button></div>
+          {jobsError ? <p className="sidebar-empty" role="alert">{jobsError}</p> : jobs.length === 0 ? <p className="sidebar-empty">Your finished clips will appear here.</p> : jobs.slice(0, 3).map((job) => (
             <button type="button" key={job.id} className="sidebar-session" onClick={() => job.rendered ? onOpenJob(job.id) : onResume(job.id)} disabled={running}>
               <span className={`session-status ${job.rendered ? 'ready' : 'partial'}`} aria-hidden="true" />
               <span><strong>{job.title ?? 'Untitled video'}</strong><small>{job.rendered ? 'Ready to review' : 'Continue setup'}</small></span>
@@ -105,7 +110,7 @@ export default function AppShell({ active, onNavigate, jobs, running, onOpenJob,
         </div>
         <div className="sidebar-footer">
           <div className="privacy-prompt"><ShieldCheck size={16} aria-hidden="true" /><span><strong>Local-first by default</strong><small>You choose what leaves this computer.</small></span></div>
-          <button type="button" className="sidebar-support" onClick={onSupport}><LifeBuoy size={15} aria-hidden="true" /> Get help</button>
+          <button type="button" className="sidebar-support" onClick={() => { setMobileNavOpen(false); onSupport() }}><LifeBuoy size={15} aria-hidden="true" /> Get help</button>
         </div>
       </aside>
       <main className="app-main">{children}</main>
