@@ -32,6 +32,7 @@ LOCAL_STRONG_MINIMUM = 3
 LOCAL_T1_WALL_BUDGET_SECONDS = 180.0
 CLOUD_T1_WALL_BUDGET_SECONDS = 180.0
 LOCAL_FINALIST_LIMIT = 6
+PAYOFF_TAIL_BONUS_MAX = 8.0
 LOCAL_RECOVERABLE_PROVIDER_CODES = {
     "PROVIDER_UNAVAILABLE",
     "NETWORK_FAILED",
@@ -303,6 +304,10 @@ def _local_prerank(item: tuple[dict, str, str]) -> tuple[float, ...]:
     concrete_detail = float(bool(any(any(char.isdigit() for char in word) for word in words)))
     concrete_detail += float(bool(set(words) & {"money", "year", "years", "dollars", "percent", "first", "only"}))
     reaction = float(bool(set(words) & {"wow", "what", "no", "oh", "laugh", "laughed", "shocked", "insane"}))
+    payoff_tail = 0.0
+    if cand.get("payoff_candidate"):
+        payoff_time = float(cand.get("payoff_time") or 0.0)
+        payoff_tail = min(30.0, max(0.0, float(cand.get("end", 0.0)) - payoff_time))
     speaker_change = float(max(0, text.count("\n")))
     scene_change = float(cand.get("scene_change", cand.get("shot_change", 0.0)) or 0.0)
     context = float(bool(words and words[0] not in {"he", "she", "they", "it", "that", "this"}))
@@ -310,7 +315,7 @@ def _local_prerank(item: tuple[dict, str, str]) -> tuple[float, ...]:
     overlap = float(cand.get("overlap", cand.get("redundancy", 0.0)) or 0.0)
     return (
         starts_complete, ends_complete, question_or_open_loop, concrete_detail,
-        reaction, speaker_change, scene_change, context, density, -overlap,
+        payoff_tail, reaction, speaker_change, scene_change, context, density, -overlap,
         float(cand.get("curve_score", 0.0)), max(channel_values, default=0.0),
         sum(channel_values),
     )
@@ -328,9 +333,20 @@ def _story_metadata(candidate: dict) -> dict:
         "topic_shift_count", "standalone_comprehension", "story_shape", "syntactic_complete",
         "story_variant", "topic_key", "boundary_confidence", "editorial_signal",
         "hook_strength", "information_density",
-        "duration_fit", "start_topic_boundary", "payoff_boundary_explicit", "source_final_boundary",
+        "duration_fit", "start_topic_boundary", "payoff_candidate", "payoff_boundary_explicit", "source_final_boundary",
     )
     return {key: candidate.get(key) for key in keys if key in candidate}
+
+
+def _payoff_tail_bonus(entry: dict) -> float:
+    """Reward a bounded reaction tail after a detected payoff."""
+    if not entry.get("payoff_candidate"):
+        return 0.0
+    payoff_time = float(entry.get("payoff_time") or 0.0)
+    tail = float(entry.get("end", 0.0)) - payoff_time
+    if payoff_time <= 0.0 or tail < 2.0 or tail > 30.0:
+        return 0.0
+    return round(min(PAYOFF_TAIL_BONUS_MAX, (tail - 2.0) * 0.8), 1)
 
 
 def shortlist_local_candidates(
@@ -361,7 +377,22 @@ def select_diverse_scoring_batch(
     selected_midpoints: list[float] | None = None,
 ) -> list[tuple[dict, str, str]]:
     """Choose a bounded batch using prerank and temporal diversity."""
-    remaining = list(prepared)
+    remaining = [
+        item for item in prepared
+        if not any(
+            item is not other
+            and item[0].get("payoff_candidate")
+            and other[0].get("payoff_candidate")
+            and item[0].get("anchor_sentence_id") == other[0].get("anchor_sentence_id")
+            and abs(float(item[0]["start"]) - float(other[0]["start"])) < 0.1
+            and abs(
+                float(item[0].get("payoff_time") or 0.0)
+                - float(other[0].get("payoff_time") or 0.0)
+            ) <= 2.0
+            and float(other[0]["end"]) > float(item[0]["end"]) + 0.5
+            for other in prepared
+        )
+    ]
     selected: list[tuple[dict, str, str]] = []
     used = list(selected_midpoints or [])
     while remaining and len(selected) < max(0, int(batch_size)):
@@ -488,7 +519,7 @@ def rank_scored_candidates(entries: list[dict]) -> list[dict]:
 
 class ScoreStage(Stage):
     name = "score"
-    schema_version = 28  # v28: preserve trusted boundaries during scoring
+    schema_version = 29  # v29: bounded payoff-tail ranking compensation
 
     def dependency_settings(self, ctx: StageContext) -> dict:
         settings = super().dependency_settings(ctx)
@@ -837,6 +868,16 @@ class ScoreStage(Stage):
             entry["recommendation_score"] = short_quality.recommendation_score(
                 entry["platform_score"], entry["short_quality"]
             )
+            payoff_bonus = _payoff_tail_bonus(entry)
+            if payoff_bonus:
+                entry["recommendation_score"] = round(
+                    min(100.0, entry["recommendation_score"] + payoff_bonus), 1
+                )
+                adjustments.append({
+                    "rule": "payoff_tail_completeness",
+                    "bonus": payoff_bonus,
+                    "reason": "bounded reaction tail follows the detected payoff",
+                })
             entry["score"] = entry["platform_score"]
             entry["best_platform"] = max(platform_scores, key=platform_scores.get)
             return platform_scores, adjustments
@@ -857,7 +898,9 @@ class ScoreStage(Stage):
                 entry.get("t1_raw"),
                 preserve_candidate_opening=float(entry.get("start_topic_boundary") or 0.0) >= 0.62,
                 preserve_candidate_payoff=bool(
-                    entry.get("payoff_boundary_explicit") or entry.get("source_final_boundary")
+                    entry.get("payoff_candidate")
+                    or entry.get("payoff_boundary_explicit")
+                    or entry.get("source_final_boundary")
                 ),
             )
             refined_end, segment_boundary = _repair_to_segment_boundary(

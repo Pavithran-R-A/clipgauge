@@ -52,6 +52,22 @@ def test_local_prerank_recognizes_question_openings_without_punctuation():
     assert scoring_stage._local_prerank(question)[2] > scoring_stage._local_prerank(ordinary)[2]
 
 
+def test_local_prerank_prefers_payoff_reaction_tail():
+    early = ({"start": 0.0, "end": 20.0, "curve_score": 0.5, "channel_scores": {}, "payoff_candidate": True, "payoff_time": 12.0}, "", "The result is shown clearly and completely.")
+    late = ({"start": 0.0, "end": 28.0, "curve_score": 0.5, "channel_scores": {}, "payoff_candidate": True, "payoff_time": 12.0}, "", "The result is shown clearly and completely.")
+
+    assert scoring_stage._local_prerank(late) > scoring_stage._local_prerank(early)
+
+
+def test_local_scoring_batch_drops_shorter_same_payoff_variant():
+    short = ({"start": 10.0, "end": 20.0, "anchor_sentence_id": "a", "payoff_candidate": True, "payoff_time": 15.0}, "", "A complete result is shown.")
+    long = ({"start": 10.0, "end": 28.0, "anchor_sentence_id": "a", "payoff_candidate": True, "payoff_time": 15.0}, "", "A complete result is shown with reaction.")
+
+    selected = scoring_stage.select_diverse_scoring_batch([short, long], 1)
+
+    assert selected[0][0]["end"] == 28.0
+
+
 def test_windows_vulkan_remains_fallback_without_cuda_runtime():
     key = local_runtime.select_runtime_asset_key(
         platform_key="windows-x86_64",
@@ -165,6 +181,24 @@ def test_scored_review_ranking_prefers_distinct_regions():
     ranked = scoring_stage.rank_scored_candidates(entries)
 
     assert [entry["start"] for entry in ranked[:5]] == [0.0, 400.0, 600.0, 800.0, 1000.0]
+
+
+def test_payoff_tail_bonus_is_bounded_and_requires_reaction_window():
+    assert scoring_stage._payoff_tail_bonus({
+        "end": 28.0,
+        "payoff_time": 15.0,
+        "payoff_candidate": True,
+        "payoff_sentence": "The result is complete.",
+    }) == 8.0
+    assert scoring_stage._payoff_tail_bonus({
+        "end": 46.0,
+        "payoff_time": 15.0,
+        "payoff_candidate": True,
+        "payoff_sentence": "The result is complete.",
+    }) == 0.0
+    assert scoring_stage._payoff_tail_bonus({
+        "end": 28.0, "payoff_time": 15.0, "payoff_candidate": False,
+    }) == 0.0
 
 
 def test_nvenc_is_preferred_over_software_encoding_when_functional():

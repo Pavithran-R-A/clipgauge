@@ -598,6 +598,26 @@ def cheap_filter_and_dedupe(
                 ) <= 2.0
                 and float(candidate["end"]) - float(candidate.get("payoff_time") or 0.0) <= 30.0
             )
+            same_explicit_payoff = (
+                candidate.get("payoff_boundary_explicit")
+                and other.get("payoff_boundary_explicit")
+                and candidate.get("anchor_sentence_id") == other.get("anchor_sentence_id")
+                and abs(
+                    float(candidate.get("payoff_time") or 0.0)
+                    - float(other.get("payoff_time") or 0.0)
+                ) <= 2.0
+            )
+            candidate_compact_tail = (
+                float(candidate.get("payoff_time") or 0.0) > 0.0
+                and float(candidate["end"]) - float(candidate["payoff_time"]) <= 30.0
+            )
+            other_compact_tail = (
+                float(other.get("payoff_time") or 0.0) > 0.0
+                and float(other["end"]) - float(other.get("payoff_time") or 0.0) <= 30.0
+            )
+            if same_explicit_payoff and other_compact_tail and not candidate_compact_tail:
+                record(candidate, ["DUPLICATE_STORY"], "rejected")
+                continue
             final_payoff_boundary = (
                 candidate.get("source_final_boundary")
                 and candidate.get("payoff_boundary_explicit")
