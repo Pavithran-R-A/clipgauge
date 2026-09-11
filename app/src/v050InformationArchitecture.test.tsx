@@ -660,6 +660,24 @@ describe('v0.5 information architecture', () => {
     expect(storage.setItem).toHaveBeenCalledWith('clipgauge.provider-model.groq', 'qwen/qwen3-32b')
   })
 
+  it('shows the selected provider model in advanced diagnostics', async () => {
+    mocks.listProviderModels.mockResolvedValue({
+      state: 'PASS',
+      provider: 'groq',
+      models: [
+        { id: 'openai/gpt-oss-20b', compatibility: 'FULL' },
+        { id: 'qwen/qwen3-32b', compatibility: 'FULL' }
+      ]
+    })
+    render(<ProviderCenter selectedProvider="groq" onSelectProvider={vi.fn()} onBack={vi.fn()} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Refresh models' }))
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Model' }), 'qwen/qwen3-32b')
+    await userEvent.click(screen.getByText('Advanced settings'))
+
+    expect(screen.getByText('qwen/qwen3-32b', { selector: 'code' })).toBeInTheDocument()
+  })
+
   it('ignores malformed provider model-list entries', async () => {
     mocks.listProviderModels.mockResolvedValue({
       state: 'PASS',
