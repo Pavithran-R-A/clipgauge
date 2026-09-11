@@ -207,6 +207,20 @@ def _events_desc(events: list[dict]) -> str:
     return "; ".join(parts)
 
 
+def _scoring_context(cand: dict, duration: float, events_desc: str) -> dict:
+    """Pass candidate evidence to every scoring round as untrusted hints."""
+    return {
+        "duration": duration,
+        "events_desc": events_desc,
+        "candidate_evidence": {
+            "hook_sentence": cand.get("hook_sentence"),
+            "payoff_sentence": cand.get("payoff_sentence"),
+            "story_shape": cand.get("story_shape"),
+            "central_premise": cand.get("central_premise"),
+        },
+    }
+
+
 def _generate_t1(client, prompt: str, schema: dict, sentence_ids: set[str]) -> dict:
     """Run one T1 judgment and enforce managed balanced boundaries."""
     for attempt in range(2):
@@ -625,16 +639,7 @@ class ScoreStage(Stage):
             ctx.emit(i / max(1, len(prepared)) * 0.6, f"Scoring moment {i + 1}/{len(prepared)}…")
             window_events = _events_in(timeline, start, end)
             near_laughs = [e for e in _events_in(timeline, start, end, pad=3.0) if e["type"] == "laugh"]
-            context = {
-                "duration": end - start,
-                "events_desc": _events_desc(window_events),
-                "candidate_evidence": {
-                    "hook_sentence": cand.get("hook_sentence"),
-                    "payoff_sentence": cand.get("payoff_sentence"),
-                    "story_shape": cand.get("story_shape"),
-                    "central_premise": cand.get("central_premise"),
-                },
-            }
+            context = _scoring_context(cand, end - start, _events_desc(window_events))
             try:
                 t1_calls += 1
                 t1 = _generate_t1(
@@ -712,7 +717,7 @@ class ScoreStage(Stage):
                         e for e in _events_in(timeline, start, end, pad=3.0)
                         if e["type"] == "laugh"
                     ]
-                    context = {"duration": end - start, "events_desc": _events_desc(window_events)}
+                    context = _scoring_context(cand, end - start, _events_desc(window_events))
                     try:
                         t1_calls += 1
                         t1 = _generate_t1(
@@ -786,7 +791,7 @@ class ScoreStage(Stage):
                         e for e in _events_in(timeline, start, end, pad=3.0)
                         if e["type"] == "laugh"
                     ]
-                    context = {"duration": end - start, "events_desc": _events_desc(window_events)}
+                    context = _scoring_context(cand, end - start, _events_desc(window_events))
                     try:
                         t1_calls += 1
                         t1 = _generate_t1(

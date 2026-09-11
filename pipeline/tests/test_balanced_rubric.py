@@ -1,7 +1,7 @@
 import pytest
 
 from clipgauge_pipeline.scoring import rubric, short_quality
-from clipgauge_pipeline.scoring.stage import _transcript_slice
+from clipgauge_pipeline.scoring.stage import _scoring_context, _transcript_slice
 
 
 def test_balanced_schema_requires_editorial_fields():
@@ -79,6 +79,30 @@ def test_balanced_prompt_exposes_verifiable_story_hints():
     assert "Why did this happen?" in prompt
     assert "The result is finally revealed." in prompt
     assert "verify against the transcript" in prompt.lower()
+
+
+def test_scoring_context_preserves_hints_for_fallback_rounds():
+    context = _scoring_context(
+        {
+            "hook_sentence": "The opening question.",
+            "payoff_sentence": "The final answer.",
+            "story_shape": "question_answer",
+            "central_premise": "A challenge is resolved.",
+        },
+        42.0,
+        "laugh at 12s",
+    )
+
+    assert context == {
+        "duration": 42.0,
+        "events_desc": "laugh at 12s",
+        "candidate_evidence": {
+            "hook_sentence": "The opening question.",
+            "payoff_sentence": "The final answer.",
+            "story_shape": "question_answer",
+            "central_premise": "A challenge is resolved.",
+        },
+    }
 
 
 def test_contradictory_balanced_scores_use_independent_floor():
