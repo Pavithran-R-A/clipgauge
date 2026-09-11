@@ -169,6 +169,29 @@ def test_finalist_selection_spreads_candidates_across_long_source():
     assert sum(1 for start in starts if start < 200.0) <= 3
 
 
+def test_finalist_selection_suppresses_duplicate_story_identity():
+    entries = [
+        {
+            "start": start,
+            "end": start + 30.0,
+            "recommendation_score": score,
+            "anchor_sentence_id": anchor,
+            "sentence_ids": sentence_ids,
+            "topic_key": topic_key,
+        }
+        for start, score, anchor, sentence_ids, topic_key in [
+            (0.0, 100.0, "S0001", ["S0001", "S0002", "S0003"], ["quiet", "reveal"]),
+            (300.0, 99.0, "S0004", ["S0002", "S0003", "S0004"], ["quiet", "reveal"]),
+            (600.0, 98.0, "S0100", ["S0100", "S0101"], ["different", "story"]),
+            (900.0, 97.0, "S0200", ["S0200", "S0201"], ["another", "story"]),
+        ]
+    ]
+
+    finalists = scoring_stage.select_diverse_finalists(entries, limit=4)
+
+    assert [entry["start"] for entry in finalists] == [0.0, 600.0, 900.0]
+
+
 def test_scored_review_ranking_prefers_distinct_regions():
     entries = [
         {"start": start, "end": start + 20.0, "recommendation_score": score}

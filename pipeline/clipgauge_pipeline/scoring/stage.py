@@ -495,14 +495,45 @@ def quality_audit(quality: dict[str, object]) -> dict[str, object]:
 
 
 def select_diverse_finalists(entries: list[dict], limit: int = LOCAL_FINALIST_LIMIT) -> list[dict]:
-    """Select strong clips while suppressing nearby redundant moments."""
+    """Select strong clips while suppressing duplicate story moments."""
     remaining = [
         dict(entry) for entry in entries
         if entry.get("eligible_to_recommend", True)
     ]
     selected: list[dict] = []
     separation = 120.0
+
+    def same_story(left: dict, right: dict) -> bool:
+        if left.get("anchor_sentence_id") and left.get("anchor_sentence_id") == right.get("anchor_sentence_id"):
+            return True
+        left_sentences = set(left.get("sentence_ids") or [])
+        right_sentences = set(right.get("sentence_ids") or [])
+        midpoint_gap = abs(
+            (float(left.get("start", 0.0)) + float(left.get("end", 0.0))) / 2.0
+            - (float(right.get("start", 0.0)) + float(right.get("end", 0.0))) / 2.0
+        )
+        if left_sentences and right_sentences:
+            overlap = len(left_sentences & right_sentences) / min(len(left_sentences), len(right_sentences))
+            if overlap >= 0.2:
+                return True
+        if midpoint_gap > separation:
+            return False
+        left_topics = set(left.get("topic_key") or [])
+        right_topics = set(right.get("topic_key") or [])
+        if left_topics and right_topics:
+            similarity = len(left_topics & right_topics) / len(left_topics | right_topics)
+            return similarity >= 0.65
+        return False
+
     while remaining and len(selected) < max(0, int(limit)):
+        distinct_remaining = [
+            entry for entry in remaining
+            if not any(same_story(entry, previous) for previous in selected)
+        ]
+        if not distinct_remaining:
+            break
+        pool = distinct_remaining
+
         def utility(entry: dict) -> tuple[float, float, float]:
             base = float(entry.get("recommendation_score", entry.get("score", 0.0)))
             midpoint = (float(entry.get("start", 0.0)) + float(entry.get("end", 0.0))) / 2.0
@@ -516,7 +547,7 @@ def select_diverse_finalists(entries: list[dict], limit: int = LOCAL_FINALIST_LI
                 penalty = max(0.0, (separation - distance) / separation * 35.0)
             return (base - penalty, base, -float(entry.get("start", 0.0)))
 
-        winner = max(remaining, key=utility)
+        winner = max(pool, key=utility)
         selected.append(winner)
         remaining.remove(winner)
     return selected
