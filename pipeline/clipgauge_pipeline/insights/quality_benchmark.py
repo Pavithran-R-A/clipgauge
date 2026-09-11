@@ -7,6 +7,7 @@ the repository.
 from __future__ import annotations
 
 import math
+from statistics import median
 from typing import Any, Iterable
 
 
@@ -38,11 +39,56 @@ def _covered_annotation_indexes(
     }
 
 
+def _strong_annotations(annotations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Use explicit human relevance when available.
+
+    Older fixtures omit relevance and remain backward compatible.
+    Frozen owner annotations always provide relevance.
+    """
+    if not any("relevance" in annotation for annotation in annotations):
+        return list(annotations)
+    return [annotation for annotation in annotations if float(annotation.get("relevance", 0.0)) == 3.0]
+
+
+def _ranked_matches(
+    recommendations: list[dict[str, Any]],
+    annotations: list[dict[str, Any]],
+    threshold: float = 0.3,
+) -> list[tuple[int, int, float]]:
+    """Match recommendations once, in ranked order.
+
+    Each recommendation receives its best still-unmatched annotation.
+    """
+    matches: list[tuple[int, int, float]] = []
+    used_annotations: set[int] = set()
+    for recommendation_index, recommendation in enumerate(recommendations):
+        options = [
+            (interval_iou(recommendation, annotation), annotation_index)
+            for annotation_index, annotation in enumerate(annotations)
+            if annotation_index not in used_annotations
+            and interval_iou(recommendation, annotation) >= threshold
+        ]
+        if not options:
+            continue
+        overlap, annotation_index = max(options, key=lambda item: (item[0], -item[1]))
+        used_annotations.add(annotation_index)
+        matches.append((recommendation_index, annotation_index, overlap))
+    return matches
+
+
 def recall_at_k(candidates: list[dict[str, Any]], annotations: list[dict[str, Any]], k: int) -> float:
     if not annotations:
         return 0.0
     covered = _covered_annotation_indexes(candidates[: max(0, k)], annotations)
     return len(covered) / len(annotations)
+
+
+def candidate_pool_recall(candidates: list[dict[str, Any]], annotations: list[dict[str, Any]]) -> float:
+    """Return full-pool recall against human-Strong annotations."""
+    strong = _strong_annotations(annotations)
+    if not strong:
+        return 0.0
+    return len(_covered_annotation_indexes(candidates, strong)) / len(strong)
 
 
 def recommendation_precision_at_k(recommendations: list[dict[str, Any]], annotations: list[dict[str, Any]], k: int) -> float:
@@ -56,12 +102,18 @@ def ndcg_at_k(recommendations: list[dict[str, Any]], annotations: list[dict[str,
     selected = recommendations[: max(0, k)]
     if not selected or not annotations:
         return 0.0
+    selected_matches = {
+        recommendation_index: (annotation_index, overlap)
+        for recommendation_index, annotation_index, overlap in _ranked_matches(selected, annotations)
+    }
     gains = [
-        max(
-            (interval_iou(item, annotation) * max(0.0, float(annotation.get("relevance", 1.0))) for annotation in annotations),
-            default=0.0,
+        (
+            selected_matches[index][1]
+            * max(0.0, float(annotations[selected_matches[index][0]].get("relevance", 1.0)))
+            if index in selected_matches
+            else 0.0
         )
-        for item in selected
+        for index in range(len(selected))
     ]
     dcg = sum(gain / math.log2(index + 2) for index, gain in enumerate(gains))
     ideal = sorted(
@@ -72,11 +124,19 @@ def ndcg_at_k(recommendations: list[dict[str, Any]], annotations: list[dict[str,
     return dcg / ideal_dcg if ideal_dcg else 0.0
 
 
-def boundary_error(recommendations: list[dict[str, Any]], annotations: list[dict[str, Any]]) -> dict[str, float]:
+def boundary_error(
+    recommendations: list[dict[str, Any]],
+    annotations: list[dict[str, Any]],
+    *,
+    strong_only: bool | None = None,
+) -> dict[str, float]:
+    if strong_only is None:
+        strong_only = any("relevance" in annotation for annotation in annotations)
+    matched_annotations = _strong_annotations(annotations) if strong_only else annotations
     overlaps = [
         (interval_iou(recommendation, annotation), recommendation_index, annotation_index)
         for recommendation_index, recommendation in enumerate(recommendations)
-        for annotation_index, annotation in enumerate(annotations)
+        for annotation_index, annotation in enumerate(matched_annotations)
         if interval_iou(recommendation, annotation) >= 0.3
     ]
     matched = []
@@ -87,12 +147,12 @@ def boundary_error(recommendations: list[dict[str, Any]], annotations: list[dict
             continue
         used_recommendations.add(recommendation_index)
         used_annotations.add(annotation_index)
-        matched.append((recommendations[recommendation_index], annotations[annotation_index]))
+        matched.append((recommendations[recommendation_index], matched_annotations[annotation_index]))
     if not matched:
         return {"start_seconds": 0.0, "end_seconds": 0.0}
     return {
-        "start_seconds": sum(abs(float(item["start"]) - float(annotation["start"])) for item, annotation in matched) / len(matched),
-        "end_seconds": sum(abs(float(item["end"]) - float(annotation["end"])) for item, annotation in matched) / len(matched),
+        "start_seconds": float(median(abs(float(item["start"]) - float(annotation["start"])) for item, annotation in matched)),
+        "end_seconds": float(median(abs(float(item["end"]) - float(annotation["end"])) for item, annotation in matched)),
     }
 
 
@@ -116,10 +176,10 @@ def temporal_diversity(recommendations: list[dict[str, Any]], duration: float) -
 
 
 def _point_coverage(recommendations: list[dict[str, Any]], annotations: list[dict[str, Any]], field: str) -> float:
-    points = [float(annotation[field]) for annotation in annotations if field in annotation]
+    points = [float(annotation[field]) for annotation in _strong_annotations(annotations) if field in annotation]
     if not points:
         return 0.0
-    return sum(any(float(item["start"]) <= point <= float(item["end"]) for item in recommendations) for point in points) / len(points)
+    return sum(any(float(item["start"]) <= point < float(item["end"]) for item in recommendations) for point in points) / len(points)
 
 
 def story_completeness(recommendations: list[dict[str, Any]], annotations: list[dict[str, Any]]) -> float:
@@ -128,7 +188,30 @@ def story_completeness(recommendations: list[dict[str, Any]], annotations: list[
     return sum(max((interval_iou(item, annotation) for item in recommendations), default=0.0) for annotation in annotations) / len(annotations)
 
 
+def strong_story_count_at_k(
+    recommendations: list[dict[str, Any]], annotations: list[dict[str, Any]], k: int
+) -> int:
+    strong = _strong_annotations(annotations)
+    return len(_ranked_matches(recommendations[: max(0, k)], strong))
+
+
+def _temporal_story_diversity(
+    recommendations: list[dict[str, Any]], annotations: list[dict[str, Any]], k: int
+) -> tuple[int, float]:
+    strong = _strong_annotations(annotations)
+    if not strong:
+        return 0, 0.0
+    count = len(_ranked_matches(recommendations[: max(0, k)], strong))
+    denominator = min(4, len(strong))
+    return count, count / denominator if denominator else 0.0
+
+
 def false_bait_rate(recommendations: list[dict[str, Any]]) -> float:
+    total_reported, total_rejected = false_bait_counts(recommendations)
+    return total_rejected / total_reported if total_reported else 0.0
+
+
+def false_bait_counts(recommendations: list[dict[str, Any]]) -> tuple[int, int]:
     total_reported = 0
     total_rejected = 0
     for item in recommendations:
@@ -158,7 +241,7 @@ def false_bait_rate(recommendations: list[dict[str, Any]]) -> float:
         elif item.get("bait_reported"):
             total_reported += 1
             total_rejected += int(not bool(item.get("bait_verified")))
-    return total_rejected / total_reported if total_reported else 0.0
+    return total_reported, total_rejected
 
 
 def benchmark_metrics(
@@ -169,18 +252,30 @@ def benchmark_metrics(
     duration: float,
     k: int = 5,
 ) -> dict[str, Any]:
-    boundaries = boundary_error(recommendations, annotations)
+    ranked = recommendations[: max(0, k)]
+    explicit_relevance = any("relevance" in annotation for annotation in annotations)
+    temporal_count, temporal_ratio = _temporal_story_diversity(recommendations, annotations, k)
+    if not explicit_relevance:
+        temporal_ratio = temporal_diversity(ranked, duration)
+    bait_reported, bait_false_positives = false_bait_counts(recommendations)
+    boundaries = boundary_error(ranked, annotations, strong_only=explicit_relevance)
     return {
         "candidate_recall_at_k": recall_at_k(candidates, annotations, k),
-        "recommendation_precision_at_k": recommendation_precision_at_k(recommendations, annotations, k),
+        "candidate_pool_recall": candidate_pool_recall(candidates, annotations),
+        "recall_at_k": recall_at_k(ranked, annotations, k),
+        "recommendation_precision_at_k": recommendation_precision_at_k(ranked, annotations, k),
         "ndcg_at_k": ndcg_at_k(recommendations, annotations, k),
         "boundary_start_error_seconds": boundaries["start_seconds"],
         "boundary_end_error_seconds": boundaries["end_seconds"],
-        "duplicate_recommendation_rate": duplicate_rate(recommendations),
-        "temporal_diversity": temporal_diversity(recommendations, duration),
-        "hook_coverage": _point_coverage(recommendations, annotations, "hook_start"),
-        "payoff_coverage": _point_coverage(recommendations, annotations, "payoff_start"),
+        "duplicate_recommendation_rate": duplicate_rate(ranked),
+        "temporal_diversity": temporal_ratio,
+        "temporal_diversity_count": temporal_count,
+        "hook_coverage": _point_coverage(ranked, annotations, "hook_start"),
+        "payoff_coverage": _point_coverage(ranked, annotations, "payoff_start"),
         "story_completeness": story_completeness(recommendations, annotations),
-        "false_bait_rate": false_bait_rate(recommendations),
+        "false_bait_rate": bait_false_positives / bait_reported if bait_reported else 0.0,
+        "false_bait_reported_count": bait_reported,
+        "false_bait_false_positives": bait_false_positives,
+        "strong_story_count_at_k": strong_story_count_at_k(recommendations, annotations, k),
         "annotation_count": len(annotations),
     }

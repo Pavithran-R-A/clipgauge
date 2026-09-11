@@ -91,6 +91,16 @@ def test_verified_viewer_directed_bait_is_recorded():
     assert verification["verified_bait"] == ["subscribe"]
 
 
+def test_t1_prompt_excludes_normal_dialogue_from_bait_field():
+    prompt = rubric.t1_prompt(
+        "S0001 [0.000-3.000] Can I get paid more for that?",
+        {"duration": 3, "events_desc": "none"},
+    )
+
+    assert "Do not label ordinary dialogue" in prompt
+    assert "viewer-directed call to action" in prompt
+
+
 def test_every_adjustment_is_recorded():
     laughs = [{"type": "laugh", "start": 5, "end": 7, "sources": ["jrgillick", "panns"]}]
     t1 = _t1(shock=8, bait_phrases=["subscribe"])

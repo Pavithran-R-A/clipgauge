@@ -38,13 +38,13 @@ def test_candidate_recall_counts_each_annotation_once():
     assert result["candidate_recall_at_k"] == 1.0
 
 
-def test_ndcg_uses_human_interval_as_the_ideal_not_partial_recommendations():
+def test_ndcg_ignores_subthreshold_interval_matches():
     annotations = [{"start": 10, "end": 20}]
     recommendations = [{"start": 10, "end": 12}]
 
     result = benchmark_metrics(recommendations, recommendations, annotations, duration=100, k=1)
 
-    assert result["ndcg_at_k"] == 0.2
+    assert result["ndcg_at_k"] == 0.0
 
 
 def test_boundary_error_ignores_unmatched_recommendations():
@@ -140,3 +140,99 @@ def test_dense_fixture_preserves_recall_across_repeated_story_terms():
     ]
 
     assert recall_at_k(synthesis["candidates"], annotations, 24) == 1.0
+
+
+def test_frozen_contract_uses_strong_pool_and_top_five_story_denominators():
+    annotations = [
+        {"id": "strong-a", "start": 0, "end": 10, "relevance": 3, "hook_start": 1, "payoff_start": 9},
+        {"id": "strong-b", "start": 20, "end": 30, "relevance": 3, "hook_start": 21, "payoff_start": 29},
+        {"id": "borderline", "start": 40, "end": 50, "relevance": 2, "hook_start": 41, "payoff_start": 49},
+    ]
+    candidates = [
+        {"start": 0, "end": 10},
+        {"start": 20, "end": 30},
+    ]
+
+    result = benchmark_metrics(candidates, candidates, annotations, duration=60, k=5)
+
+    assert result["candidate_pool_recall"] == pytest.approx(2 / 2)
+    assert result["recall_at_k"] == pytest.approx(2 / 3)
+    assert result["strong_story_count_at_k"] == 2
+    assert result["hook_coverage"] == pytest.approx(2 / 2)
+    assert result["payoff_coverage"] == pytest.approx(2 / 2)
+
+
+def test_ndcg_does_not_credit_duplicate_predictions_twice():
+    annotations = [
+        {"start": 0, "end": 10, "relevance": 3},
+        {"start": 20, "end": 30, "relevance": 3},
+    ]
+    recommendations = [
+        {"start": 0, "end": 10},
+        {"start": 0, "end": 10},
+    ]
+
+    result = benchmark_metrics(recommendations, recommendations, annotations, duration=60, k=2)
+
+    assert result["ndcg_at_k"] == pytest.approx(1 / (1 + 1 / 1.5849625007))
+
+
+def test_boundary_contract_reports_median_strong_errors():
+    annotations = [
+        {"start": 0, "end": 10, "relevance": 3},
+        {"start": 20, "end": 30, "relevance": 3},
+        {"start": 40, "end": 50, "relevance": 2},
+    ]
+    recommendations = [
+        {"start": 1, "end": 12},
+        {"start": 22, "end": 34},
+        {"start": 40, "end": 50},
+    ]
+
+    result = benchmark_metrics(recommendations, recommendations, annotations, duration=60, k=5)
+
+    assert result["boundary_start_error_seconds"] == 1.5
+    assert result["boundary_end_error_seconds"] == 3.0
+
+
+def test_boundary_contract_uses_filtered_strong_annotation_indexes():
+    annotations = [
+        {"id": "borderline", "start": 0, "end": 10, "relevance": 2},
+        {"id": "strong", "start": 20, "end": 30, "relevance": 3},
+    ]
+    recommendations = [{"start": 21, "end": 31}]
+
+    result = benchmark_metrics(recommendations, recommendations, annotations, duration=40, k=1)
+
+    assert result["boundary_start_error_seconds"] == 1.0
+    assert result["boundary_end_error_seconds"] == 1.0
+
+
+def test_point_coverage_uses_half_open_intervals():
+    annotations = [{"start": 0, "end": 10, "relevance": 3, "hook_start": 10}]
+    recommendations = [{"start": 0, "end": 10}]
+
+    result = benchmark_metrics(recommendations, recommendations, annotations, duration=20, k=1)
+
+    assert result["hook_coverage"] == 0.0
+
+
+def test_temporal_diversity_counts_distinct_strong_story_regions():
+    annotations = [
+        {"id": "a", "start": 0, "end": 10, "relevance": 3},
+        {"id": "b", "start": 20, "end": 30, "relevance": 3},
+        {"id": "c", "start": 40, "end": 50, "relevance": 3},
+        {"id": "d", "start": 60, "end": 70, "relevance": 3},
+    ]
+    recommendations = [
+        {"start": 0, "end": 10},
+        {"start": 20, "end": 30},
+        {"start": 40, "end": 50},
+        {"start": 0, "end": 10},
+        {"start": 0, "end": 10},
+    ]
+
+    result = benchmark_metrics(recommendations, recommendations, annotations, duration=80, k=5)
+
+    assert result["temporal_diversity_count"] == 3
+    assert result["temporal_diversity"] == pytest.approx(3 / 4)

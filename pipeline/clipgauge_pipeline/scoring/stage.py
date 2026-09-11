@@ -323,7 +323,7 @@ def _words_for_prerank(text: str) -> list[str]:
 def _story_metadata(candidate: dict) -> dict:
     """Carry transparent story synthesis evidence into score checkpoints."""
     keys = (
-        "candidate_id", "sentence_ids", "central_premise", "hook_sentence", "hook_time",
+        "candidate_id", "anchor_sentence_id", "sentence_ids", "central_premise", "hook_sentence", "hook_time",
         "setup_end", "payoff_sentence", "payoff_time", "semantic_closure", "topic_coherence",
         "topic_shift_count", "standalone_comprehension", "story_shape", "syntactic_complete",
         "story_variant", "topic_key", "boundary_confidence", "editorial_signal",
@@ -477,9 +477,18 @@ def select_diverse_finalists(entries: list[dict], limit: int = LOCAL_FINALIST_LI
     return selected
 
 
+def rank_scored_candidates(entries: list[dict]) -> list[dict]:
+    """Order review candidates with bounded temporal diversity."""
+    eligible = [
+        entry for entry in entries
+        if entry.get("eligible_to_recommend", True)
+    ]
+    return select_diverse_finalists(eligible, len(eligible))
+
+
 class ScoreStage(Stage):
     name = "score"
-    schema_version = 26  # v26: bounded local scoring recovery diagnostics
+    schema_version = 27  # v27: diversity-aware scored review ordering
 
     def dependency_settings(self, ctx: StageContext) -> dict:
         settings = super().dependency_settings(ctx)
@@ -906,6 +915,7 @@ class ScoreStage(Stage):
             entry for entry in scored
             if entry["short_quality"].get("eligible_to_recommend", False)
         ]
+        eligible = rank_scored_candidates(eligible)
         strong = [entry for entry in eligible if is_strong_recommendation(entry["short_quality"])]
         good = [
             entry for entry in eligible

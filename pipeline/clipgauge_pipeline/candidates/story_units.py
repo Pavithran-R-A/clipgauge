@@ -425,6 +425,7 @@ def _story_candidate(
     )
     return {
         "candidate_id": f"story-{anchor.sentence_id.lower()}-{variant}",
+        "anchor_sentence_id": anchor.sentence_id,
         "start": round(start, 3),
         "end": round(end, 3),
         "peak_time": round(anchor.start, 3),
@@ -481,6 +482,18 @@ def _story_similarity(left: dict[str, Any], right: dict[str, Any]) -> float:
     return max(topic, payoff)
 
 
+def _candidate_quality_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        str(item.get("story_variant", "")).startswith("llm-"),
+        float(item.get("duration_fit", 0.0)),
+        float(item.get("information_density", 0.0)),
+        float(item.get("curve_score", 0.0)),
+        float(item.get("hook_strength", 0.0)),
+        float(item.get("topic_coherence", 0.0)),
+        bool(item.get("payoff_candidate")),
+    )
+
+
 def cheap_filter_and_dedupe(
     candidates: list[dict[str, Any]],
     limit: int = SHORTLIST_LIMIT,
@@ -521,15 +534,7 @@ def cheap_filter_and_dedupe(
             record(candidate, reasons, "rejected")
             continue
         viable.append(candidate)
-    viable.sort(key=lambda item: (
-        item.get("story_variant", "").startswith("llm-"),
-        float(item.get("duration_fit", 0.0)),
-        float(item.get("information_density", 0.0)),
-        float(item.get("curve_score", 0.0)),
-        float(item.get("hook_strength", 0.0)),
-        float(item.get("topic_coherence", 0.0)),
-        bool(item.get("payoff_candidate")),
-    ), reverse=True)
+    viable.sort(key=_candidate_quality_key, reverse=True)
     kept: list[dict[str, Any]] = []
     bucket_counts: dict[int, int] = {}
     for candidate in viable:
@@ -571,7 +576,28 @@ def cheap_filter_and_dedupe(
             else:
                 record(candidate, ["DUPLICATE_STORY"], "rejected")
             continue
-        if any(_story_similarity(candidate, other) >= 0.82 and _iou(candidate, other) >= 0.35 for other in kept):
+        overlap_index = next(
+            (
+                index for index, other in enumerate(kept)
+                if _story_similarity(candidate, other) >= 0.82
+                and _iou(candidate, other) >= 0.35
+            ),
+            None,
+        )
+        if overlap_index is not None:
+            other = kept[overlap_index]
+            if (
+                candidate.get("payoff_candidate")
+                and candidate.get("anchor_sentence_id") == other.get("anchor_sentence_id")
+                and float(candidate["end"]) > float(other["end"])
+            ):
+                kept[overlap_index] = candidate
+                previous_entry = audit_entries.get(id(other))
+                if previous_entry is not None:
+                    previous_entry["status"] = "rejected"
+                    previous_entry["rejection_reasons"] = ["DUPLICATE_STORY_REPLACED"]
+                record(candidate, [], "kept")
+                continue
             record(candidate, ["DUPLICATE_OVERLAP"], "rejected")
             continue
         nearby_index = next(
@@ -594,12 +620,75 @@ def cheap_filter_and_dedupe(
         bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
         record(candidate, [], "kept")
     shortlist_limit = max(0, int(limit))
-    for candidate in kept[shortlist_limit:]:
+    shortlist = list(kept[:shortlist_limit])
+    selected_ids = {id(candidate) for candidate in shortlist}
+    if shortlist and len(shortlist) >= shortlist_limit:
+        earliest_selected = min(float(item["start"]) for item in shortlist)
+        leading_candidates = [
+            candidate
+            for candidate in kept[shortlist_limit:]
+            if float(candidate["start"]) < earliest_selected
+        ]
+        if leading_candidates:
+            coverage_candidate = max(
+                leading_candidates,
+                key=lambda item: (
+                    float(item["end"]) - float(item["start"]),
+                    _candidate_quality_key(item),
+                ),
+            )
+            weakest = min(shortlist, key=_candidate_quality_key)
+            shortlist[shortlist.index(weakest)] = coverage_candidate
+            selected_ids.remove(id(weakest))
+            selected_ids.add(id(coverage_candidate))
+    boundary_candidates = [
+        candidate
+        for candidate in kept[shortlist_limit:]
+        if candidate.get("payoff_candidate")
+    ]
+    for candidate in sorted(
+        boundary_candidates,
+        key=lambda item: (
+            float(item.get("payoff_time") or item["end"]),
+            float(item["end"]),
+        ),
+        reverse=True,
+    ):
+        related = [
+            other
+            for other in shortlist
+            if (
+                float(candidate["start"]) >= float(other["start"]) - 2.0
+                and float(candidate["start"]) - float(other["start"]) <= 30.0
+                and _iou(candidate, other) >= 0.15
+                and _story_similarity(candidate, other) >= 0.6
+                and float(candidate["end"]) > float(other["end"])
+                and float(candidate.get("payoff_time") or 0.0)
+                > float(other.get("payoff_time") or 0.0)
+            )
+        ]
+        if not related:
+            continue
+        other = min(related, key=_candidate_quality_key)
+        shortlist[shortlist.index(other)] = candidate
+        selected_ids.remove(id(other))
+        selected_ids.add(id(candidate))
+        previous_entry = audit_entries.get(id(other))
+        if previous_entry is not None:
+            previous_entry["status"] = "rejected"
+            previous_entry["rejection_reasons"] = ["SHORTLIST_BOUNDARY_REPLACED"]
+        candidate_entry = audit_entries.get(id(candidate))
+        if candidate_entry is not None:
+            candidate_entry["status"] = "kept"
+            candidate_entry["rejection_reasons"] = []
+    for candidate in kept:
+        if id(candidate) in selected_ids:
+            continue
         entry = audit_entries.get(id(candidate))
         if entry is not None:
             entry["status"] = "rejected"
             entry["rejection_reasons"] = ["SHORTLIST_LIMIT"]
-    return sorted(kept[:shortlist_limit], key=lambda item: item["start"])
+    return sorted(shortlist, key=lambda item: item["start"])
 
 
 def synthesize(

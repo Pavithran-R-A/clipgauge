@@ -153,6 +153,20 @@ def test_finalist_selection_spreads_candidates_across_long_source():
     assert sum(1 for start in starts if start < 200.0) <= 3
 
 
+def test_scored_review_ranking_prefers_distinct_regions():
+    entries = [
+        {"start": start, "end": start + 20.0, "recommendation_score": score}
+        for start, score in [
+            (0.0, 100.0), (20.0, 99.0), (400.0, 80.0),
+            (600.0, 79.0), (800.0, 78.0), (1000.0, 77.0),
+        ]
+    ]
+
+    ranked = scoring_stage.rank_scored_candidates(entries)
+
+    assert [entry["start"] for entry in ranked[:5]] == [0.0, 400.0, 600.0, 800.0, 1000.0]
+
+
 def test_nvenc_is_preferred_over_software_encoding_when_functional():
     args = renderer.select_video_encoder(nvenc_available=True, videotoolbox_available=False)
     assert args[:2] == ["-c:v", "h264_nvenc"]

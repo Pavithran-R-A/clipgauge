@@ -30,7 +30,7 @@ def detect_scenes(media_path: str, progress=None) -> list[float]:
 
 class CandidatesStage(Stage):
     name = "candidates"
-    schema_version = 16  # v16: source-wide anchors and temporal dedupe
+    schema_version = 17  # v17: preserve uncovered leading source coverage
 
     def run(self, ctx: StageContext) -> dict:
         import numpy as np
