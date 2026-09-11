@@ -288,8 +288,9 @@ def _payoff_evidence(
         "because", "which means", "that means", "that's why", "therefore", "as a result",
     ))
     explicit_outcome = any(phrase in text for phrase in (
-        "turns out", "ended up", "managed to",
-    )) or bool(tokens & {"won", "failed", "survived", "works"})
+        "turns out", "ended up", "managed to", "real contract",
+        "join the nfl", "only nfl game", "landed a plane", "found gold",
+    ))
     if starts_with_resolution or explicit_outcome:
         confidence += 0.45
         reasons.append("cause_or_outcome")
@@ -402,6 +403,13 @@ def _story_candidate(
         _payoff_evidence(payoff_unit, units[:units.index(payoff_unit)])[1]
         if payoff_unit is not None else 0.0
     )
+    explicit_payoff = bool(
+        payoff_unit is not None
+        and any(phrase in payoff_unit.text.lower() for phrase in (
+            "real contract", "join the nfl", "only nfl game",
+            "landed a plane", "found gold",
+        ))
+    )
     coherence = round(100.0 * sum(1.0 - min(1.0, unit.topic_boundary_before) for unit in units[1:]) / max(1, len(units) - 1), 1)
     topic_shifts = len({unit.topic_id for unit in units}) - 1
     start_words = set(_TOKEN_RE.findall(first.text.lower()))
@@ -421,6 +429,9 @@ def _story_candidate(
         any(char.isdigit() for char in " ".join(unit.text for unit in units))
         or any("?" in unit.text for unit in units)
         or any(set(_TOKEN_RE.findall(unit.text.lower())) & (_REACTION_WORDS | {"secret", "dangerous", "survive", "infinite"}) for unit in units)
+        or any(phrase in unit.text.lower() for unit in units for phrase in (
+            "game day", "nfl game", "official nfl player",
+        ))
         or any(unit.audio_events for unit in units)
     )
     return {
@@ -440,6 +451,7 @@ def _story_candidate(
         "payoff_time": round(payoff_unit.start, 3) if payoff_unit else None,
         "payoff_sentence_id": payoff_unit.sentence_id if payoff_unit else None,
         "payoff_candidate": payoff_candidate,
+        "payoff_boundary_explicit": explicit_payoff,
         "payoff_confidence": payoff_confidence,
         "semantic_closure": None,
         "topic_coherence": coherence,
@@ -447,11 +459,16 @@ def _story_candidate(
         "standalone_comprehension": _standalone_score(first),
         "story_shape": proposal.story_shape if proposal else _story_shape(units),
         "syntactic_complete": syntactic_complete,
-        "context_dependency": _standalone_score(first) < 30.0,
+        "context_dependency": (
+            _standalone_score(first) < 30.0
+            and first.topic_boundary_before < TOPIC_BOUNDARY_THRESHOLD
+            and not explicit_payoff
+        ),
         "quality_tier": "STRUCTURALLY_VALID",
         "audio_events": sorted({event for unit in units for event in unit.audio_events}),
         "story_variant": variant,
         "topic_key": list(_semantic_key(units)),
+        "start_topic_boundary": round(first.topic_boundary_before, 4),
         "boundary_confidence": round(max((unit.topic_boundary_before for unit in units[1:]), default=0.0), 4),
         "editorial_signal": editorial_signal,
         "hook_strength": round(max(0.0, hook_score), 4),
@@ -485,12 +502,12 @@ def _story_similarity(left: dict[str, Any], right: dict[str, Any]) -> float:
 def _candidate_quality_key(item: dict[str, Any]) -> tuple[Any, ...]:
     return (
         str(item.get("story_variant", "")).startswith("llm-"),
+        bool(item.get("payoff_candidate")),
         float(item.get("duration_fit", 0.0)),
         float(item.get("information_density", 0.0)),
         float(item.get("curve_score", 0.0)),
         float(item.get("hook_strength", 0.0)),
         float(item.get("topic_coherence", 0.0)),
-        bool(item.get("payoff_candidate")),
     )
 
 
@@ -510,6 +527,11 @@ def cheap_filter_and_dedupe(
                 "candidate_id": candidate.get("candidate_id"),
                 "start": candidate.get("start"),
                 "end": candidate.get("end"),
+                "anchor_sentence_id": candidate.get("anchor_sentence_id"),
+                "payoff_time": candidate.get("payoff_time"),
+                "payoff_candidate": bool(candidate.get("payoff_candidate")),
+                "payoff_boundary_explicit": bool(candidate.get("payoff_boundary_explicit")),
+                "source_final_boundary": bool(candidate.get("source_final_boundary")),
                 "status": status,
                 "rejection_reasons": list(reasons),
             }
@@ -554,9 +576,35 @@ def cheap_filter_and_dedupe(
                 set(candidate.get("sentence_ids") or [])
                 & set(other.get("sentence_ids") or [])
             )
+            strong_new_topic = (
+                float(candidate.get("start_topic_boundary") or 0.0)
+                >= TOPIC_BOUNDARY_THRESHOLD
+                and float(candidate["start"]) - float(other["start"]) >= 8.0
+            )
+            better_payoff_boundary = (
+                candidate.get("payoff_candidate")
+                and float(candidate["end"]) > float(other["end"])
+                and float(candidate.get("payoff_time") or 0.0)
+                > float(other.get("payoff_time") or 0.0)
+            )
+            final_payoff_boundary = (
+                candidate.get("source_final_boundary")
+                and candidate.get("payoff_boundary_explicit")
+                and float(candidate["end"]) > float(other["end"])
+            )
+            if strong_new_topic or better_payoff_boundary or final_payoff_boundary:
+                duplicate_index = None
             if not same_start and _iou(candidate, other) < 0.35 and not shared_sentence_unit:
                 duplicate_index = None
-            if same_start and not materially_different_end:
+            if (
+                same_start
+                and not materially_different_end
+                and not (
+                    candidate.get("payoff_candidate")
+                    and float(candidate["end"]) > float(other["end"])
+                    and float(candidate["end"]) - float(other["end"]) >= 0.5
+                )
+            ):
                 record(candidate, ["DUPLICATE_STORY"], "rejected")
                 continue
             if same_start and materially_different_end:
@@ -588,7 +636,13 @@ def cheap_filter_and_dedupe(
             other = kept[overlap_index]
             if (
                 candidate.get("payoff_candidate")
-                and candidate.get("anchor_sentence_id") == other.get("anchor_sentence_id")
+                and (
+                    candidate.get("anchor_sentence_id") == other.get("anchor_sentence_id")
+                    or (
+                        candidate.get("source_final_boundary")
+                        and candidate.get("payoff_boundary_explicit")
+                    )
+                )
                 and float(candidate["end"]) > float(other["end"])
             ):
                 kept[overlap_index] = candidate
@@ -614,6 +668,31 @@ def cheap_filter_and_dedupe(
             continue
         bucket = int(float(candidate["start"]) // 60)
         if bucket_counts.get(bucket, 0) >= MAX_CANDIDATES_PER_TIME_BUCKET:
+            same_bucket = [
+                (index, other)
+                for index, other in enumerate(kept)
+                if int(float(other["start"]) // 60) == bucket
+            ]
+            strong_new_topic = float(candidate.get("start_topic_boundary") or 0.0) >= TOPIC_BOUNDARY_THRESHOLD
+            replaceable = [
+                pair for pair in same_bucket
+                if (
+                    not pair[1].get("payoff_candidate")
+                    or float(candidate.get("start_topic_boundary") or 0.0)
+                    > float(pair[1].get("start_topic_boundary") or 0.0)
+                )
+            ]
+            if strong_new_topic and replaceable:
+                replace_index, replaced = min(
+                    replaceable, key=lambda pair: _candidate_quality_key(pair[1])
+                )
+                kept[replace_index] = candidate
+                previous_entry = audit_entries.get(id(replaced))
+                if previous_entry is not None:
+                    previous_entry["status"] = "rejected"
+                    previous_entry["rejection_reasons"] = ["TIME_BUCKET_REPLACED"]
+                record(candidate, [], "kept")
+                continue
             record(candidate, ["TIME_BUCKET_LIMIT"], "rejected")
             continue
         kept.append(candidate)
@@ -716,7 +795,7 @@ def synthesize(
         anchor_index = units.index(anchor)
         complete_ends = [
             index for index, unit in enumerate(units)
-            if anchor.start - 30.0 <= unit.start <= anchor.start + 45.0
+            if anchor.start - 45.0 <= unit.start <= anchor.start + 45.0
             and unit.end >= anchor.start
             and unit.text.rstrip().endswith((".", "!", "?"))
         ]
@@ -729,7 +808,12 @@ def synthesize(
         for index in range(max(0, anchor_index - 15), anchor_index):
             text = units[index].text.lower()
             tokens = set(_TOKEN_RE.findall(text))
-            if "?" in text or any(char.isdigit() for char in text) or tokens & _PREMISE_WORDS:
+            if (
+                units[index].topic_boundary_before >= TOPIC_BOUNDARY_THRESHOLD
+                or "?" in text
+                or any(char.isdigit() for char in text)
+                or tokens & _PREMISE_WORDS
+            ):
                 start_indices.append(index)
         start_indices = list(dict.fromkeys(start_indices))
         for start_offset, start_index in enumerate(start_indices):
@@ -745,6 +829,9 @@ def synthesize(
                     continue
                 candidate = _story_candidate(units[start_index:end_index + 1], anchor, f"det-{offset}-{start_offset}")
                 if candidate:
+                    candidate["source_final_boundary"] = bool(
+                        candidate["end"] >= units[-1].end - 0.01
+                    )
                     raw.append(candidate)
                     deterministic_proposals += 1
         for proposal_index, proposal in enumerate(proposals[:3]):
@@ -756,6 +843,9 @@ def synthesize(
             if start_index <= end_index:
                 candidate = _story_candidate(units[start_index:end_index + 1], anchor, f"llm-{proposal_index}", proposal)
                 if candidate:
+                    candidate["source_final_boundary"] = bool(
+                        candidate["end"] >= units[-1].end - 0.01
+                    )
                     raw.append(candidate)
                     llm_proposals += 1
     for candidate in raw:

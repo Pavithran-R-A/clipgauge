@@ -303,6 +303,38 @@ def test_dedupe_preserves_later_payoff_boundary_variant():
     assert [item["candidate_id"] for item in result] == ["payoff-boundary"]
 
 
+def test_dedupe_keeps_a_strong_new_topic_separate():
+    def candidate(candidate_id: str, start: float, boundary: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": candidate_id,
+            "start": start,
+            "end": start + 30.0,
+            "syntactic_complete": True,
+            "central_premise": "The NFL game begins.",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": 1.0,
+            "information_density": 1.0,
+            "curve_score": 0.5,
+            "hook_strength": 0.7,
+            "payoff_candidate": True,
+            "payoff_time": start + 28.0,
+            "topic_coherence": 90.0,
+            "topic_key": ["nfl", "game"],
+            "payoff_sentence": "The NFL game begins.",
+            "start_topic_boundary": boundary,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("setup", 720.0, 0.0),
+        candidate("game", 742.0, 0.8),
+    ], limit=2)
+
+    assert [item["candidate_id"] for item in result] == ["setup", "game"]
+
+
 def test_anchor_selection_spreads_across_long_sources():
     segments = [
         {
@@ -541,6 +573,38 @@ def test_minute_bucket_keeps_semantically_distinct_stories():
     assert len(result) == 3
 
 
+def test_minute_bucket_replaces_weak_story_for_new_topic():
+    def candidate(candidate_id: str, start: float, quality: float, boundary: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "start": start,
+            "end": start + 10.0,
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "central_premise": f"A story about {candidate_id}.",
+            "payoff_sentence": f"The {candidate_id} result is surprising.",
+            "topic_key": [candidate_id],
+            "story_variant": f"det-{candidate_id}",
+            "syntactic_complete": True,
+            "editorial_signal": True,
+            "hook_strength": quality,
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "topic_coherence": quality * 100.0,
+            "start_topic_boundary": boundary,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("ordinary-1", 0.0, 1.0, 0.0),
+        candidate("ordinary-2", 10.0, 0.9, 0.0),
+        candidate("ordinary-3", 20.0, 0.8, 0.0),
+        candidate("ordinary-4", 30.0, 0.7, 0.0),
+        candidate("new-topic", 40.0, 0.1, 0.8),
+    ], limit=5)
+
+    assert "new-topic" in {item["candidate_id"] for item in result}
+
+
 def test_duplicate_with_unknown_payoff_time_does_not_crash():
     base = {
         "start": 0.0,
@@ -574,6 +638,31 @@ def test_positive_story_has_cheap_payoff_evidence():
     assert candidate["payoff_confidence"] > 0.0
 
 
+def test_common_outcome_phrases_have_cheap_payoff_evidence():
+    units = build_sentence_units(_segments([
+        "The pilot is too close to the runway.",
+        "I landed a plane!",
+    ], seconds=5.0))
+
+    candidate = _story_candidate(units, units[0], "outcome")
+
+    assert candidate is not None
+    assert candidate["payoff_candidate"] is True
+
+
+def test_explicit_payoff_can_close_a_contextual_opening():
+    units = build_sentence_units(_segments([
+        "They say if you get up by one hundred, I can play.",
+        "And since this is the only NFL game I'll ever be a part of, the team let me lead them out the tunnel.",
+    ], seconds=5.0))
+
+    candidate = _story_candidate(units, units[0], "contextual-outcome")
+
+    assert candidate is not None
+    assert candidate["payoff_candidate"] is True
+    assert candidate["context_dependency"] is False
+
+
 def test_plain_story_has_no_cheap_payoff_evidence():
     units = build_sentence_units(_segments([
         "This bunker is underground.",
@@ -582,6 +671,14 @@ def test_plain_story_has_no_cheap_payoff_evidence():
     candidate = _story_candidate(units, units[0], "negative")
     assert candidate is not None
     assert candidate["payoff_candidate"] is False
+
+
+def test_negated_outcome_word_is_not_payoff_evidence():
+    units = build_sentence_units(_segments([
+        "I won't let the team down.",
+    ], seconds=8.5))
+
+    assert _contains_payoff(units[0]) is False
 
 
 def test_premise_fact_is_not_mistaken_for_payoff():
