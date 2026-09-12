@@ -716,6 +716,8 @@ describe('v0.5 information architecture', () => {
     expect(modelPicker).toHaveValue('clipgauge-local/light')
     await waitFor(() => expect(mocks.saveLocalModel).toHaveBeenCalledWith('clipgauge-local/light'))
     expect(onSelectLocalModel).toHaveBeenCalledWith('clipgauge-local/light')
+    await userEvent.click(screen.getByText('Advanced settings'))
+    expect(screen.getByText('clipgauge-local/light', { selector: 'code' })).toBeInTheDocument()
   })
 
   it('serializes rapid local model changes in selection order', async () => {
