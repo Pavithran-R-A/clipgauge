@@ -363,6 +363,22 @@ def _payoff_tail_bonus(entry: dict) -> float:
     return round(min(PAYOFF_TAIL_BONUS_MAX, (tail - 2.0) * 0.8), 1)
 
 
+def _candidate_evidence_bonus(entry: dict) -> float:
+    """Add a bounded prior from deterministic story-unit evidence."""
+    bonus = 0.0
+    if entry.get("payoff_candidate") and entry.get("payoff_time") is not None:
+        bonus += 1.5
+    if entry.get("payoff_boundary_explicit"):
+        bonus += 2.5
+    if entry.get("source_final_boundary"):
+        bonus += 1.5
+    boundary = max(0.0, min(1.0, float(entry.get("start_topic_boundary") or 0.0)))
+    hook = max(0.0, min(1.0, float(entry.get("hook_strength") or 0.0)))
+    bonus += boundary * 1.5
+    bonus += hook
+    return round(min(8.0, bonus), 1)
+
+
 def shortlist_local_candidates(
     candidates: list[dict],
     segments: list[dict],
@@ -918,6 +934,16 @@ class ScoreStage(Stage):
                     "rule": "payoff_tail_completeness",
                     "bonus": payoff_bonus,
                     "reason": "bounded reaction tail follows the detected payoff",
+                })
+            candidate_bonus = _candidate_evidence_bonus(entry)
+            if candidate_bonus:
+                entry["recommendation_score"] = round(
+                    min(100.0, entry["recommendation_score"] + candidate_bonus), 1
+                )
+                adjustments.append({
+                    "rule": "candidate_evidence_prior",
+                    "bonus": candidate_bonus,
+                    "reason": "bounded deterministic story-unit evidence supports this candidate",
                 })
             entry["score"] = entry["platform_score"]
             entry["best_platform"] = max(platform_scores, key=platform_scores.get)

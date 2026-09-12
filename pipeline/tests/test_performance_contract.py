@@ -93,6 +93,20 @@ def test_local_shortlist_preserves_late_temporal_coverage(monkeypatch):
     assert any(item[0]["start"] == 300.0 for item in selected)
 
 
+def test_candidate_evidence_prior_rewards_verified_story_structure():
+    plain = {"payoff_candidate": False, "hook_strength": 0.2, "start_topic_boundary": 0.0}
+    structured = {
+        "payoff_candidate": True,
+        "payoff_boundary_explicit": True,
+        "source_final_boundary": True,
+        "hook_strength": 0.7,
+        "start_topic_boundary": 0.9,
+    }
+
+    assert scoring_stage._candidate_evidence_bonus(structured) > scoring_stage._candidate_evidence_bonus(plain)
+    assert scoring_stage._candidate_evidence_bonus(structured) <= 8.0
+
+
 def test_windows_vulkan_remains_fallback_without_cuda_runtime():
     key = local_runtime.select_runtime_asset_key(
         platform_key="windows-x86_64",
