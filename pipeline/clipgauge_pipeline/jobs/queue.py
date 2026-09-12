@@ -486,13 +486,25 @@ def _with_checkpoint_metadata(data: dict, dependency_fingerprint: str) -> dict:
     return output
 
 
-def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[str, dict]:
+def run_stages(
+    job: Job,
+    stages: Iterable[Stage],
+    progress: ProgressFn,
+    *,
+    stop_after: str | None = None,
+) -> dict[str, dict]:
     """Run stages in order, skipping fresh checkpoints. Returns stage→data."""
+    stage_list = list(stages)
+    if stop_after is not None:
+        stop_index = next((index for index, stage in enumerate(stage_list) if stage.name == stop_after), None)
+        if stop_index is None:
+            raise ValueError(f"unknown stage stop point: {stop_after}")
+        stage_list = stage_list[: stop_index + 1]
     settings = config.Settings.from_json(json.loads(job.settings_json))
     ctx = StageContext(job=job, settings=settings, progress=progress)
     results: dict[str, dict] = {}
     set_job_status(job.id, "running")
-    for stage in stages:
+    for stage in stage_list:
         dependency_fingerprint = _dependency_fingerprint(stage, ctx, results)
         cached, issue = read_checkpoint_detailed(
             job,

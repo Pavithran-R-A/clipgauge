@@ -202,3 +202,41 @@ def test_failure_then_resume_skips_completed_stages():
     assert counting.runs == 1  # not re-run
     assert results["failing"] == {"ok": True}
     assert queue.get_job(job.id).status == "done"
+
+
+def test_run_stages_can_stop_after_named_stage():
+    runs = []
+
+    class FirstStage(queue.Stage):
+        name = "ingest"
+        schema_version = 1
+
+        def run(self, ctx):
+            runs.append(self.name)
+            return {"ok": True}
+
+    class ScoreStage(queue.Stage):
+        name = "score"
+        schema_version = 1
+
+        def run(self, ctx):
+            runs.append(self.name)
+            return {"ok": True}
+
+    class MustNotRunStage(queue.Stage):
+        name = "camera"
+        schema_version = 1
+
+        def run(self, ctx):
+            raise AssertionError("stages after stop_after must not run")
+
+    job = queue.create_job("file", "/tmp/x.mp4", _settings_json())
+    results = queue.run_stages(
+        job,
+        [FirstStage(), ScoreStage(), MustNotRunStage()],
+        _noop_progress,
+        stop_after="score",
+    )
+
+    assert list(results) == ["ingest", "score"]
+    assert runs == ["ingest", "score"]

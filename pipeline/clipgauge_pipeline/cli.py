@@ -790,10 +790,10 @@ def cmd_resume(args: argparse.Namespace) -> int:
         with queue._connect() as conn:  # noqa: SLF001 — CLI is a queue friend
             conn.execute("UPDATE jobs SET settings_json = ? WHERE id = ?", (new_json, job.id))
         job = queue.get_job(args.job_id)
-    return _execute(job, args.jsonl)
+    return _execute(job, args.jsonl, stop_after=args.stop_after)
 
 
-def _execute(job: queue.Job, jsonl: bool) -> int:
+def _execute(job: queue.Job, jsonl: bool, *, stop_after: str | None = None) -> int:
     attempt_id = protocol.diagnostic_id()
     emit = _progress_printer(jsonl, job.id, attempt_id)
     terminal = protocol.TerminalEmitter(
@@ -809,7 +809,7 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
     if warning:
         emit("pipeline", -1, warning)
     try:
-        results = queue.run_stages(job, _stages(), emit)
+        results = queue.run_stages(job, _stages(), emit, stop_after=stop_after)
     except queue.StageError as err:
         diagnostic = err.diagnostic_id
         if diagnostic is None and err.__cause__ is not None:
@@ -1154,6 +1154,7 @@ def main(argv: list[str] | None = None) -> int:
     p_resume.add_argument("--camera", choices=["cut", "pan", "locked"], default=None)
     p_resume.add_argument("--cookies-from-browser", choices=sorted(__import__("clipgauge_pipeline.ingest.ytdlp", fromlist=["SUPPORTED_BROWSER_SESSIONS"]).SUPPORTED_BROWSER_SESSIONS), default=None, help="explicitly use a supported browser session for authenticated video access")
     p_resume.add_argument("--allow-cpu-asr-fallback", action="store_true", help="explicitly allow slower CPU speech fallback")
+    p_resume.add_argument("--stop-after", choices=["ingest", "asr", "diarize", "events", "candidates", "score", "camera", "render"], default=None, help=argparse.SUPPRESS)
     p_resume.set_defaults(fn=cmd_resume)
 
     p_jobs = sub.add_parser("jobs", help="list jobs")

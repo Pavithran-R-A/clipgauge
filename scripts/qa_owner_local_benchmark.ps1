@@ -40,7 +40,7 @@ try {
 
     $commandErrorAction = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    $output = @(& $python -m clipgauge_pipeline.cli --jsonl resume $ownerId --provider clipgauge-local --model $Model --quality-mode balanced 2>&1 | ForEach-Object { $_.ToString() })
+    $output = @(& $python -m clipgauge_pipeline.cli --jsonl resume $ownerId --provider clipgauge-local --model $Model --quality-mode balanced --stop-after score 2>&1 | ForEach-Object { $_.ToString() })
     $exitCode = $LASTEXITCODE
     $ErrorActionPreference = $commandErrorAction
     $scorePath = Join-Path $ownerJob 'score.json'
