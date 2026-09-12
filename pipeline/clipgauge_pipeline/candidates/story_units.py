@@ -524,10 +524,17 @@ def _candidate_quality_key(item: dict[str, Any]) -> tuple[Any, ...]:
 
 def _is_earlier_opening_variant(candidate: dict[str, Any], other: dict[str, Any]) -> bool:
     """Prefer an earlier opening when the payoff identity remains stable."""
+    same_payoff_identity = bool(
+        candidate.get("payoff_sentence_id")
+        and candidate.get("payoff_sentence_id") == other.get("payoff_sentence_id")
+    )
     return bool(
         candidate.get("payoff_candidate")
         and other.get("payoff_candidate")
-        and candidate.get("anchor_sentence_id") == other.get("anchor_sentence_id")
+        and (
+            candidate.get("anchor_sentence_id") == other.get("anchor_sentence_id")
+            or same_payoff_identity
+        )
         and float(candidate["start"]) + 3.0 < float(other["start"])
         and abs(
             float(candidate.get("payoff_time") or 0.0)
