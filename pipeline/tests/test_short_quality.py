@@ -216,6 +216,59 @@ def test_refine_boundaries_keeps_payoff_without_forcing_candidate_tail():
     assert 24.0 <= end < 40.0
 
 
+def test_refine_boundaries_includes_segment_containing_payoff_time():
+    segments = [
+        {
+            "start": 10.0,
+            "end": 20.0,
+            "words": [
+                {"word": "The", "start": 10.0, "end": 10.8},
+                {"word": "setup", "start": 12.0, "end": 12.8},
+            ],
+        },
+        {
+            "start": 20.0,
+            "end": 35.0,
+            "words": [
+                {"word": "It", "start": 20.0, "end": 20.8},
+                {"word": "landed!", "start": 31.0, "end": 31.8},
+            ],
+        },
+    ]
+
+    _, end = short_quality.refine_boundaries(
+        segments,
+        10.0,
+        28.0,
+        {"recommended_end_offset": 14.0},
+        preserve_candidate_payoff=True,
+        payoff_time=24.0,
+    )
+
+    assert end >= 31.8
+
+
+def test_verified_payoff_closure_does_not_follow_model_open_loop():
+    quality = short_quality.assess(
+        "The result is confirmed.",
+        [],
+        5.0,
+        llm={
+            "quality_tier": "GOOD",
+            "payoff_strength": 8,
+            "ending_completeness": 4,
+            "semantic_closure": 2,
+            "open_loop_at_end": True,
+        },
+        segment_boundary=True,
+        candidate_evidence={"payoff_candidate": True, "payoff_time": 4.0},
+    )
+
+    assert quality["open_loop_at_end"] is False
+    assert quality["semantic_closure_0_100"] >= 70.0
+    assert "WEAK_SEMANTIC_CLOSURE" not in quality["quality_flags"]
+
+
 def test_quality_ranking_is_deterministic():
     items = [
         {"start": 4.0, "end": 8.0, "short_quality": {"score": 80}},

@@ -192,6 +192,38 @@ def test_cloud_scoring_keeps_the_existing_richer_budget():
     assert budget["wall_time_seconds"] == scoring_stage.CLOUD_T1_WALL_BUDGET_SECONDS
 
 
+def test_local_refill_gate_does_not_ignore_weak_semantic_closure():
+    quality = {
+        "eligible_to_recommend": True,
+        "quality_flags": ["WEAK_SEMANTIC_CLOSURE"],
+        "effective_hook_0_100": 80.0,
+        "payoff": 80.0,
+        "standalone": 80.0,
+    }
+
+    assert scoring_stage.is_search_strong(quality) is False
+
+
+def test_other_moment_record_preserves_identity_and_reason():
+    record = scoring_stage.other_moment_record(
+        {
+            "candidate_id": "story-synthetic-1",
+            "start": 10.0,
+            "end": 24.0,
+            "summary": "A useful moment.",
+            "short_quality": {
+                "quality_flags": ["WEAK_SEMANTIC_CLOSURE"],
+                "rejection_reasons": [],
+                "quality_tier": "STRUCTURALLY_VALID",
+            },
+        }
+    )
+
+    assert record["candidate_id"] == "story-synthetic-1"
+    assert record["summary"] == "A useful moment."
+    assert record["reasons"] == ["WEAK_SEMANTIC_CLOSURE"]
+
+
 def test_output_preference_keeps_best_recommended_and_more_distinct():
     finalists = [{"start": index, "recommendation_score": 100 - index} for index in range(4)]
     borderline = [{"start": 10, "recommendation_score": 70}]

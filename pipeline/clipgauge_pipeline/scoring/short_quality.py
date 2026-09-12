@@ -278,6 +278,7 @@ def assess(
     llm: dict[str, Any] | None = None,
     segment_boundary: bool = False,
     ending_evidence: dict[str, Any] | None = None,
+    candidate_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Combine deterministic evidence with fields from the existing T1 call."""
     evidence = _deterministic(
@@ -288,6 +289,7 @@ def assess(
         ending_evidence=ending_evidence,
     )
     fields = llm or {}
+    candidate_evidence = candidate_evidence or {}
     deterministic_hook = evidence["hook"]
     rubric_hook = None
     rubric_value = fields.get("hook", fields.get("rubric_hook_0_10", fields.get("rubric_hook")))
@@ -343,11 +345,18 @@ def assess(
         or (ending_evidence or {}).get("semantic_complete", False)
     )
     model_open_loop = fields.get("open_loop_at_end")
-    open_loop_at_end = (
-        model_open_loop
-        if isinstance(model_open_loop, bool)
-        else bool(str(text).rstrip().endswith("?") or story_name == "open_ended")
+    verified_payoff_closure = bool(
+        candidate_evidence.get("payoff_candidate")
+        and candidate_evidence.get("payoff_time") is not None
+        and segment_boundary
+        and payoff >= 45.0
     )
+    if verified_payoff_closure:
+        open_loop_at_end = False
+    elif isinstance(model_open_loop, bool):
+        open_loop_at_end = model_open_loop
+    else:
+        open_loop_at_end = bool(str(text).rstrip().endswith("?") or story_name == "open_ended")
     semantic_closure = 82.0 if syntactic_complete else 35.0
     if open_loop_at_end:
         semantic_closure -= 35.0
@@ -365,7 +374,7 @@ def assess(
             or isinstance(llm_relevance, (int, float)) and float(llm_relevance) < 5.0
         )
     )
-    if isinstance(llm_semantic, (int, float)) and not rich_scores_conflict:
+    if isinstance(llm_semantic, (int, float)) and not rich_scores_conflict and not verified_payoff_closure:
         semantic_closure = min(semantic_closure, _clamp(float(llm_semantic), 0.0, 10.0) * 10.0)
     semantic_closure = round(_clamp(semantic_closure), 1)
     payoff_relevance = 100.0
@@ -588,6 +597,19 @@ def refine_boundaries(
         requested_end = max(requested_end, end)
     elif preserve_candidate_payoff and payoff_time is not None:
         requested_end = max(requested_end, float(payoff_time))
+        payoff_segment = next(
+            (
+                segment for segment in segments
+                if float(segment.get("start", 0.0)) <= float(payoff_time)
+                <= float(segment.get("end", 0.0))
+            ),
+            None,
+        )
+        if payoff_segment is not None:
+            requested_end = max(
+                requested_end,
+                float(payoff_segment.get("end", requested_end)),
+            )
     elif preserve_candidate_payoff:
         requested_end = max(requested_end, end)
     if requested_start > start and fields:

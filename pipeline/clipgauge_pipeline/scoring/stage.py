@@ -472,11 +472,8 @@ def is_good_recommendation(quality: dict[str, object]) -> bool:
 
 
 def is_search_strong(quality: dict[str, object]) -> bool:
-    """Count promising candidates before final boundary repair."""
+    """Count candidates safe to use for local early stopping."""
     flags = set(quality.get("quality_flags") or [])
-    # Segment-boundary evidence is collected during the repair pass.  The
-    # provisional search may use the T1 ending score instead.
-    flags.discard("WEAK_SEMANTIC_CLOSURE")
     rejection_reasons = set(quality.get("rejection_reasons") or [])
     provisional_ending = (
         rejection_reasons <= {"INCOMPLETE_ENDING"}
@@ -517,6 +514,28 @@ def quality_audit(quality: dict[str, object]) -> dict[str, object]:
         "eligible_to_recommend": quality.get("eligible_to_recommend", False),
         "structurally_valid": quality.get("structurally_valid", False),
         "strong_recommendation": quality.get("strong_recommendation", False),
+    }
+
+
+def other_moment_record(entry: dict) -> dict:
+    """Expose useful below-threshold candidates with actionable reasons."""
+    quality = entry.get("short_quality") or {}
+    reasons = list(quality.get("quality_flags") or [])
+    reasons.extend(reason for reason in quality.get("rejection_reasons") or [] if reason not in reasons)
+    if not reasons:
+        reasons = ["STRONG_RECOMMENDATION_REQUIRED"]
+    return {
+        "candidate_id": entry.get("candidate_id"),
+        "start": entry["start"],
+        "end": entry["end"],
+        "recommendation_score": entry.get(
+            "recommendation_score", quality.get("score", 0.0)
+        ),
+        "status": "OTHER_MOMENT",
+        "summary": entry.get("summary", ""),
+        "story": quality.get("story_shape"),
+        "reasons": reasons,
+        "quality": quality_audit(quality),
     }
 
 
@@ -715,7 +734,13 @@ class ScoreStage(Stage):
                 ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_code}); skipping")
                 continue
 
-            quality = short_quality.assess(flat, window_events, end - start, llm=t1)
+            quality = short_quality.assess(
+                flat,
+                window_events,
+                end - start,
+                llm=t1,
+                candidate_evidence=cand,
+            )
             arousal_pct = _window_pct(arousal, arousal_grid, start, end)
             heatmap_pct = (
                 _window_pct(heat_values, 1.0, start, end) if heat_values is not None else None
@@ -792,7 +817,13 @@ class ScoreStage(Stage):
                         failure_records.append({"code": failure_code, "provider_code": "UNEXPECTED_SCORING_ERROR", "details": {}})
                         ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_code}); skipping")
                         continue
-                    quality = short_quality.assess(flat, window_events, end - start, llm=t1)
+                    quality = short_quality.assess(
+                        flat,
+                        window_events,
+                        end - start,
+                        llm=t1,
+                        candidate_evidence=cand,
+                    )
                     arousal_pct = _window_pct(arousal, arousal_grid, start, end)
                     heatmap_pct = (
                         _window_pct(heat_values, 1.0, start, end) if heat_values is not None else None
@@ -866,7 +897,13 @@ class ScoreStage(Stage):
                         failure_records.append({"code": failure_code, "provider_code": "UNEXPECTED_SCORING_ERROR", "details": {}})
                         ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_code}); skipping")
                         continue
-                    quality = short_quality.assess(flat, window_events, end - start, llm=t1)
+                    quality = short_quality.assess(
+                        flat,
+                        window_events,
+                        end - start,
+                        llm=t1,
+                        candidate_evidence=cand,
+                    )
                     arousal_pct = _window_pct(arousal, arousal_grid, start, end)
                     heatmap_pct = (
                         _window_pct(heat_values, 1.0, start, end) if heat_values is not None else None
@@ -1004,6 +1041,7 @@ class ScoreStage(Stage):
                 refined_end - refined_start,
                 llm=entry.get("t1_raw"),
                 segment_boundary=segment_boundary,
+                candidate_evidence=entry,
                 ending_evidence=_ending_evidence(
                     flat,
                     segments,
@@ -1242,16 +1280,7 @@ class ScoreStage(Stage):
             "capabilities": profile.capabilities.to_dict(),
             "clips": finalists,
             "rejected_candidates": rejected,
-            "borderline_candidates": [
-                {
-                    "start": entry["start"],
-                    "end": entry["end"],
-                    "recommendation_score": entry["recommendation_score"],
-                    "reasons": ["STRONG_RECOMMENDATION_REQUIRED"],
-                    "quality": quality_audit(entry["short_quality"]),
-                }
-                for entry in borderline
-            ],
+            "borderline_candidates": [other_moment_record(entry) for entry in borderline],
             "strong_recommendation_count": len(strong),
             "good_recommendation_count": len(good),
             "scored_count": len(scored),
