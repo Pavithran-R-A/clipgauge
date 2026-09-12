@@ -379,6 +379,17 @@ def _candidate_evidence_bonus(entry: dict) -> float:
     return round(min(8.0, bonus), 1)
 
 
+def _candidate_evidence_adjustment(entry: dict) -> dict | None:
+    bonus = _candidate_evidence_bonus(entry)
+    if not bonus:
+        return None
+    return {
+        "rule": "candidate_evidence_prior",
+        "bonus": bonus,
+        "reason": "bounded deterministic story-unit evidence supports this candidate",
+    }
+
+
 def shortlist_local_candidates(
     candidates: list[dict],
     segments: list[dict],
@@ -935,16 +946,15 @@ class ScoreStage(Stage):
                     "bonus": payoff_bonus,
                     "reason": "bounded reaction tail follows the detected payoff",
                 })
-            candidate_bonus = _candidate_evidence_bonus(entry)
-            if candidate_bonus:
+            candidate_adjustment = _candidate_evidence_adjustment(entry)
+            if candidate_adjustment:
+                candidate_bonus = float(candidate_adjustment["bonus"])
                 entry["recommendation_score"] = round(
                     min(100.0, entry["recommendation_score"] + candidate_bonus), 1
                 )
-                adjustments.append({
-                    "rule": "candidate_evidence_prior",
-                    "bonus": candidate_bonus,
-                    "reason": "bounded deterministic story-unit evidence supports this candidate",
-                })
+                recorded = entry.setdefault("adjustments", [])
+                if not any(item.get("rule") == candidate_adjustment["rule"] for item in recorded):
+                    recorded.append(candidate_adjustment)
             entry["score"] = entry["platform_score"]
             entry["best_platform"] = max(platform_scores, key=platform_scores.get)
             return platform_scores, adjustments

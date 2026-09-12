@@ -107,6 +107,19 @@ def test_candidate_evidence_prior_rewards_verified_story_structure():
     assert scoring_stage._candidate_evidence_bonus(structured) <= 8.0
 
 
+def test_candidate_evidence_prior_has_a_recorded_adjustment():
+    adjustment = scoring_stage._candidate_evidence_adjustment({
+        "payoff_candidate": True,
+        "payoff_time": 4.0,
+        "payoff_boundary_explicit": True,
+        "hook_strength": 0.6,
+    })
+
+    assert adjustment is not None
+    assert adjustment["rule"] == "candidate_evidence_prior"
+    assert adjustment["bonus"] > 0
+
+
 def test_windows_vulkan_remains_fallback_without_cuda_runtime():
     key = local_runtime.select_runtime_asset_key(
         platform_key="windows-x86_64",
