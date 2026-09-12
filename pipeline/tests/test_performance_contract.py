@@ -68,6 +68,31 @@ def test_local_scoring_batch_drops_shorter_same_payoff_variant():
     assert selected[0][0]["end"] == 28.0
 
 
+def test_local_shortlist_preserves_late_temporal_coverage(monkeypatch):
+    candidates = [
+        {"start": 0.0, "end": 30.0, "curve_score": 1.0, "channel_scores": {}},
+        {"start": 40.0, "end": 70.0, "curve_score": 1.0, "channel_scores": {}},
+        {"start": 80.0, "end": 110.0, "curve_score": 1.0, "channel_scores": {}},
+        {"start": 300.0, "end": 330.0, "curve_score": 0.1, "channel_scores": {}},
+    ]
+    monkeypatch.setattr(
+        scoring_stage,
+        "_transcript_slice",
+        lambda _segments, start, end, **_kwargs: (
+            "",
+            "A complete result is shown clearly with useful context and enough words "
+            "to represent a realistic transcript candidate for scoring."
+            if start < 300.0 else
+            "A complete result is shown clearly with useful context and enough words "
+            "to represent a realistic transcript candidate for scoring.",
+        ),
+    )
+
+    selected = scoring_stage.shortlist_local_candidates(candidates, [], limit=3)
+
+    assert any(item[0]["start"] == 300.0 for item in selected)
+
+
 def test_windows_vulkan_remains_fallback_without_cuda_runtime():
     key = local_runtime.select_runtime_asset_key(
         platform_key="windows-x86_64",

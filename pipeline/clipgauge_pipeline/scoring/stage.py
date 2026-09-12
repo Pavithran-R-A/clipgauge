@@ -370,7 +370,7 @@ def shortlist_local_candidates(
     *,
     include_sentence_ids: bool = False,
 ) -> list[tuple[dict, str, str]]:
-    """Prepare and deterministically cap expensive local scoring work."""
+    """Prepare and cap local work without losing distant story regions."""
     prepared: list[tuple[dict, str, str]] = []
     for candidate in candidates:
         labeled, flat = _transcript_slice(
@@ -381,8 +381,7 @@ def shortlist_local_candidates(
         )
         if len(flat.split()) >= 20:
             prepared.append((candidate, labeled, flat))
-    prepared.sort(key=_local_prerank, reverse=True)
-    return prepared[: max(0, int(limit))]
+    return select_diverse_scoring_batch(prepared, max(0, int(limit)))
 
 
 def select_diverse_scoring_batch(
