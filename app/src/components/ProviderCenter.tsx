@@ -11,6 +11,7 @@ import { friendlyErrorMessage } from '../errorMessaging'
 interface Props {
   selectedProvider: string
   onSelectProvider: (provider: string) => void
+  onSelectLocalModel?: (modelId: string) => void
   onBack: () => void
   onOpenSetup?: () => void
 }
@@ -143,7 +144,7 @@ function statusFor(provider: ProviderDefinition, setup: SetupState | null, test:
   return saved ? { label: 'Credential saved', tone: 'neutral' } : { label: 'Not configured', tone: 'neutral' }
 }
 
-export default function ProviderCenter({ selectedProvider, onSelectProvider, onBack, onOpenSetup }: Props) {
+export default function ProviderCenter({ selectedProvider, onSelectLocalModel, onSelectProvider, onBack, onOpenSetup }: Props) {
   const [setup, setSetup] = useState<SetupState | null>(null)
   const [inventory, setInventory] = useState<LocalSetupInventory | null>(() => readCachedSetupInventory())
   const [activeId, setActiveId] = useState(selectedProvider)
@@ -160,6 +161,7 @@ export default function ProviderCenter({ selectedProvider, onSelectProvider, onB
   const [selectedModels, setSelectedModels] = useState<Record<string, string>>({})
   const [modelsFetchedAt, setModelsFetchedAt] = useState<Record<string, number>>({})
   const modelRequestRef = useRef(0)
+  const localSaveChainRef = useRef<Promise<unknown>>(Promise.resolve())
   const connectionRequestRef = useRef(0)
   const credentialRequestRef = useRef(0)
   const selectedProviderPropRef = useRef(selectedProvider)
@@ -200,7 +202,7 @@ export default function ProviderCenter({ selectedProvider, onSelectProvider, onB
     if (activeId === 'custom' || activeId === 'cloudflare') {
       if (stored.value && activeId === 'custom') setCustomModel(stored.value)
       setCustomEndpoint(endpoint.value ?? '')
-    } else if (stored.value) setSelectedModels((current) => ({ ...current, [activeId]: stored.value as string }))
+    } else if (activeId !== 'clipgauge-local' && stored.value) setSelectedModels((current) => ({ ...current, [activeId]: stored.value as string }))
   }, [activeId])
 
   const active = useMemo(() => PROVIDERS.find((provider) => provider.id === activeId) ?? PROVIDERS[0], [activeId])
@@ -209,7 +211,7 @@ export default function ProviderCenter({ selectedProvider, onSelectProvider, onB
   const status = statusFor(active, setup, testResult, localReady, testing)
   const savedFromSetup = active.id === 'gemini' ? Boolean(setup?.has_gemini_key) : Boolean(setup?.provider_keys?.[active.id] ?? setup?.provider_keys?.[`preset-${active.id}`])
   const hasSavedCredential = active.credential && (saved || savedFromSetup)
-  const selectedModel = active.id === 'custom' ? customModel : active.id === 'clipgauge-local' ? localModelId ?? '' : selectedModels[active.id] ?? active.model
+  const selectedModel = active.id === 'custom' ? customModel : active.id === 'clipgauge-local' ? selectedModels[active.id] ?? localModelId ?? '' : selectedModels[active.id] ?? active.model
   const discoveredModels = models[active.id] ?? []
   const modelListExpired = Boolean(modelsFetchedAt[active.id] && Date.now() - modelsFetchedAt[active.id] > MODEL_LIST_TTL_MS)
   const providerManagedAuto = active.id === 'openrouter' && selectedModel === 'openrouter/free'
@@ -235,6 +237,37 @@ export default function ProviderCenter({ selectedProvider, onSelectProvider, onB
   }
 
   function selectModel(model: string) {
+    if (active.id === 'clipgauge-local') {
+      const providerId = active.id
+      const previous = selectedModel
+      const requestId = ++modelRequestRef.current
+      setSelectedModels((current) => ({ ...current, [providerId]: model }))
+      setStorageMessage(null)
+      setTestResult(null)
+      const save = localSaveChainRef.current.then(() => api.saveLocalModel(model))
+      localSaveChainRef.current = save.catch(() => undefined)
+      void save.then(() => {
+        if (requestId !== modelRequestRef.current || providerId !== active.id) return
+        const nextInventory = inventory?.local_ai
+          ? { ...inventory, local_ai: { ...inventory.local_ai, selected_model_id: model } }
+          : null
+        if (nextInventory) {
+          setInventory(nextInventory)
+          writeCachedSetupInventory(nextInventory)
+        }
+        onSelectLocalModel?.(model)
+      }).catch((error) => {
+        if (requestId !== modelRequestRef.current || providerId !== active.id) return
+        setSelectedModels((current) => {
+          const next = { ...current }
+          if (previous) next[providerId] = previous
+          else delete next[providerId]
+          return next
+        })
+        setStorageMessage(friendlyErrorMessage(error, 'Local model choice could not be saved. Retry before using it.'))
+      })
+      return
+    }
     setSelectedModels((current) => ({ ...current, [active.id]: model }))
     setStorageMessage(writeSavedModel(active.id, model) ? null : 'Model selection could not be saved. Restore browser storage before restarting.')
     setTestResult(null)

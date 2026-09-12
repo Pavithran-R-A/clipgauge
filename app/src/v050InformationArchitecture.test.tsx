@@ -684,6 +684,80 @@ describe('v0.5 information architecture', () => {
     expect(storage.setItem).toHaveBeenCalledWith('clipgauge.provider-model.groq', 'qwen/qwen3-32b')
   })
 
+  it('persists a local provider model selection through native setup state', async () => {
+    mocks.setupInventory.mockResolvedValue({
+      state: 'ready',
+      local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/balanced', required_bytes: 0, action: 'Ready' },
+      models: [
+        { asset_id: 'clipgauge-local/light', display_name: 'Lightweight', size_bytes: 1 },
+        { asset_id: 'clipgauge-local/balanced', display_name: 'Balanced', size_bytes: 2 }
+      ],
+      runtime: {},
+      core_assets: [],
+      storage: {},
+      catalog: []
+    })
+    mocks.listProviderModels.mockResolvedValue({
+      state: 'PASS',
+      provider: 'clipgauge-local',
+      models: [
+        { id: 'clipgauge-local/light', compatibility: 'FULL' },
+        { id: 'clipgauge-local/balanced', compatibility: 'FULL' }
+      ]
+    })
+    mocks.saveLocalModel.mockResolvedValue(undefined)
+    const onSelectLocalModel = vi.fn()
+    render(<ProviderCenter selectedProvider="clipgauge-local" onSelectProvider={vi.fn()} onSelectLocalModel={onSelectLocalModel} onBack={vi.fn()} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Refresh models' }))
+    const modelPicker = screen.getByRole('combobox', { name: 'Model' })
+    await userEvent.selectOptions(modelPicker, 'clipgauge-local/light')
+
+    expect(modelPicker).toHaveValue('clipgauge-local/light')
+    await waitFor(() => expect(mocks.saveLocalModel).toHaveBeenCalledWith('clipgauge-local/light'))
+    expect(onSelectLocalModel).toHaveBeenCalledWith('clipgauge-local/light')
+  })
+
+  it('serializes rapid local model changes in selection order', async () => {
+    mocks.setupInventory.mockResolvedValue({
+      state: 'ready',
+      local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/balanced', required_bytes: 0, action: 'Ready' },
+      models: [
+        { asset_id: 'clipgauge-local/light', display_name: 'Lightweight', size_bytes: 1 },
+        { asset_id: 'clipgauge-local/balanced', display_name: 'Balanced', size_bytes: 2 }
+      ],
+      runtime: {},
+      core_assets: [],
+      storage: {},
+      catalog: []
+    })
+    mocks.listProviderModels.mockResolvedValue({
+      state: 'PASS',
+      provider: 'clipgauge-local',
+      models: [
+        { id: 'clipgauge-local/light', compatibility: 'FULL' },
+        { id: 'clipgauge-local/balanced', compatibility: 'FULL' }
+      ]
+    })
+    const resolvers: Array<() => void> = []
+    const savedModels: string[] = []
+    mocks.saveLocalModel.mockImplementation((model: string) => {
+      savedModels.push(model)
+      return new Promise<void>((resolve) => { resolvers.push(resolve) })
+    })
+    render(<ProviderCenter selectedProvider="clipgauge-local" onSelectProvider={vi.fn()} onBack={vi.fn()} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Refresh models' }))
+    const modelPicker = screen.getByRole('combobox', { name: 'Model' })
+    await userEvent.selectOptions(modelPicker, 'clipgauge-local/light')
+    await userEvent.selectOptions(modelPicker, 'clipgauge-local/balanced')
+
+    expect(savedModels).toEqual(['clipgauge-local/light'])
+    resolvers[0]()
+    await waitFor(() => expect(savedModels).toEqual(['clipgauge-local/light', 'clipgauge-local/balanced']))
+    resolvers[1]()
+  })
+
   it('shows the selected provider model in advanced diagnostics', async () => {
     mocks.listProviderModels.mockResolvedValue({
       state: 'PASS',
