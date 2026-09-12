@@ -189,7 +189,8 @@ def _verified_candidate_hook(text: str, candidate_evidence: dict[str, Any]) -> b
     """Recognize a candidate opening only at transcript start."""
     phrase = _words(str(candidate_evidence.get("hook_sentence") or ""))
     transcript = _words(text)
-    return len(phrase) >= 3 and transcript[: len(phrase)] == phrase
+    generic_reaction = set(phrase) <= _GENERIC_REACTION_WORDS
+    return len(phrase) >= 2 and not generic_reaction and transcript[: len(phrase)] == phrase
 
 
 def _visual_evidence(events: list[dict[str, Any]]) -> float:

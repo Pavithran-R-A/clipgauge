@@ -123,6 +123,21 @@ def test_candidate_hook_phrase_supports_low_llm_hook_judgment():
     assert quality["effective_hook_0_100"] >= 35.0
 
 
+def test_specific_two_word_candidate_hook_is_verified():
+    quality = short_quality.assess(
+        "Oh God, the runway is right there. I landed a plane!",
+        [],
+        12.0,
+        candidate_evidence={
+            "hook_sentence": "Oh God.",
+            "hook_strength": 0.4,
+            "start_topic_boundary": 0.9,
+        },
+    )
+
+    assert quality["candidate_hook_verified"] is True
+
+
 def test_smart_boundaries_complete_nearby_sentence():
     words = [
         {"word": "Why", "start": 0.0, "end": 0.2},
