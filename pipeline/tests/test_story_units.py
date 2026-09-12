@@ -6,6 +6,7 @@ from clipgauge_pipeline.candidates.story_units import (
     BOUNDARY_SCHEMA,
     BoundaryProposal,
     _contains_payoff,
+    _has_explicit_outcome,
     _story_candidate,
     build_sentence_units,
     cheap_filter_and_dedupe,
@@ -466,6 +467,39 @@ def test_dedupe_preserves_earlier_payoff_aligned_opening():
     assert [item["candidate_id"] for item in result] == ["setup-opening"]
 
 
+def test_dedupe_preserves_earlier_opening_for_same_nonexplicit_payoff():
+    def candidate(candidate_id: str, start: float, end: float, quality: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": "shared-anchor",
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A result is revealed after setup.",
+            "sentence_ids": ["S1", "S2", "S3", "S4"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": 1.0,
+            "curve_score": 0.5,
+            "hook_strength": 0.7,
+            "payoff_candidate": True,
+            "payoff_boundary_explicit": False,
+            "payoff_time": 39.0,
+            "topic_coherence": 90.0,
+            "topic_key": ["result", "setup"],
+            "payoff_sentence": "The result is revealed.",
+            "start_topic_boundary": 0.8,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("late-opening", 38.0, 66.0, 0.9),
+        candidate("setup-opening", 15.0, 62.0, 0.8),
+    ], limit=10)
+
+    assert [item["candidate_id"] for item in result] == ["setup-opening"]
+
+
 def test_anchor_selection_spreads_across_long_sources():
     segments = [
         {
@@ -803,6 +837,15 @@ def test_editorial_signal_accepts_generic_outcome_language():
 
     assert candidate is not None
     assert candidate["editorial_signal"] is True
+
+
+def test_explicit_outcome_detection_accepts_common_completion_modifiers():
+    assert _has_explicit_outcome(
+        "We still got them on billboards all across the country."
+    ) is True
+    assert _has_explicit_outcome(
+        "And now it's official."
+    ) is True
 
 
 def test_explicit_payoff_can_close_a_contextual_opening():

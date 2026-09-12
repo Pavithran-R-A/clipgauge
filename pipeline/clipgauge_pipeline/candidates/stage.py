@@ -30,7 +30,7 @@ def detect_scenes(media_path: str, progress=None) -> list[float]:
 
 class CandidatesStage(Stage):
     name = "candidates"
-    schema_version = 19  # v19: domain-agnostic payoff and editorial cues
+    schema_version = 20  # v20: preserve nonexplicit payoff openings
 
     def run(self, ctx: StageContext) -> dict:
         import numpy as np

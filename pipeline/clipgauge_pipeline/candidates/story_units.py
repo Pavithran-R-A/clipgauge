@@ -41,10 +41,10 @@ _FILLER_STARTS = {"all", "alright", "okay", "ok", "so", "well", "yeah", "yo"}
 _PREMISE_WORDS = {"billion", "million", "secret", "dangerous", "hidden", "survive", "infinite", "classified"}
 _DEICTIC_WORDS = {"this", "that", "these", "those", "he", "she", "they", "it", "there", "here"}
 _CONTEXT_REFERENCES = ("as i said", "like before", "again", "then", "so far", "as before")
-_OUTCOME_PHRASES = ("turns out", "ended up", "managed to")
+_OUTCOME_PHRASES = ("turns out", "ended up", "managed to", "it's official", "is official")
 _OUTCOME_VERBS = {
     "built", "completed", "discovered", "earned", "failed", "finished", "found",
-    "landed", "lost", "made", "passed", "received", "signed", "sold", "won",
+    "got", "landed", "lost", "made", "passed", "received", "signed", "sold", "won",
 }
 _EDITORIAL_TERMS = {
     "challenge", "complete", "completed", "discovered", "earned", "failed", "final",
@@ -115,7 +115,7 @@ def _has_explicit_outcome(text: str) -> bool:
     if any(phrase in normalized for phrase in _OUTCOME_PHRASES):
         return True
     subject = r"(?:i|we|they|he|she|you|the team|the pilot|the speaker)"
-    modifier = r"(?:(?:actually|finally|successfully|just|also|then)\s+)*"
+    modifier = r"(?:(?:actually|finally|successfully|just|also|still|then)\s+)*"
     verbs = "|".join(sorted(_OUTCOME_VERBS))
     return bool(re.search(rf"\b{subject}\s+{modifier}(?<![\w'])({verbs})(?![\w'])", normalized))
 
@@ -603,8 +603,8 @@ def cheap_filter_and_dedupe(
                 and candidate.get("payoff_boundary_explicit")
             )
             better_opening_boundary = (
-                candidate.get("payoff_boundary_explicit")
-                and other.get("payoff_boundary_explicit")
+                candidate.get("payoff_candidate")
+                and other.get("payoff_candidate")
                 and candidate.get("anchor_sentence_id") == other.get("anchor_sentence_id")
                 and float(candidate["start"]) + 3.0 < float(other["start"])
                 and abs(
