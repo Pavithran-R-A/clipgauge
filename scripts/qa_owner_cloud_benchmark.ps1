@@ -77,6 +77,17 @@ if ($Provider -eq 'openrouter' -and [string]::IsNullOrWhiteSpace($Model)) {
     throw 'OpenRouter benchmark model cannot be empty'
 }
 
+$ownerJobBytes = [int64]((Get-ChildItem -LiteralPath $ownerJob -Recurse -File -Force | Measure-Object -Property Length -Sum).Sum)
+$databasePath = Join-Path $clipgaugeRoot 'db.sqlite3'
+$databaseBytes = [int64](Get-Item -LiteralPath $databasePath).Length
+$backupSafetyMarginBytes = 64MB
+$requiredBackupBytes = $ownerJobBytes + $databaseBytes + $backupSafetyMarginBytes
+$storageDrive = (Get-Item -LiteralPath $clipgaugeRoot).PSDrive.Name
+$freeBytes = [int64](Get-PSDrive -Name $storageDrive).Free
+if ($freeBytes -lt $requiredBackupBytes) {
+    throw "Insufficient free disk space for the benchmark checkpoint backup. Need at least $requiredBackupBytes bytes; only $freeBytes bytes are available."
+}
+
 $backupRoot = Join-Path ([IO.Path]::GetTempPath()) "clipgauge-owner-benchmark-$([Guid]::NewGuid().ToString('N'))"
 $backupJob = Join-Path $backupRoot 'job'
 $previousHome = $env:CLIPGAUGE_HOME
