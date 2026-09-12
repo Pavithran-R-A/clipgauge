@@ -14,6 +14,10 @@ from clipgauge_pipeline.scoring.short_quality import assess
 from clipgauge_pipeline.scoring.stage import recommendation_outcome
 
 
+def test_candidate_stage_schema_invalidates_opening_policy_checkpoints():
+    assert candidates_stage.CandidatesStage.schema_version == 23
+
+
 def test_zero_recommendations_have_successful_terminal_outcome():
     result = recommendation_outcome(
         candidate_count=5,
