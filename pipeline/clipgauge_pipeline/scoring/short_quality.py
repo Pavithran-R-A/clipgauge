@@ -41,6 +41,7 @@ _STORY_SCORES = {
     "open_ended": 42.0,
     "none": 24.0,
 }
+MAX_PAYOFF_REACTION_TAIL_SECONDS = 12.0
 
 
 def _words(text: str) -> list[str]:
@@ -581,6 +582,7 @@ def refine_boundaries(
         return round(start, 3), round(end, 3)
     requested_start = start
     requested_end = end
+    payoff_tail_capped = False
     if fields:
         offset_start = fields.get("recommended_start_offset")
         offset_end = fields.get("recommended_end_offset")
@@ -612,6 +614,16 @@ def refine_boundaries(
             )
     elif preserve_candidate_payoff:
         requested_end = max(requested_end, end)
+    if (
+        preserve_candidate_payoff
+        and payoff_time is not None
+        and not preserve_candidate_end
+    ):
+        payoff_tail_capped = requested_end > float(payoff_time) + MAX_PAYOFF_REACTION_TAIL_SECONDS
+        requested_end = min(
+            requested_end,
+            float(payoff_time) + MAX_PAYOFF_REACTION_TAIL_SECONDS,
+        )
     if requested_start > start and fields:
         setup_strength = float(fields.get("setup_strength", 0.0) or 0.0)
         standalone = float(fields.get("standalone_comprehension", 0.0) or 0.0)
@@ -650,7 +662,8 @@ def refine_boundaries(
         setup_segment = next((segment for segment in preceding if _is_context_setup_segment(segment)), None)
         if setup_segment is not None:
             requested_start = min(requested_start, float(setup_segment.get("start", start)))
-    return smart_boundaries(words, requested_start, requested_end, max_extension=max_extension)
+    boundary_extension = min(max_extension, 1.5) if payoff_tail_capped else max_extension
+    return smart_boundaries(words, requested_start, requested_end, max_extension=boundary_extension)
 
 
 def rank(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:

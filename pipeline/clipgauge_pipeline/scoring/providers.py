@@ -435,6 +435,7 @@ class ProviderAdapter:
                 prompt=prompt,
                 schema=schema,
                 images=images or [],
+                temperature=0.0 if purpose == "scoring" and self.profile.kind == "clipgauge-local" else 0.2,
                 seed=0 if purpose == "scoring" and self.profile.kind == "clipgauge-local" else None,
                 purpose=purpose,
                 job_id=job_id,

@@ -68,6 +68,37 @@ def test_local_scoring_batch_drops_shorter_same_payoff_variant():
     assert selected[0][0]["end"] == 28.0
 
 
+def test_local_scoring_batch_keeps_later_payoff_story_span():
+    compact = (
+        {
+            "start": 10.0,
+            "end": 40.0,
+            "anchor_sentence_id": "a",
+            "sentence_ids": ["S1", "S2", "S3"],
+            "payoff_candidate": True,
+            "payoff_time": 20.0,
+        },
+        "",
+        "A complete result is shown with reaction.",
+    )
+    complete = (
+        {
+            "start": 24.0,
+            "end": 70.0,
+            "anchor_sentence_id": "b",
+            "sentence_ids": ["S2", "S3", "S4", "S5"],
+            "payoff_candidate": True,
+            "payoff_time": 65.0,
+        },
+        "",
+        "A complete result is shown after the full setup and final reaction.",
+    )
+
+    selected = scoring_stage.select_diverse_scoring_batch([compact, complete], 1)
+
+    assert selected[0][0]["anchor_sentence_id"] == "b"
+
+
 def test_local_shortlist_preserves_late_temporal_coverage(monkeypatch):
     candidates = [
         {"start": 0.0, "end": 30.0, "curve_score": 1.0, "channel_scores": {}},
@@ -118,6 +149,94 @@ def test_candidate_evidence_prior_has_a_recorded_adjustment():
     assert adjustment is not None
     assert adjustment["rule"] == "candidate_evidence_prior"
     assert adjustment["bonus"] > 0
+
+
+def test_candidate_evidence_adjustment_penalizes_unbacked_span():
+    adjustment = scoring_stage._candidate_evidence_adjustment({
+        "payoff_candidate": False,
+        "payoff_boundary_explicit": False,
+        "source_final_boundary": True,
+    })
+
+    assert adjustment is not None
+    assert adjustment["rule"] == "candidate_payoff_evidence_gap"
+    assert adjustment["bonus"] < 0
+
+
+def test_diversity_prefers_clean_story_over_flagged_story():
+    entries = [
+        {
+            "candidate_id": "flagged-fragment",
+            "start": 700.0,
+            "end": 748.0,
+            "recommendation_score": 49.0,
+            "topic_key": ["game-day"],
+            "short_quality": {
+                "quality_tier": "STRUCTURALLY_VALID",
+                "quality_flags": ["TOPIC_DRIFT"],
+            },
+        },
+        {
+            "candidate_id": "clean-full-story",
+            "start": 722.0,
+            "end": 796.0,
+            "recommendation_score": 42.0,
+            "topic_key": ["game-day"],
+            "short_quality": {
+                "quality_tier": "GOOD",
+                "quality_flags": [],
+            },
+        },
+    ]
+
+    selected = scoring_stage.select_diverse_finalists(entries, limit=2)
+
+    assert [item["candidate_id"] for item in selected] == ["clean-full-story"]
+
+
+def test_diversity_prefers_explicit_payoff_boundary():
+    entries = [
+        {
+            "candidate_id": "implicit-payoff",
+            "start": 310.0,
+            "end": 380.0,
+            "recommendation_score": 56.5,
+            "topic_key": ["shared-story"],
+            "payoff_boundary_explicit": False,
+            "short_quality": {"quality_tier": "GOOD", "quality_flags": []},
+        },
+        {
+            "candidate_id": "explicit-payoff",
+            "start": 374.0,
+            "end": 428.0,
+            "recommendation_score": 52.3,
+            "topic_key": ["shared-story"],
+            "payoff_boundary_explicit": True,
+            "short_quality": {"quality_tier": "GOOD", "quality_flags": []},
+        },
+    ]
+
+    selected = scoring_stage.select_diverse_finalists(entries, limit=2)
+
+    assert [item["candidate_id"] for item in selected] == ["explicit-payoff"]
+
+
+def test_near_good_clean_story_can_be_recommended():
+    quality = {
+        "eligible_to_recommend": True,
+        "quality_tier": "STRUCTURALLY_VALID",
+        "quality_flags": [],
+        "complete_ending": True,
+        "story_consistent": True,
+        "effective_hook_0_100": 37.0,
+        "payoff": 55.0,
+        "standalone": 60.0,
+        "semantic_closure_0_100": 65.0,
+        "topic_coherence_0_100": 80.0,
+        "payoff_relevance_to_premise": 60.0,
+    }
+
+    assert scoring_stage.is_good_recommendation(quality) is True
 
 
 def test_windows_vulkan_remains_fallback_without_cuda_runtime():

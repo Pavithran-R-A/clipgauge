@@ -248,6 +248,32 @@ def test_refine_boundaries_includes_segment_containing_payoff_time():
     assert end >= 31.8
 
 
+def test_refine_boundaries_caps_excessive_payoff_tail():
+    segments = [
+        {
+            "start": 10.0,
+            "end": 60.0,
+            "words": [
+                {"word": word, "start": 10.0 + index * 2.0, "end": 10.8 + index * 2.0}
+                for index, word in enumerate(
+                    "The setup builds toward the result and the reaction continues for a while while everyone explains what happened next.".split()
+                )
+            ],
+        },
+    ]
+
+    _, end = short_quality.refine_boundaries(
+        segments,
+        10.0,
+        55.0,
+        {"recommended_end_offset": 45.0},
+        preserve_candidate_payoff=True,
+        payoff_time=24.0,
+    )
+
+    assert 24.0 <= end <= 36.8
+
+
 def test_verified_payoff_closure_does_not_follow_model_open_loop():
     quality = short_quality.assess(
         "The result is confirmed.",

@@ -276,6 +276,37 @@ def test_shortlist_preserves_an_unrepresented_middle_time_bucket():
     assert "middle" in {item["candidate_id"] for item in result}
 
 
+def test_shortlist_prefers_full_span_for_the_same_payoff():
+    def candidate(candidate_id: str, end: float, quality: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": "shared-anchor",
+            "start": 0.0,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": f"A {candidate_id} result follows the setup.",
+            "sentence_ids": ["S1", "S2", "S3"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": 28.0,
+            "topic_coherence": quality * 100.0,
+            "topic_key": [candidate_id],
+            "payoff_sentence": f"The {candidate_id} result is revealed.",
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("compact", 30.0, 1.0),
+        candidate("full-span", 50.0, 0.7),
+    ], limit=1)
+
+    assert [item["candidate_id"] for item in result] == ["full-span"]
+
+
 def test_shortlist_preserves_later_payoff_boundary_variant():
     def candidate(candidate_id: str, start: float, end: float, payoff_time: float, quality: float) -> dict:
         return {

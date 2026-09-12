@@ -33,6 +33,7 @@ LOCAL_T1_WALL_BUDGET_SECONDS = 180.0
 CLOUD_T1_WALL_BUDGET_SECONDS = 180.0
 LOCAL_FINALIST_LIMIT = 6
 PAYOFF_TAIL_BONUS_MAX = 8.0
+CANDIDATE_PAYOFF_GAP_PENALTY = -14.0
 LOCAL_RECOVERABLE_PROVIDER_CODES = {
     "PROVIDER_UNAVAILABLE",
     "NETWORK_FAILED",
@@ -380,14 +381,20 @@ def _candidate_evidence_bonus(entry: dict) -> float:
 
 
 def _candidate_evidence_adjustment(entry: dict) -> dict | None:
+    if not any(entry.get(field) for field in ("payoff_candidate", "payoff_boundary_explicit")):
+        return {
+            "rule": "candidate_payoff_evidence_gap",
+            "bonus": CANDIDATE_PAYOFF_GAP_PENALTY,
+            "reason": "bounded penalty keeps spans without deterministic payoff evidence below complete stories",
+        }
     bonus = _candidate_evidence_bonus(entry)
-    if not bonus:
-        return None
-    return {
-        "rule": "candidate_evidence_prior",
-        "bonus": bonus,
-        "reason": "bounded deterministic story-unit evidence supports this candidate",
-    }
+    if bonus:
+        return {
+            "rule": "candidate_evidence_prior",
+            "bonus": bonus,
+            "reason": "bounded deterministic story-unit evidence supports this candidate",
+        }
+    return None
 
 
 def shortlist_local_candidates(
@@ -411,6 +418,30 @@ def shortlist_local_candidates(
     return select_diverse_scoring_batch(prepared, max(0, int(limit)))
 
 
+def _has_later_payoff_story_variant(
+    item: tuple[dict, str, str],
+    prepared: list[tuple[dict, str, str]],
+) -> bool:
+    candidate = item[0]
+    candidate_sentences = set(candidate.get("sentence_ids") or [])
+    candidate_payoff = float(candidate.get("payoff_time") or 0.0)
+    for other_item in prepared:
+        other = other_item[0]
+        if other is candidate or not other.get("payoff_candidate") or not candidate.get("payoff_candidate"):
+            continue
+        other_sentences = set(other.get("sentence_ids") or [])
+        shared = len(candidate_sentences & other_sentences)
+        overlap_ratio = shared / min(len(candidate_sentences), len(other_sentences)) if candidate_sentences and other_sentences else 0.0
+        if (
+            overlap_ratio >= 0.2
+            and float(other.get("payoff_time") or 0.0) > candidate_payoff + 10.0
+            and float(other["end"]) > float(candidate["end"]) + 8.0
+            and float(other["start"]) <= float(candidate["end"]) + 30.0
+        ):
+            return True
+    return False
+
+
 def select_diverse_scoring_batch(
     prepared: list[tuple[dict, str, str]],
     batch_size: int,
@@ -419,19 +450,7 @@ def select_diverse_scoring_batch(
     """Choose a bounded batch using prerank and temporal diversity."""
     remaining = [
         item for item in prepared
-        if not any(
-            item is not other
-            and item[0].get("payoff_candidate")
-            and other[0].get("payoff_candidate")
-            and item[0].get("anchor_sentence_id") == other[0].get("anchor_sentence_id")
-            and abs(float(item[0]["start"]) - float(other[0]["start"])) < 0.1
-            and abs(
-                float(item[0].get("payoff_time") or 0.0)
-                - float(other[0].get("payoff_time") or 0.0)
-            ) <= 2.0
-            and float(other[0]["end"]) > float(item[0]["end"]) + 0.5
-            for other in prepared
-        )
+        if not _has_later_payoff_story_variant(item, prepared)
     ]
     selected: list[tuple[dict, str, str]] = []
     used = list(selected_midpoints or [])
@@ -464,10 +483,23 @@ def is_strong_recommendation(quality: dict[str, object]) -> bool:
 
 
 def is_good_recommendation(quality: dict[str, object]) -> bool:
-    """Accept only GOOD or STRONG results for final rendering."""
+    """Accept good results and clean near-good stories."""
+    if not quality.get("eligible_to_recommend"):
+        return False
+    if quality.get("quality_tier") in {"GOOD", "STRONG"}:
+        return True
+    if quality.get("quality_tier") != "STRUCTURALLY_VALID":
+        return False
     return bool(
-        quality.get("eligible_to_recommend")
-        and quality.get("quality_tier") in {"GOOD", "STRONG"}
+        not quality.get("quality_flags")
+        and quality.get("complete_ending")
+        and quality.get("story_consistent", True)
+        and float(quality.get("effective_hook_0_100", 0.0)) >= 35.0
+        and float(quality.get("payoff", 0.0)) >= 55.0
+        and float(quality.get("standalone", 0.0)) >= 60.0
+        and float(quality.get("semantic_closure_0_100", 0.0)) >= 60.0
+        and float(quality.get("topic_coherence_0_100", 0.0)) >= 65.0
+        and float(quality.get("payoff_relevance_to_premise", 0.0)) >= 50.0
     )
 
 
@@ -742,6 +774,11 @@ def select_diverse_finalists(entries: list[dict], limit: int = LOCAL_FINALIST_LI
 
         def utility(entry: dict) -> tuple[float, float, float]:
             base = float(entry.get("recommendation_score", entry.get("score", 0.0)))
+            quality = entry.get("short_quality") or {}
+            quality_tier = entry.get("quality_tier", quality.get("quality_tier"))
+            quality_flags = entry.get("quality_flags", quality.get("quality_flags", []))
+            clean_quality_prior = 10.0 if quality_tier in {"STRONG", "GOOD"} and not quality_flags else 0.0
+            payoff_boundary_prior = 5.0 if entry.get("payoff_boundary_explicit") else 0.0
             midpoint = (float(entry.get("start", 0.0)) + float(entry.get("end", 0.0))) / 2.0
             if not selected:
                 penalty = 0.0
@@ -751,7 +788,11 @@ def select_diverse_finalists(entries: list[dict], limit: int = LOCAL_FINALIST_LI
                     for item in selected
                 )
                 penalty = max(0.0, (separation - distance) / separation * 35.0)
-            return (base - penalty, base, -float(entry.get("start", 0.0)))
+            return (
+                base + clean_quality_prior + payoff_boundary_prior - penalty,
+                base,
+                -float(entry.get("start", 0.0)),
+            )
 
         winner = max(pool, key=utility)
         selected.append(winner)
@@ -1151,7 +1192,7 @@ class ScoreStage(Stage):
             if candidate_adjustment:
                 candidate_bonus = float(candidate_adjustment["bonus"])
                 entry["recommendation_score"] = round(
-                    min(100.0, entry["recommendation_score"] + candidate_bonus), 1
+                    max(0.0, min(100.0, entry["recommendation_score"] + candidate_bonus)), 1
                 )
                 recorded = entry.setdefault("adjustments", [])
                 if not any(item.get("rule") == candidate_adjustment["rule"] for item in recorded):

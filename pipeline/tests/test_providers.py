@@ -85,6 +85,29 @@ def test_local_scoring_generation_uses_stable_seed():
     assert captured["request"].seed == 0
 
 
+def test_local_scoring_generation_is_greedy():
+    adapter = providers.ProviderAdapter(profile(kind="clipgauge-local"))
+    captured: dict[str, providers.InferenceRequest] = {}
+
+    def fake_infer(request, *, use_cache=True):
+        captured["request"] = request
+        return providers.InferenceResult(
+            data={"ok": True},
+            provider_profile_id=adapter.profile.id,
+            provider_kind=adapter.profile.kind,
+            model=adapter.model,
+            capabilities_used={},
+            degraded_signals=[],
+            structured_level="native_schema",
+            latency_ms=0,
+        )
+
+    adapter.infer = fake_infer
+    adapter.generate_json("return ok", {"type": "object"}, purpose="scoring")
+
+    assert captured["request"].temperature == 0.0
+
+
 def test_openai_compatible_native_schema_and_secret_never_enters_url(monkeypatch):
     seen: dict[str, object] = {}
 

@@ -756,6 +756,7 @@ def cheap_filter_and_dedupe(
     shortlist_limit = max(0, int(limit))
     shortlist = list(kept[:shortlist_limit])
     selected_ids = {id(candidate) for candidate in shortlist}
+    protected_ids: set[int] = set()
     if shortlist and len(shortlist) >= shortlist_limit:
         earliest_selected = min(float(item["start"]) for item in shortlist)
         leading_candidates = [
@@ -788,6 +789,7 @@ def cheap_filter_and_dedupe(
                 shortlist[shortlist.index(weakest)] = coverage_candidate
                 selected_ids.remove(id(weakest))
                 selected_ids.add(id(coverage_candidate))
+                protected_ids.add(id(coverage_candidate))
     boundary_candidates = [
         candidate
         for candidate in kept[shortlist_limit:]
@@ -842,6 +844,48 @@ def cheap_filter_and_dedupe(
         for candidate in shortlist:
             bucket = int(float(candidate["start"]) // 60)
             selected_bucket_counts[bucket] = selected_bucket_counts.get(bucket, 0) + 1
+        for index, selected in enumerate(list(shortlist)):
+            selected_payoff = float(selected.get("payoff_time") or 0.0)
+            span_variants = [
+                candidate
+                for candidate in kept
+                if id(candidate) not in selected_ids
+                and candidate.get("payoff_candidate")
+                and selected.get("anchor_sentence_id") is not None
+                and candidate.get("anchor_sentence_id") == selected.get("anchor_sentence_id")
+                and abs(float(candidate.get("payoff_time") or 0.0) - selected_payoff) <= 2.0
+                and int(float(candidate["start"]) // 60) == int(float(selected["start"]) // 60)
+                and (
+                    float(candidate["start"]) < float(selected["start"]) - 3.0
+                    or float(candidate["end"]) > float(selected["end"]) + 8.0
+                )
+            ]
+            if not span_variants:
+                continue
+            coverage_candidate = max(
+                span_variants,
+                key=lambda item: (
+                    bool(item.get("payoff_boundary_explicit")),
+                    float(item["end"]) - float(item["start"]),
+                    -float(item["start"]),
+                    _candidate_quality_key(item),
+                ),
+            )
+            replaced = selected
+            shortlist[index] = coverage_candidate
+            selected_ids.remove(id(replaced))
+            selected_ids.add(id(coverage_candidate))
+            if id(replaced) in protected_ids:
+                protected_ids.remove(id(replaced))
+                protected_ids.add(id(coverage_candidate))
+            previous_entry = audit_entries.get(id(replaced))
+            if previous_entry is not None:
+                previous_entry["status"] = "rejected"
+                previous_entry["rejection_reasons"] = ["SHORTLIST_COVERAGE_REPLACED"]
+            candidate_entry = audit_entries.get(id(coverage_candidate))
+            if candidate_entry is not None:
+                candidate_entry["status"] = "kept"
+                candidate_entry["rejection_reasons"] = []
         missing_buckets = sorted({
             int(float(candidate["start"]) // 60)
             for candidate in kept
@@ -869,12 +913,14 @@ def cheap_filter_and_dedupe(
                 for candidate in shortlist
                 if selected_bucket_counts.get(int(float(candidate["start"]) // 60), 0) > 1
                 and not candidate.get("payoff_boundary_explicit")
+                and id(candidate) not in protected_ids
             ]
             if not replaceable:
                 replaceable = [
                     candidate
                     for candidate in shortlist
                     if not candidate.get("payoff_boundary_explicit")
+                    and id(candidate) not in protected_ids
                 ]
             if not replaceable:
                 if coverage_candidate.get("payoff_boundary_explicit"):
@@ -884,7 +930,11 @@ def cheap_filter_and_dedupe(
                     )
                     if float(coverage_candidate.get("payoff_time") or 0.0) <= latest_selected_payoff:
                         continue
-                    replaceable = list(shortlist)
+                    replaceable = [
+                        candidate
+                        for candidate in shortlist
+                        if id(candidate) not in protected_ids
+                    ]
                 else:
                     continue
             replaced = min(replaceable, key=_candidate_quality_key)
