@@ -559,6 +559,8 @@ def refine_boundaries(
     max_extension: float = 7.0,
     preserve_candidate_opening: bool = False,
     preserve_candidate_payoff: bool = False,
+    payoff_time: float | None = None,
+    preserve_candidate_end: bool = False,
 ) -> tuple[float, float]:
     """Apply bounded T1 offsets, preserving trusted candidate evidence."""
     words = [
@@ -582,7 +584,11 @@ def refine_boundaries(
             requested_start, requested_end = start, end
     if preserve_candidate_opening:
         requested_start = min(requested_start, start)
-    if preserve_candidate_payoff:
+    if preserve_candidate_end:
+        requested_end = max(requested_end, end)
+    elif preserve_candidate_payoff and payoff_time is not None:
+        requested_end = max(requested_end, float(payoff_time))
+    elif preserve_candidate_payoff:
         requested_end = max(requested_end, end)
     if requested_start > start and fields:
         setup_strength = float(fields.get("setup_strength", 0.0) or 0.0)

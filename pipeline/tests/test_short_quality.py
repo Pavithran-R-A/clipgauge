@@ -181,6 +181,41 @@ def test_refine_boundaries_preserves_trusted_candidate_edges():
     assert end >= 24.8
 
 
+def test_refine_boundaries_keeps_payoff_without_forcing_candidate_tail():
+    segments = [
+        {
+            "start": 10.0,
+            "end": 20.0,
+            "text": "The setup is ready.",
+            "words": [
+                {"word": word, "start": 10.0 + index * 2.0, "end": 10.8 + index * 2.0}
+                for index, word in enumerate("The setup is ready.".split())
+            ],
+        },
+        {
+            "start": 20.0,
+            "end": 40.0,
+            "text": "The result is confirmed.",
+            "words": [
+                {"word": word, "start": 20.0 + index * 2.0, "end": 20.8 + index * 2.0}
+                for index, word in enumerate("The result is confirmed.".split())
+            ],
+        },
+    ]
+
+    start, end = short_quality.refine_boundaries(
+        segments,
+        10.0,
+        40.0,
+        {"recommended_start_offset": 0.0, "recommended_end_offset": 17.0},
+        preserve_candidate_payoff=True,
+        payoff_time=24.0,
+    )
+
+    assert start == 10.0
+    assert 24.0 <= end < 40.0
+
+
 def test_quality_ranking_is_deterministic():
     items = [
         {"start": 4.0, "end": 8.0, "short_quality": {"score": 80}},

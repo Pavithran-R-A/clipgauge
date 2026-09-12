@@ -272,6 +272,104 @@ def test_shortlist_preserves_later_payoff_boundary_variant():
     assert [item["candidate_id"] for item in result] == ["late"]
 
 
+def test_shortlist_does_not_replace_later_payoff_with_leading_duplicate():
+    def candidate(candidate_id: str, anchor: str, start: float, end: float, payoff_time: float, quality: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": anchor,
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A plane landing result.",
+            "sentence_ids": [f"{anchor}-1", f"{anchor}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": payoff_time,
+            "payoff_boundary_explicit": True,
+            "topic_coherence": 90.0,
+            "topic_key": ["plane", "landing"],
+            "payoff_sentence": "I landed a plane!",
+            "start_topic_boundary": 0.8,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("early", "S1", 349.6, 383.1, 379.4, 0.9),
+        candidate("late", "S2", 380.9, 426.3, 425.4, 1.0),
+    ], limit=1)
+
+    assert [item["candidate_id"] for item in result] == ["late"]
+
+
+def test_shortlist_keeps_explicit_payoff_against_unrelated_leading_coverage():
+    def candidate(candidate_id: str, start: float, quality: float, explicit: bool = False) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "start": start,
+            "end": start + 20.0,
+            "syntactic_complete": True,
+            "central_premise": f"A distinct premise for {candidate_id}.",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": start + 18.0,
+            "payoff_boundary_explicit": explicit,
+            "topic_coherence": quality * 100.0,
+            "topic_key": [candidate_id],
+            "payoff_sentence": f"The {candidate_id} payoff is clear.",
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("leading", 0.0, 0.1),
+        candidate("filler", 200.0, 1.0),
+        candidate("explicit-payoff", 400.0, 0.2, explicit=True),
+    ], limit=2)
+
+    assert "explicit-payoff" in {item["candidate_id"] for item in result}
+
+
+def test_dedupe_keeps_overlapping_later_payoff_variant():
+    def candidate(candidate_id: str, anchor: str, start: float, end: float, payoff_time: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": anchor,
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A plane landing result.",
+            "sentence_ids": [f"{anchor}-1", f"{anchor}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": 1.0,
+            "information_density": 1.0,
+            "curve_score": 1.0,
+            "hook_strength": 0.8,
+            "payoff_candidate": True,
+            "payoff_time": payoff_time,
+            "payoff_boundary_explicit": True,
+            "topic_coherence": 90.0,
+            "topic_key": ["plane", "landing"],
+            "payoff_sentence": "I landed a plane!",
+            "start_topic_boundary": 0.8,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("early", "S1", 0.0, 50.0, 30.0),
+        candidate("late", "S2", 10.0, 60.0, 55.0),
+    ], limit=10)
+
+    assert [item["candidate_id"] for item in result] == ["early", "late"]
+
+
 def test_dedupe_preserves_later_payoff_boundary_variant():
     def candidate(candidate_id: str, end: float, payoff: bool, quality: float) -> dict:
         return {

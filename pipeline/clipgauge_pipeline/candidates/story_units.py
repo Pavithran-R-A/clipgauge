@@ -570,6 +570,7 @@ def cheap_filter_and_dedupe(
     kept: list[dict[str, Any]] = []
     bucket_counts: dict[int, int] = {}
     for candidate in viable:
+        later_payoff_variant = False
         duplicate_index = next(
             (index for index, other in enumerate(kept) if _story_similarity(candidate, other) >= 0.92),
             None,
@@ -596,6 +597,10 @@ def cheap_filter_and_dedupe(
                 and float(candidate["end"]) > float(other["end"])
                 and float(candidate.get("payoff_time") or 0.0)
                 > float(other.get("payoff_time") or 0.0)
+            )
+            later_payoff_variant = (
+                better_payoff_boundary
+                and candidate.get("payoff_boundary_explicit")
             )
             better_opening_boundary = (
                 candidate.get("payoff_boundary_explicit")
@@ -681,7 +686,7 @@ def cheap_filter_and_dedupe(
             ),
             None,
         )
-        if overlap_index is not None:
+        if overlap_index is not None and not later_payoff_variant:
             other = kept[overlap_index]
             if (
                 candidate.get("payoff_candidate")
@@ -766,9 +771,22 @@ def cheap_filter_and_dedupe(
                 ),
             )
             weakest = min(shortlist, key=_candidate_quality_key)
-            shortlist[shortlist.index(weakest)] = coverage_candidate
-            selected_ids.remove(id(weakest))
-            selected_ids.add(id(coverage_candidate))
+            later_payoff_is_covered = (
+                coverage_candidate.get("payoff_candidate")
+                and weakest.get("payoff_candidate")
+                and float(weakest.get("payoff_time") or 0.0)
+                > float(coverage_candidate.get("payoff_time") or 0.0)
+                and float(coverage_candidate["end"]) >= float(weakest["start"]) - 4.0
+                and _story_similarity(coverage_candidate, weakest) >= 0.6
+            )
+            unrelated_explicit_payoff = (
+                weakest.get("payoff_boundary_explicit")
+                and _story_similarity(coverage_candidate, weakest) < 0.6
+            )
+            if not later_payoff_is_covered and not unrelated_explicit_payoff:
+                shortlist[shortlist.index(weakest)] = coverage_candidate
+                selected_ids.remove(id(weakest))
+                selected_ids.add(id(coverage_candidate))
     boundary_candidates = [
         candidate
         for candidate in kept[shortlist_limit:]

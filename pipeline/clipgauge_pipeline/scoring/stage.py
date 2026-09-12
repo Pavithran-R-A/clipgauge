@@ -979,6 +979,12 @@ class ScoreStage(Stage):
                     or entry.get("payoff_boundary_explicit")
                     or entry.get("source_final_boundary")
                 ),
+                payoff_time=(
+                    float(entry["payoff_time"])
+                    if entry.get("payoff_time") is not None
+                    else None
+                ),
+                preserve_candidate_end=bool(entry.get("source_final_boundary")),
             )
             refined_end, segment_boundary = _repair_to_segment_boundary(
                 segments, refined_start, refined_end
