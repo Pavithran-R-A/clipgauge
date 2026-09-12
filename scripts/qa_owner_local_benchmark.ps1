@@ -51,6 +51,14 @@ try {
     $score = (Get-Content -LiteralPath $scorePath -Raw | ConvertFrom-Json).data
     $settings = Get-Content -LiteralPath (Join-Path $ownerJob 'settings.json') -Raw | ConvertFrom-Json
     $candidateCount = (Get-Content -LiteralPath (Join-Path $ownerJob 'candidates.json') -Raw | ConvertFrom-Json).data.count
+    $metrics = $null
+    try {
+        $metricsScript = Join-Path $repoRoot 'scripts\qa_owner_metrics.py'
+        $metricsOutput = @(& $python $metricsScript --score $scorePath --candidates (Join-Path $ownerJob 'candidates.json') --benchmark (Join-Path $repoRoot 'docs\qa\v0.5.16-owner-benchmark.json') 2>&1 | ForEach-Object { $_.ToString() })
+        $metrics = ($metricsOutput -join "`n") | ConvertFrom-Json
+    } catch {
+        $metrics = @{ error = 'Aggregate benchmark metrics could not be calculated.' }
+    }
     $allEntries = @($score.clips) + @($score.borderline_candidates) + @($score.rejected_candidates)
     $qualityTiers = @($allEntries | ForEach-Object { $_.quality.quality_tier } | Group-Object | ForEach-Object { @{ name = $_.Name; count = $_.Count } })
     $rejectionReasons = @($score.rejected_candidates | ForEach-Object { $_.rejection_reasons } | Group-Object | ForEach-Object { @{ name = $_.Name; count = $_.Count } })
@@ -68,8 +76,9 @@ try {
         other_count = @($score.borderline_candidates).Count
         quality_tiers = $qualityTiers
         rejection_reasons = $rejectionReasons
+        metrics = $metrics
         output_tail = @($output | Select-Object -Last 12)
-    } | ConvertTo-Json -Compress
+    } | ConvertTo-Json -Depth 16 -Compress
     exit $exitCode
 }
 finally {

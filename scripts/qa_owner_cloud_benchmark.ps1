@@ -110,7 +110,7 @@ try {
     Remove-Item -LiteralPath $scorePath -Force -ErrorAction SilentlyContinue
     $commandErrorAction = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    $output = @(& $python -m clipgauge_pipeline.cli --jsonl resume $ownerId --provider $Provider --model $Model --quality-mode best 2>&1 | ForEach-Object { $_.ToString() })
+    $output = @(& $python -m clipgauge_pipeline.cli --jsonl resume $ownerId --provider $Provider --model $Model --quality-mode best --stop-after score 2>&1 | ForEach-Object { $_.ToString() })
     $ErrorActionPreference = $commandErrorAction
     $exitCode = $LASTEXITCODE
     if ($exitCode -ne 0) {
@@ -163,7 +163,7 @@ try {
         first_clip_start = if ($clips.Count) { $clips[0].start } else { $null }
         first_clip_end = if ($clips.Count) { $clips[0].end } else { $null }
         output_tail = @($output | Select-Object -Last 12)
-    } | ConvertTo-Json -Compress
+    } | ConvertTo-Json -Depth 16 -Compress
     exit $exitCode
 }
 finally {
