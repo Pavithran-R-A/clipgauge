@@ -30,7 +30,7 @@ def detect_scenes(media_path: str, progress=None) -> list[float]:
 
 class CandidatesStage(Stage):
     name = "candidates"
-    schema_version = 21  # v21: use bounded time-aware setup lookback
+    schema_version = 22  # v22: preserve payoff and temporal coverage
 
     def run(self, ctx: StageContext) -> dict:
         import numpy as np

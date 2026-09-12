@@ -5,9 +5,10 @@ from dataclasses import replace
 from clipgauge_pipeline.candidates.story_units import (
     BOUNDARY_SCHEMA,
     BoundaryProposal,
+    _candidate_end_indices,
+    _candidate_start_indices,
     _contains_payoff,
     _has_explicit_outcome,
-    _candidate_start_indices,
     _story_candidate,
     build_sentence_units,
     cheap_filter_and_dedupe,
@@ -243,6 +244,38 @@ def test_shortlist_preserves_uncovered_leading_story_coverage():
     assert "early-story" in result_ids
 
 
+def test_shortlist_preserves_an_unrepresented_middle_time_bucket():
+    def candidate(candidate_id: str, start: float, quality: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "start": start,
+            "end": start + 20.0,
+            "syntactic_complete": True,
+            "central_premise": f"A distinct premise for {candidate_id}.",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": start + 18.0,
+            "topic_coherence": quality * 100.0,
+            "topic_key": [candidate_id],
+            "payoff_sentence": f"The {candidate_id} payoff is clear.",
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("early", 0.0, 1.0),
+        candidate("middle", 60.0, 0.1),
+        candidate("later", 120.0, 1.0),
+        candidate("latest", 180.0, 1.0),
+    ], limit=3)
+
+    assert "middle" in {item["candidate_id"] for item in result}
+
+
 def test_shortlist_preserves_later_payoff_boundary_variant():
     def candidate(candidate_id: str, start: float, end: float, payoff_time: float, quality: float) -> dict:
         return {
@@ -305,6 +338,45 @@ def test_shortlist_does_not_replace_later_payoff_with_leading_duplicate():
     ], limit=1)
 
     assert [item["candidate_id"] for item in result] == ["late"]
+
+
+def test_shortlist_preserves_explicit_payoff_when_topic_terms_change():
+    def candidate(
+        candidate_id: str,
+        start: float,
+        end: float,
+        payoff_time: float,
+        topic: str,
+        quality: float,
+    ) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": candidate_id,
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": f"A distinct {topic} result is revealed.",
+            "sentence_ids": ["S1", "S2", "S3"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": payoff_time,
+            "payoff_boundary_explicit": topic == "landing",
+            "topic_coherence": quality * 100.0,
+            "topic_key": [topic],
+            "payoff_sentence": f"The {topic} result is revealed.",
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("fragment", 0.0, 30.0, 28.0, "setup", 1.0),
+        candidate("complete", 18.0, 48.0, 46.0, "landing", 0.9),
+    ], limit=1)
+
+    assert [item["candidate_id"] for item in result] == ["complete"]
 
 
 def test_shortlist_keeps_explicit_payoff_against_unrelated_leading_coverage():
@@ -514,6 +586,21 @@ def test_candidate_start_lookback_reaches_bounded_story_setup():
 
     assert 0 in indexes
     assert all(units[index].start >= units[4].start - 35.0 for index in indexes)
+
+
+def test_candidate_end_lookahead_reaches_late_story_payoff():
+    units = build_sentence_units(_segments([
+        "The setup establishes a difficult challenge.",
+        "The anchor introduces the attempt.",
+        "The tension continues through the demonstration.",
+        "The audience waits for the result.",
+        "We finally completed the challenge.",
+    ], seconds=12.0))
+
+    indexes = _candidate_end_indices(units, anchor_index=1)
+
+    assert 4 in indexes
+    assert units[4].start <= units[1].start + 60.0
 
 
 def test_anchor_selection_spreads_across_long_sources():

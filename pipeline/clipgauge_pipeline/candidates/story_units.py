@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 MIN_STORY_SECONDS = 8.0
 MAX_STORY_SECONDS = 75.0
+MAX_END_LOOKAHEAD_SECONDS = 60.0
 ANCHOR_LIMIT = 20
 MAX_BOUNDARY_CALLS = 15
 SHORTLIST_LIMIT = 24
@@ -807,7 +808,16 @@ def cheap_filter_and_dedupe(
                 float(candidate["start"]) >= float(other["start"]) - 2.0
                 and float(candidate["start"]) - float(other["start"]) <= 30.0
                 and _iou(candidate, other) >= 0.15
-                and _story_similarity(candidate, other) >= 0.6
+                and (
+                    _story_similarity(candidate, other) >= 0.6
+                    or (
+                        candidate.get("payoff_boundary_explicit")
+                        and bool(
+                            set(candidate.get("sentence_ids") or [])
+                            & set(other.get("sentence_ids") or [])
+                        )
+                    )
+                )
                 and float(candidate["end"]) > float(other["end"])
                 and float(candidate.get("payoff_time") or 0.0)
                 > float(other.get("payoff_time") or 0.0)
@@ -827,6 +837,63 @@ def cheap_filter_and_dedupe(
         if candidate_entry is not None:
             candidate_entry["status"] = "kept"
             candidate_entry["rejection_reasons"] = []
+    if shortlist and len(shortlist) >= shortlist_limit:
+        selected_bucket_counts: dict[int, int] = {}
+        for candidate in shortlist:
+            bucket = int(float(candidate["start"]) // 60)
+            selected_bucket_counts[bucket] = selected_bucket_counts.get(bucket, 0) + 1
+        missing_buckets = sorted({
+            int(float(candidate["start"]) // 60)
+            for candidate in kept
+            if int(float(candidate["start"]) // 60) not in selected_bucket_counts
+        })
+        for bucket in missing_buckets:
+            coverage_candidates = [
+                candidate
+                for candidate in kept
+                if id(candidate) not in selected_ids
+                and int(float(candidate["start"]) // 60) == bucket
+            ]
+            if not coverage_candidates:
+                continue
+            coverage_candidate = max(
+                coverage_candidates,
+                key=lambda item: (
+                    bool(item.get("payoff_boundary_explicit")),
+                    bool(item.get("payoff_candidate")),
+                    _candidate_quality_key(item),
+                ),
+            )
+            replaceable = [
+                candidate
+                for candidate in shortlist
+                if selected_bucket_counts.get(int(float(candidate["start"]) // 60), 0) > 1
+                and not candidate.get("payoff_boundary_explicit")
+            ]
+            if not replaceable:
+                replaceable = [
+                    candidate
+                    for candidate in shortlist
+                    if not candidate.get("payoff_boundary_explicit")
+                ]
+            if not replaceable:
+                if coverage_candidate.get("payoff_boundary_explicit"):
+                    latest_selected_payoff = max(
+                        (float(item.get("payoff_time") or 0.0) for item in shortlist),
+                        default=0.0,
+                    )
+                    if float(coverage_candidate.get("payoff_time") or 0.0) <= latest_selected_payoff:
+                        continue
+                    replaceable = list(shortlist)
+                else:
+                    continue
+            replaced = min(replaceable, key=_candidate_quality_key)
+            replaced_bucket = int(float(replaced["start"]) // 60)
+            shortlist[shortlist.index(replaced)] = coverage_candidate
+            selected_ids.remove(id(replaced))
+            selected_ids.add(id(coverage_candidate))
+            selected_bucket_counts[replaced_bucket] -= 1
+            selected_bucket_counts[bucket] = selected_bucket_counts.get(bucket, 0) + 1
     for candidate in kept:
         if id(candidate) in selected_ids:
             continue
@@ -873,6 +940,26 @@ def _candidate_start_indices(
     return list(dict.fromkeys(indices))
 
 
+def _candidate_end_indices(
+    units: list[SentenceUnit],
+    anchor_index: int,
+    *,
+    max_lookahead_seconds: float = MAX_END_LOOKAHEAD_SECONDS,
+) -> list[int]:
+    """Find complete story ends within a bounded time lookahead."""
+    if not units or anchor_index < 0 or anchor_index >= len(units):
+        return []
+    anchor_start = float(units[anchor_index].start)
+    latest_start = anchor_start + max(0.0, float(max_lookahead_seconds))
+    return [
+        index
+        for index, unit in enumerate(units)
+        if anchor_start - 45.0 <= float(unit.start) <= latest_start
+        and float(unit.end) >= anchor_start
+        and unit.text.rstrip().endswith((".", "!", "?"))
+    ]
+
+
 def synthesize(
     units: list[SentenceUnit],
     curve: list[float] | None = None,
@@ -896,12 +983,7 @@ def synthesize(
             boundary_calls += 1
             proposals = boundary_proposer(neighborhood, anchor)
         anchor_index = units.index(anchor)
-        complete_ends = [
-            index for index, unit in enumerate(units)
-            if anchor.start - 45.0 <= unit.start <= anchor.start + 45.0
-            and unit.end >= anchor.start
-            and unit.text.rstrip().endswith((".", "!", "?"))
-        ]
+        complete_ends = _candidate_end_indices(units, anchor_index)
         payoff_ends = [index for index in complete_ends if _contains_payoff(units[index])]
         end_candidates = list(dict.fromkeys(payoff_ends[:5] + payoff_ends[-5:] + complete_ends[:4] + complete_ends[-4:] + [
             index for index in complete_ends
