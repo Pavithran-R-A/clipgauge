@@ -7,6 +7,7 @@ from clipgauge_pipeline.candidates.story_units import (
     BoundaryProposal,
     _contains_payoff,
     _has_explicit_outcome,
+    _candidate_start_indices,
     _story_candidate,
     build_sentence_units,
     cheap_filter_and_dedupe,
@@ -498,6 +499,21 @@ def test_dedupe_preserves_earlier_opening_for_same_nonexplicit_payoff():
     ], limit=10)
 
     assert [item["candidate_id"] for item in result] == ["setup-opening"]
+
+
+def test_candidate_start_lookback_reaches_bounded_story_setup():
+    units = build_sentence_units(_segments([
+        "Earlier context explains the $10 result.",
+        "The setup continues with useful background.",
+        "The story adds another detail here.",
+        "The story adds another detail there.",
+        "The anchor reveals the final result.",
+    ], seconds=8.0))
+
+    indexes = _candidate_start_indices(units, anchor_index=4)
+
+    assert 0 in indexes
+    assert all(units[index].start >= units[4].start - 35.0 for index in indexes)
 
 
 def test_anchor_selection_spreads_across_long_sources():

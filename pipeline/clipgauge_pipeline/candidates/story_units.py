@@ -837,6 +837,42 @@ def cheap_filter_and_dedupe(
     return sorted(shortlist, key=lambda item: item["start"])
 
 
+def _candidate_start_indices(
+    units: list[SentenceUnit],
+    anchor_index: int,
+    *,
+    max_lookback_seconds: float = 35.0,
+) -> list[int]:
+    """Find bounded setup starts without relying on sentence counts."""
+    if not units or anchor_index <= 0 or anchor_index >= len(units):
+        return []
+    anchor_start = float(units[anchor_index].start)
+    earliest_start = anchor_start - max(0.0, float(max_lookback_seconds))
+    indices = [
+        index
+        for index in range(max(0, anchor_index - 3), anchor_index)
+        if float(units[index].start) >= earliest_start
+    ]
+    first_in_window = next(
+        (
+            index for index in range(anchor_index)
+            if float(units[index].start) >= earliest_start
+        ),
+        anchor_index,
+    )
+    for index in range(first_in_window, anchor_index):
+        text = units[index].text.lower()
+        tokens = set(_TOKEN_RE.findall(text))
+        if (
+            units[index].topic_boundary_before >= TOPIC_BOUNDARY_THRESHOLD
+            or "?" in text
+            or any(char.isdigit() for char in text)
+            or tokens & _PREMISE_WORDS
+        ):
+            indices.append(index)
+    return list(dict.fromkeys(indices))
+
+
 def synthesize(
     units: list[SentenceUnit],
     curve: list[float] | None = None,
@@ -871,18 +907,7 @@ def synthesize(
             index for index in complete_ends
             if units[index].audio_events or set(_TOKEN_RE.findall(units[index].text.lower())) & _REACTION_WORDS
         ]))
-        start_indices = [max(0, anchor_index - 3), max(0, anchor_index - 2), max(0, anchor_index - 1), anchor_index]
-        for index in range(max(0, anchor_index - 15), anchor_index):
-            text = units[index].text.lower()
-            tokens = set(_TOKEN_RE.findall(text))
-            if (
-                units[index].topic_boundary_before >= TOPIC_BOUNDARY_THRESHOLD
-                or "?" in text
-                or any(char.isdigit() for char in text)
-                or tokens & _PREMISE_WORDS
-            ):
-                start_indices.append(index)
-        start_indices = list(dict.fromkeys(start_indices))
+        start_indices = [*(_candidate_start_indices(units, anchor_index)), anchor_index]
         for start_offset, start_index in enumerate(start_indices):
             ordered_end_candidates = sorted(
                 end_candidates,
