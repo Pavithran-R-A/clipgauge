@@ -172,7 +172,9 @@ finally {
             Remove-Item -LiteralPath $ownerJob -Recurse -Force
         }
         New-Item -ItemType Directory -Force (Split-Path -Parent $ownerJob) | Out-Null
-        Copy-Item -LiteralPath $backupJob -Destination $ownerJob -Recurse -Force
+        foreach ($item in Get-ChildItem -LiteralPath $backupJob -Force) {
+            Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $ownerJob $item.Name) -Recurse -Force
+        }
         Copy-Item -LiteralPath (Join-Path $backupRoot 'db.sqlite3') -Destination (Join-Path $clipgaugeRoot 'db.sqlite3') -Force
     }
     Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue

@@ -12,18 +12,32 @@ $python = Join-Path $clipgaugeRoot 'runtimes\pipeline\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $ownerJob)) { throw "owner benchmark job is missing: $ownerId" }
 if (-not (Test-Path -LiteralPath $python)) { throw 'pipeline environment is missing' }
 
+$ownerJobBytes = [int64]((Get-ChildItem -LiteralPath $ownerJob -Recurse -File -Force | Measure-Object -Property Length -Sum).Sum)
+$databasePath = Join-Path $clipgaugeRoot 'db.sqlite3'
+$databaseBytes = [int64](Get-Item -LiteralPath $databasePath).Length
+$backupSafetyMarginBytes = 64MB
+$requiredBackupBytes = $ownerJobBytes + $databaseBytes + $backupSafetyMarginBytes
+$storageDrive = (Get-Item -LiteralPath $clipgaugeRoot).PSDrive.Name
+$freeBytes = [int64](Get-PSDrive -Name $storageDrive).Free
+if ($freeBytes -lt $requiredBackupBytes) {
+    throw "Insufficient free disk space for the benchmark checkpoint backup. Need at least $requiredBackupBytes bytes; only $freeBytes bytes are available."
+}
+
 $backupRoot = Join-Path ([IO.Path]::GetTempPath()) "clipgauge-local-benchmark-$([Guid]::NewGuid().ToString('N'))"
 $backupJob = Join-Path $backupRoot 'job'
-New-Item -ItemType Directory -Force $backupJob | Out-Null
-Copy-Item -LiteralPath (Join-Path $clipgaugeRoot 'db.sqlite3') -Destination (Join-Path $backupRoot 'db.sqlite3')
-Copy-Item -Path (Join-Path $ownerJob '*') -Destination $backupJob -Recurse -Force
-
 $previousHome = $env:CLIPGAUGE_HOME
 $previousPath = $env:PYTHONPATH
-$env:CLIPGAUGE_HOME = $clipgaugeRoot
-$env:PYTHONPATH = Join-Path $repoRoot 'pipeline'
+$backupReady = $false
 
 try {
+    New-Item -ItemType Directory -Force $backupJob | Out-Null
+    Copy-Item -LiteralPath $databasePath -Destination (Join-Path $backupRoot 'db.sqlite3')
+    Copy-Item -Path (Join-Path $ownerJob '*') -Destination $backupJob -Recurse -Force
+    $backupReady = $true
+
+    $env:CLIPGAUGE_HOME = $clipgaugeRoot
+    $env:PYTHONPATH = Join-Path $repoRoot 'pipeline'
+
     $commandErrorAction = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $output = @(& $python -m clipgauge_pipeline.cli --jsonl resume $ownerId --provider clipgauge-local --model $Model --quality-mode balanced 2>&1 | ForEach-Object { $_.ToString() })
@@ -59,12 +73,19 @@ try {
     exit $exitCode
 }
 finally {
-    Copy-Item -LiteralPath (Join-Path $backupRoot 'db.sqlite3') -Destination (Join-Path $clipgaugeRoot 'db.sqlite3') -Force
-    Copy-Item -Path (Join-Path $backupJob '*') -Destination $ownerJob -Recurse -Force
+    if ($backupReady) {
+        if (Test-Path -LiteralPath $ownerJob) {
+            Remove-Item -LiteralPath $ownerJob -Recurse -Force
+        }
+        New-Item -ItemType Directory -Force (Split-Path -Parent $ownerJob) | Out-Null
+        foreach ($item in Get-ChildItem -LiteralPath $backupJob -Force) {
+            Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $ownerJob $item.Name) -Recurse -Force
+        }
+        Copy-Item -LiteralPath (Join-Path $backupRoot 'db.sqlite3') -Destination (Join-Path $clipgaugeRoot 'db.sqlite3') -Force
+    }
     if ($null -eq $previousHome) { Remove-Item Env:CLIPGAUGE_HOME -ErrorAction SilentlyContinue } else { $env:CLIPGAUGE_HOME = $previousHome }
     if ($null -eq $previousPath) { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue } else { $env:PYTHONPATH = $previousPath }
     if (Test-Path -LiteralPath $backupRoot) {
-        Add-Type -AssemblyName Microsoft.VisualBasic
-        [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($backupRoot, [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs, [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin) | Out-Null
+        Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
