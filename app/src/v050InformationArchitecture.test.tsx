@@ -116,6 +116,30 @@ describe('v0.5 information architecture', () => {
     expect(screen.getAllByText('Ready').length).toBeGreaterThan(0)
   })
 
+  it('persists a verified provider inventory refresh for the next launch', async () => {
+    const setItem = vi.fn()
+    Object.defineProperty(window, 'localStorage', { configurable: true, value: {
+      getItem: vi.fn(() => null),
+      setItem,
+      removeItem: vi.fn(),
+    } })
+    mocks.setupInventory.mockResolvedValue({
+      state: 'ready',
+      platform: 'windows-x86_64',
+      runtime_manifest_digest: 'manifest-a',
+      runtime: {},
+      models: [],
+      core_assets: [],
+      managed_assets: [],
+      storage: {},
+      catalog: [],
+    })
+
+    render(<ProviderCenter selectedProvider="clipgauge-local" onSelectProvider={vi.fn()} onBack={vi.fn()} />)
+
+    await waitFor(() => expect(setItem).toHaveBeenCalledWith('clipgauge.setup.inventory.v1', expect.any(String)))
+  })
+
   it('keeps cached provider readiness when native refresh fails', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,

@@ -48,6 +48,45 @@ def test_short_quality_prefers_hook_setup_reveal_and_reaction():
     assert strong["payoff"] > weak["payoff"]
 
 
+def test_explicit_candidate_payoff_resists_low_llm_payoff_judgment():
+    quality = short_quality.assess(
+        "The plane landing was risky. The plane landed safely: I landed a plane!",
+        [],
+        12.0,
+        llm={
+            "hook": 5,
+            "hook_strength": 5,
+            "standalone_comprehension": 6,
+            "setup_strength": 5,
+            "escalation_strength": 4,
+            "payoff_strength": 1,
+            "ending_completeness": 4,
+            "story_shape": "reveal",
+            "payoff_location": "none",
+            "payoff_relevance_to_premise": 1,
+            "topic_coherence": 8,
+            "topic_shift_count": 0,
+            "late_new_topic": False,
+            "syntactic_complete": True,
+            "semantic_closure": 1,
+            "open_loop_at_end": True,
+            "quality_tier": "STRUCTURALLY_VALID",
+        },
+        segment_boundary=True,
+        candidate_evidence={
+            "payoff_candidate": True,
+            "payoff_boundary_explicit": True,
+            "payoff_time": 10.0,
+            "payoff_sentence": "I landed a plane!",
+        },
+    )
+
+    assert quality["payoff"] >= 45.0
+    assert quality["semantic_closure_0_100"] >= 60.0
+    assert quality["payoff_relevance_to_premise"] >= 50.0
+    assert quality["story_consistent"] is True
+
+
 def test_smart_boundaries_complete_nearby_sentence():
     words = [
         {"word": "Why", "start": 0.0, "end": 0.2},

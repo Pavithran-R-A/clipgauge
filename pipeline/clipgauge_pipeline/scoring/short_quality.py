@@ -172,6 +172,19 @@ def _llm_score(fields: dict[str, Any], name: str, fallback: float) -> float:
     return _clamp(float(value) * 10.0) if isinstance(value, (int, float)) else fallback
 
 
+def _verified_candidate_payoff(text: str, candidate_evidence: dict[str, Any]) -> bool:
+    """Trust explicit payoff metadata only when its words are present."""
+    if not candidate_evidence.get("payoff_candidate"):
+        return False
+    if not candidate_evidence.get("payoff_boundary_explicit"):
+        return False
+    if not candidate_evidence.get("payoff_time"):
+        return False
+    phrase = " ".join(_words(str(candidate_evidence.get("payoff_sentence") or "")))
+    transcript = " ".join(_words(text))
+    return len(phrase.split()) >= 3 and phrase in transcript
+
+
 def _visual_evidence(events: list[dict[str, Any]]) -> float:
     """Score actual visual changes, not merely event-type cardinality."""
     scene_cuts = sum(1 for event in events if event.get("type") in {"scene_cut", "shot_change"})
@@ -291,6 +304,7 @@ def assess(
     )
     fields = llm or {}
     candidate_evidence = candidate_evidence or {}
+    verified_candidate_payoff = _verified_candidate_payoff(text, candidate_evidence)
     deterministic_hook = evidence["hook"]
     rubric_hook = None
     rubric_value = fields.get("hook", fields.get("rubric_hook_0_10", fields.get("rubric_hook")))
@@ -312,6 +326,8 @@ def assess(
     payoff = evidence["payoff"]
     ending = evidence["ending"]
     reaction = evidence["reaction"]
+    if verified_candidate_payoff:
+        payoff = max(payoff, 62.0)
     if fields:
         standalone = 0.35 * standalone + 0.65 * _llm_score(fields, "standalone_comprehension", standalone)
         setup = 0.35 * setup + 0.65 * _llm_score(fields, "setup_strength", setup)
@@ -320,6 +336,8 @@ def assess(
         payoff = 0.45 * payoff + 0.55 * payoff_llm if evidence["has_reveal"] or evidence["has_reaction"] else payoff_llm
         ending = 0.45 * ending + 0.55 * _llm_score(fields, "ending_completeness", ending)
         reaction = 0.4 * reaction + 0.6 * _llm_score(fields, "reaction_strength", reaction)
+        if verified_candidate_payoff:
+            payoff = max(payoff, 62.0)
     story_name = str(fields.get("story_shape") or "none")
     story_shape = _STORY_SCORES.get(story_name, evidence["story_shape"]) if fields.get("story_shape") else evidence["story_shape"]
     language_neutral = evidence["language_signal_mode"] == "neutral_non_english"
@@ -337,7 +355,7 @@ def assess(
     story_consistency_reason = ""
     if story_name in requirements:
         requirement, check = requirements[story_name]
-        story_consistent = bool(check())
+        story_consistent = bool(check()) or verified_candidate_payoff
         if not story_consistent:
             story_consistency_reason = f"{story_name} requires {requirement}."
     topic = _topic_metrics(text, fields)
@@ -377,6 +395,8 @@ def assess(
     )
     if isinstance(llm_semantic, (int, float)) and not rich_scores_conflict and not verified_payoff_closure:
         semantic_closure = min(semantic_closure, _clamp(float(llm_semantic), 0.0, 10.0) * 10.0)
+    if verified_candidate_payoff and not topic["late_new_topic"] and topic["topic_shift_count"] < 2:
+        semantic_closure = max(semantic_closure, 70.0)
     semantic_closure = round(_clamp(semantic_closure), 1)
     payoff_relevance = 100.0
     if topic["late_new_topic"]:
@@ -385,6 +405,8 @@ def assess(
         payoff_relevance -= min(45.0, topic["topic_shift_count"] * 20.0)
     if isinstance(llm_relevance, (int, float)) and not rich_scores_conflict:
         payoff_relevance = min(payoff_relevance, _clamp(float(llm_relevance), 0.0, 10.0) * 10.0)
+    if verified_candidate_payoff and not topic["late_new_topic"] and topic["topic_shift_count"] < 2:
+        payoff_relevance = max(payoff_relevance, 65.0)
     payoff_relevance = round(_clamp(payoff_relevance), 1)
     quality_flags: list[str] = []
     if evidence["generic_opening"]:
@@ -465,6 +487,7 @@ def assess(
         "topic_shift_count": topic["topic_shift_count"],
         "late_new_topic": topic["late_new_topic"],
         "payoff_relevance_to_premise": payoff_relevance,
+        "candidate_payoff_verified": verified_candidate_payoff,
         "ending_evidence": {
             "punctuated": bool(
                 (ending_evidence or {}).get(

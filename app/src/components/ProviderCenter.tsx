@@ -4,7 +4,7 @@ import { Check, ChevronRight, CircleAlert, Cloud, Cpu, ExternalLink, KeyRound, N
 import { api } from '../api'
 import type { LocalSetupInventory, ProviderModel, ProviderTestResult, SetupState } from '../types'
 import { selectedLocalModel } from '../setupState'
-import { readCachedSetupInventory } from '../setupInventoryCache'
+import { readCachedSetupInventory, writeCachedSetupInventory } from '../setupInventoryCache'
 import { isProviderInventory, isProviderModelsResult, isProviderTestResult, isSetupState } from '../nativeValidation'
 import { friendlyErrorMessage } from '../errorMessaging'
 
@@ -167,7 +167,11 @@ export default function ProviderCenter({ selectedProvider, onSelectProvider, onB
   useEffect(() => {
     let active = true
     api.setupState().then((value) => { if (active) setSetup(isSetupState(value) ? value : null) }).catch(() => { if (active) setSetup(null) })
-    api.setupInventory().then((value) => { if (active && isProviderInventory(value)) setInventory(value as LocalSetupInventory) }).catch(() => undefined)
+    api.setupInventory().then((value) => {
+      if (!active || !isProviderInventory(value)) return
+      setInventory(value as LocalSetupInventory)
+      writeCachedSetupInventory(value as LocalSetupInventory)
+    }).catch(() => undefined)
     return () => { active = false }
   }, [])
 
