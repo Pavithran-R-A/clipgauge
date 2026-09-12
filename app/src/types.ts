@@ -204,6 +204,18 @@ export interface RenderOutput {
   event_tags: number
 }
 
+export interface OtherMoment {
+  start: number
+  end: number
+  recommendation_score: number
+  candidate_id?: string | null
+  status?: 'OTHER_MOMENT'
+  summary?: string
+  story?: string
+  reasons?: string[]
+  quality?: Record<string, unknown>
+}
+
 export interface JobResults {
   job_id: string
   outcome?: PipelineOutcome
@@ -220,7 +232,7 @@ export interface JobResults {
     scored_count: number
     counts?: RecommendationCounts
     best_candidate?: { start: number; end: number; recommendation_score: number } | null
-    borderline_candidates?: Array<{ start: number; end: number; recommendation_score: number; reasons?: string[]; quality?: Record<string, unknown> }>
+    borderline_candidates?: OtherMoment[]
     diagnostic_id?: string
     provider_profile_id?: string
     provider_kind?: string

@@ -51,6 +51,11 @@ function isBorderlineCandidate(value: unknown): boolean {
     && isFiniteNumber(value.end)
     && isFiniteNumber(value.recommendation_score)
     && (value.reasons === undefined || isStringArray(value.reasons))
+    && (value.candidate_id === undefined || value.candidate_id === null || typeof value.candidate_id === 'string')
+    && (value.status === undefined || value.status === 'OTHER_MOMENT')
+    && (value.summary === undefined || typeof value.summary === 'string')
+    && (value.story === undefined || typeof value.story === 'string')
+    && (value.quality === undefined || isRecord(value.quality))
 }
 
 function isRenderOutput(value: unknown): boolean {
