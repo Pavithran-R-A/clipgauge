@@ -283,6 +283,7 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
   const youtubeRequestRef = useRef(0)
   const gpuRequestRef = useRef(0)
   const modelSaveRequestRef = useRef(0)
+  const localSaveChainRef = useRef<Promise<unknown>>(Promise.resolve())
   const mountedRef = useRef(true)
 
   const refreshYouTube = (force = false) => {
@@ -535,7 +536,9 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
   function selectModel(modelId: string) {
     const requestId = ++modelSaveRequestRef.current
     setSelectedModelId(modelId)
-    void Promise.resolve(api.saveLocalModel?.(modelId)).catch(() => {
+    const save = localSaveChainRef.current.then(() => api.saveLocalModel?.(modelId))
+    localSaveChainRef.current = save.catch(() => undefined)
+    void save.catch(() => {
       if (mountedRef.current && requestId === modelSaveRequestRef.current) setMessage('Local model choice could not be saved. Retry before installing.')
     })
     void refresh(modelId)

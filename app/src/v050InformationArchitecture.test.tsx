@@ -1083,6 +1083,38 @@ describe('v0.5 information architecture', () => {
     expect(screen.queryByText('No supported GPU was detected. CPU processing remains available.')).not.toBeInTheDocument()
   })
 
+  it('serializes rapid local model changes in Setup Center', async () => {
+    mocks.setupInventory.mockResolvedValue({
+      state: 'ready',
+      local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/balanced', required_bytes: 0, action: 'Ready' },
+      models: [
+        { asset_id: 'clipgauge-local/light', display_name: 'Lightweight', size_bytes: 1 },
+        { asset_id: 'clipgauge-local/balanced', display_name: 'Balanced', size_bytes: 2 }
+      ],
+      runtime: {},
+      core_assets: [],
+      storage: {},
+      catalog: []
+    })
+    const resolvers: Array<() => void> = []
+    const savedModels: string[] = []
+    mocks.saveLocalModel.mockImplementation((model: string) => {
+      savedModels.push(model)
+      return new Promise<void>((resolve) => { resolvers.push(resolve) })
+    })
+    render(<SetupCenter onBack={vi.fn()} />)
+
+    const light = await screen.findByRole('radio', { name: /Lightweight/ })
+    const balanced = screen.getByRole('radio', { name: /Balanced/ })
+    await userEvent.click(light)
+    await userEvent.click(balanced)
+
+    expect(savedModels).toEqual(['clipgauge-local/light'])
+    resolvers[0]?.()
+    await waitFor(() => expect(savedModels).toEqual(['clipgauge-local/light', 'clipgauge-local/balanced']))
+    resolvers[1]?.()
+  })
+
   it('shows a retryable error state when inventory fails', async () => {
     mocks.setupInventory.mockRejectedValue({ code: 'PIPELINE_NOT_INITIALIZED' })
     render(<SetupCenter onBack={vi.fn()} />)
