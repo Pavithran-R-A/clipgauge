@@ -522,6 +522,21 @@ def _candidate_quality_key(item: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _is_earlier_opening_variant(candidate: dict[str, Any], other: dict[str, Any]) -> bool:
+    """Prefer an earlier opening when the payoff identity remains stable."""
+    return bool(
+        candidate.get("payoff_candidate")
+        and other.get("payoff_candidate")
+        and candidate.get("anchor_sentence_id") == other.get("anchor_sentence_id")
+        and float(candidate["start"]) + 3.0 < float(other["start"])
+        and abs(
+            float(candidate.get("payoff_time") or 0.0)
+            - float(other.get("payoff_time") or 0.0)
+        ) <= 2.0
+        and float(candidate["end"]) - float(candidate.get("payoff_time") or 0.0) <= 30.0
+    )
+
+
 def cheap_filter_and_dedupe(
     candidates: list[dict[str, Any]],
     limit: int = SHORTLIST_LIMIT,
@@ -572,9 +587,17 @@ def cheap_filter_and_dedupe(
     bucket_counts: dict[int, int] = {}
     for candidate in viable:
         later_payoff_variant = False
+        duplicate_indices = [
+            index
+            for index, other in enumerate(kept)
+            if _story_similarity(candidate, other) >= 0.92
+        ]
         duplicate_index = next(
-            (index for index, other in enumerate(kept) if _story_similarity(candidate, other) >= 0.92),
-            None,
+            (
+                index for index in duplicate_indices
+                if _is_earlier_opening_variant(candidate, kept[index])
+            ),
+            duplicate_indices[0] if duplicate_indices else None,
         )
         if duplicate_index is not None:
             other = kept[duplicate_index]
@@ -603,17 +626,7 @@ def cheap_filter_and_dedupe(
                 better_payoff_boundary
                 and candidate.get("payoff_boundary_explicit")
             )
-            better_opening_boundary = (
-                candidate.get("payoff_candidate")
-                and other.get("payoff_candidate")
-                and candidate.get("anchor_sentence_id") == other.get("anchor_sentence_id")
-                and float(candidate["start"]) + 3.0 < float(other["start"])
-                and abs(
-                    float(candidate.get("payoff_time") or 0.0)
-                    - float(other.get("payoff_time") or 0.0)
-                ) <= 2.0
-                and float(candidate["end"]) - float(candidate.get("payoff_time") or 0.0) <= 30.0
-            )
+            better_opening_boundary = _is_earlier_opening_variant(candidate, other)
             same_explicit_payoff = (
                 candidate.get("payoff_boundary_explicit")
                 and other.get("payoff_boundary_explicit")

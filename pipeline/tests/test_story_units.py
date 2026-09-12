@@ -371,6 +371,49 @@ def test_shortlist_does_not_replace_later_payoff_with_leading_duplicate():
     assert [item["candidate_id"] for item in result] == ["late"]
 
 
+def test_dedupe_prefers_earlier_opening_from_compatible_duplicate_group():
+    def candidate(
+        candidate_id: str,
+        anchor: str,
+        start: float,
+        end: float,
+        quality: float,
+    ) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": anchor,
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A surprising result is revealed.",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": 105.0,
+            "payoff_boundary_explicit": True,
+            "topic_coherence": quality * 100.0,
+            "topic_key": ["surprising", "result"],
+            "payoff_sentence": "The result is revealed.",
+            "start_topic_boundary": 0.0,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("unrelated-anchor", "S0", 30.0, 120.0, 1.0),
+        candidate("later-opening", "S1", 90.0, 140.0, 0.9),
+        candidate("earlier-opening", "S1", 50.0, 110.0, 0.8),
+    ], limit=10)
+
+    assert [item["candidate_id"] for item in result] == [
+        "unrelated-anchor",
+        "earlier-opening",
+    ]
+
+
 def test_shortlist_preserves_explicit_payoff_when_topic_terms_change():
     def candidate(
         candidate_id: str,
