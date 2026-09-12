@@ -185,6 +185,13 @@ def _verified_candidate_payoff(text: str, candidate_evidence: dict[str, Any]) ->
     return len(phrase.split()) >= 3 and phrase in transcript
 
 
+def _verified_candidate_hook(text: str, candidate_evidence: dict[str, Any]) -> bool:
+    """Recognize a candidate opening only at transcript start."""
+    phrase = _words(str(candidate_evidence.get("hook_sentence") or ""))
+    transcript = _words(text)
+    return len(phrase) >= 3 and transcript[: len(phrase)] == phrase
+
+
 def _visual_evidence(events: list[dict[str, Any]]) -> float:
     """Score actual visual changes, not merely event-type cardinality."""
     scene_cuts = sum(1 for event in events if event.get("type") in {"scene_cut", "shot_change"})
@@ -305,6 +312,7 @@ def assess(
     fields = llm or {}
     candidate_evidence = candidate_evidence or {}
     verified_candidate_payoff = _verified_candidate_payoff(text, candidate_evidence)
+    verified_candidate_hook = _verified_candidate_hook(text, candidate_evidence)
     deterministic_hook = evidence["hook"]
     rubric_hook = None
     rubric_value = fields.get("hook", fields.get("rubric_hook_0_10", fields.get("rubric_hook")))
@@ -317,6 +325,11 @@ def assess(
     effective_hook, hook_disagreement = _effective_hook(
         rubric_hook, structured_hook, deterministic_hook
     )
+    if verified_candidate_hook:
+        hook_strength = _clamp(float(candidate_evidence.get("hook_strength") or 0.0), 0.0, 1.0)
+        boundary_strength = _clamp(float(candidate_evidence.get("start_topic_boundary") or 0.0), 0.0, 1.0)
+        candidate_hook_floor = min(65.0, 32.0 + hook_strength * 24.0 + boundary_strength * 8.0)
+        effective_hook = max(effective_hook, candidate_hook_floor)
     hook = effective_hook
     if fields:
         hook = effective_hook
@@ -466,6 +479,7 @@ def assess(
         "deterministic_hook_0_100": round(_clamp(deterministic_hook), 1),
         "retention_hook_0_100": round(_clamp(deterministic_hook), 1),
         "effective_hook_0_100": round(_clamp(effective_hook), 1),
+        "candidate_hook_verified": verified_candidate_hook,
         "hook_disagreement": bool(hook_disagreement),
         "hook_reason": str(fields.get("hook_reason") or evidence["hook_reason"]),
         "standalone": round(_clamp(standalone), 1),

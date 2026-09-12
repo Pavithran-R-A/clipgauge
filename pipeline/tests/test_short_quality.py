@@ -87,6 +87,42 @@ def test_explicit_candidate_payoff_resists_low_llm_payoff_judgment():
     assert quality["story_consistent"] is True
 
 
+def test_candidate_hook_phrase_supports_low_llm_hook_judgment():
+    quality = short_quality.assess(
+        "Why would anyone attempt this dangerous landing? The plane landed safely.",
+        [],
+        12.0,
+        llm={
+            "hook": 1,
+            "hook_strength": 1,
+            "standalone_comprehension": 5,
+            "setup_strength": 5,
+            "escalation_strength": 4,
+            "payoff_strength": 5,
+            "ending_completeness": 5,
+            "story_shape": "hook_setup_payoff",
+            "payoff_location": "late",
+            "payoff_relevance_to_premise": 6,
+            "topic_coherence": 8,
+            "topic_shift_count": 0,
+            "late_new_topic": False,
+            "syntactic_complete": True,
+            "semantic_closure": 7,
+            "open_loop_at_end": False,
+            "quality_tier": "GOOD",
+        },
+        segment_boundary=True,
+        candidate_evidence={
+            "hook_sentence": "Why would anyone attempt this dangerous landing?",
+            "hook_strength": 0.8,
+            "start_topic_boundary": 0.9,
+        },
+    )
+
+    assert quality["candidate_hook_verified"] is True
+    assert quality["effective_hook_0_100"] >= 35.0
+
+
 def test_smart_boundaries_complete_nearby_sentence():
     words = [
         {"word": "Why", "start": 0.0, "end": 0.2},
