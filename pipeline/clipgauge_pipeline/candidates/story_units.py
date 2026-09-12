@@ -528,6 +528,9 @@ def _is_earlier_opening_variant(candidate: dict[str, Any], other: dict[str, Any]
         candidate.get("payoff_sentence_id")
         and candidate.get("payoff_sentence_id") == other.get("payoff_sentence_id")
     )
+    payoff_time = float(candidate.get("payoff_time") or 0.0)
+    candidate_tail = float(candidate["end"]) - payoff_time
+    other_tail = float(other["end"]) - float(other.get("payoff_time") or 0.0)
     return bool(
         candidate.get("payoff_candidate")
         and other.get("payoff_candidate")
@@ -540,7 +543,7 @@ def _is_earlier_opening_variant(candidate: dict[str, Any], other: dict[str, Any]
             float(candidate.get("payoff_time") or 0.0)
             - float(other.get("payoff_time") or 0.0)
         ) <= 2.0
-        and float(candidate["end"]) - float(candidate.get("payoff_time") or 0.0) <= 30.0
+        and candidate_tail <= max(30.0, other_tail + 8.0)
     )
 
 

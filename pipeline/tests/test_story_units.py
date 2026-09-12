@@ -454,6 +454,40 @@ def test_dedupe_preserves_earlier_opening_when_only_payoff_identity_matches():
     assert [item["candidate_id"] for item in result] == ["earlier-opening"]
 
 
+def test_dedupe_keeps_earlier_opening_with_bounded_extended_payoff_tail():
+    def candidate(candidate_id: str, anchor: str, start: float, end: float, quality: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": anchor,
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A surprising result is revealed.",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": 110.702,
+            "payoff_sentence_id": "P1",
+            "payoff_boundary_explicit": False,
+            "topic_coherence": quality * 100.0,
+            "topic_key": ["surprising", "result"],
+            "payoff_sentence": "The result is revealed.",
+            "start_topic_boundary": 0.0,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("later-opening", "S0", 79.334, 151.095, 1.0),
+        candidate("earlier-opening", "S1", 66.226, 141.206, 0.8),
+    ], limit=10)
+
+    assert [item["candidate_id"] for item in result] == ["earlier-opening"]
+
+
 def test_shortlist_preserves_explicit_payoff_when_topic_terms_change():
     def candidate(
         candidate_id: str,
