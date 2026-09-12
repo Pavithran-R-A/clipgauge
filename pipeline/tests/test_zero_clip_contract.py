@@ -11,11 +11,15 @@ from clipgauge_pipeline.render.stage import (
     validate_trajectory_contract,
 )
 from clipgauge_pipeline.scoring.short_quality import assess
-from clipgauge_pipeline.scoring.stage import recommendation_outcome
+from clipgauge_pipeline.scoring.stage import ScoreStage, recommendation_outcome
 
 
 def test_candidate_stage_schema_invalidates_opening_policy_checkpoints():
     assert candidates_stage.CandidatesStage.schema_version == 23
+
+
+def test_score_stage_schema_invalidates_opening_selection_checkpoints():
+    assert ScoreStage.schema_version == 32
 
 
 def test_zero_recommendations_have_successful_terminal_outcome():

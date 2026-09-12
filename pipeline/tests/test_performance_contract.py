@@ -99,6 +99,38 @@ def test_local_scoring_batch_keeps_later_payoff_story_span():
     assert selected[0][0]["anchor_sentence_id"] == "b"
 
 
+def test_local_scoring_batch_keeps_materially_earlier_story_opening():
+    early = (
+        {
+            "start": 10.0,
+            "end": 52.0,
+            "anchor_sentence_id": "a",
+            "sentence_ids": ["S1", "S2", "S3", "S4"],
+            "payoff_candidate": True,
+            "payoff_time": 48.0,
+            "payoff_boundary_explicit": True,
+        },
+        "",
+        "Why would anyone attempt this difficult challenge before the final result.",
+    )
+    later = (
+        {
+            "start": 34.0,
+            "end": 82.0,
+            "anchor_sentence_id": "b",
+            "sentence_ids": ["S3", "S4", "S5", "S6"],
+            "payoff_candidate": True,
+            "payoff_time": 76.0,
+        },
+        "",
+        "The full setup continues until the final result is shown with reaction.",
+    )
+
+    selected = scoring_stage.select_diverse_scoring_batch([early, later], 2)
+
+    assert {item[0]["anchor_sentence_id"] for item in selected} == {"a", "b"}
+
+
 def test_local_shortlist_preserves_late_temporal_coverage(monkeypatch):
     candidates = [
         {"start": 0.0, "end": 30.0, "curve_score": 1.0, "channel_scores": {}},

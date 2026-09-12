@@ -34,6 +34,7 @@ CLOUD_T1_WALL_BUDGET_SECONDS = 180.0
 LOCAL_FINALIST_LIMIT = 6
 PAYOFF_TAIL_BONUS_MAX = 8.0
 CANDIDATE_PAYOFF_GAP_PENALTY = -14.0
+MATERIAL_EARLIER_OPENING_LEAD_SECONDS = 20.0
 LOCAL_RECOVERABLE_PROVIDER_CODES = {
     "PROVIDER_UNAVAILABLE",
     "NETWORK_FAILED",
@@ -432,6 +433,24 @@ def _has_later_payoff_story_variant(
         other_sentences = set(other.get("sentence_ids") or [])
         shared = len(candidate_sentences & other_sentences)
         overlap_ratio = shared / min(len(candidate_sentences), len(other_sentences)) if candidate_sentences and other_sentences else 0.0
+        opening_lead = float(other.get("start", 0.0)) - float(candidate.get("start", 0.0))
+        if (
+            opening_lead >= MATERIAL_EARLIER_OPENING_LEAD_SECONDS
+            and candidate.get("payoff_boundary_explicit")
+        ):
+            same_opening_peer = any(
+                peer is not candidate
+                and abs(float(peer.get("start", 0.0)) - float(candidate.get("start", 0.0))) <= 2.0
+                and abs(float(peer.get("payoff_time") or 0.0) - float(candidate.get("payoff_time") or 0.0)) <= 2.0
+                and float(peer.get("end", 0.0)) > float(candidate.get("end", 0.0)) + 0.5
+                for peer_item in prepared
+                for peer in [peer_item[0]]
+            )
+            if same_opening_peer:
+                return True
+            # An explicit payoff does not justify discarding a materially
+            # earlier setup.  Both spans can be scored and ranked later.
+            continue
         if (
             overlap_ratio >= 0.2
             and float(other.get("payoff_time") or 0.0) > candidate_payoff + 10.0
@@ -813,7 +832,7 @@ def rank_scored_candidates(entries: list[dict]) -> list[dict]:
 
 class ScoreStage(Stage):
     name = "score"
-    schema_version = 31  # v31: sanitized all-candidate ranking diagnostics
+    schema_version = 32  # v32: retain materially earlier payoff openings
 
     def dependency_settings(self, ctx: StageContext) -> dict:
         settings = super().dependency_settings(ctx)
