@@ -290,6 +290,92 @@ def test_scored_review_ranking_prefers_distinct_regions():
     assert [entry["start"] for entry in ranked[:5]] == [0.0, 400.0, 600.0, 800.0, 1000.0]
 
 
+def test_ranking_diagnostics_preserve_each_scoring_layer_without_transcript():
+    entries = [
+        {
+            "candidate_id": "candidate-a",
+            "start": 10.0,
+            "end": 25.0,
+            "curve_score": 0.8,
+            "heatmap_pct": 0.2,
+            "t1_raw": {
+                "hook": 8,
+                "funniness": 4,
+                "shock": 2,
+                "curiosity_gap": 7,
+                "value": 6,
+                "summary": "derived summary",
+            },
+            "subscores": {
+                "hook": 8.0,
+                "funniness": 2.2,
+                "shock": 2.0,
+                "curiosity_gap": 7.0,
+                "value": 6.0,
+            },
+            "cross_validation_adjustments": [
+                {"rule": "funny_no_laugh", "factor": 0.55}
+            ],
+            "adjustments": [
+                {"rule": "funny_no_laugh", "factor": 0.55},
+                {"rule": "candidate_evidence_prior", "bonus": 2.0},
+            ],
+            "short_quality": {
+                "score": 71.0,
+                "quality_flags": ["WEAK_COLD_HOOK"],
+                "rejection_reasons": [],
+                "quality_tier": "GOOD",
+                "eligible_to_recommend": True,
+            },
+            "platform_score": 73.0,
+            "recommendation_score": 75.0,
+        },
+        {
+            "candidate_id": "candidate-b",
+            "start": 40.0,
+            "end": 55.0,
+            "curve_score": 0.2,
+            "heatmap_pct": None,
+            "t1_raw": {
+                "hook": 2,
+                "funniness": 1,
+                "shock": 0,
+                "curiosity_gap": 2,
+                "value": 2,
+            },
+            "subscores": {
+                "hook": 2.0,
+                "funniness": 1.0,
+                "shock": 0.0,
+                "curiosity_gap": 2.0,
+                "value": 2.0,
+            },
+            "cross_validation_adjustments": [],
+            "adjustments": [],
+            "short_quality": {
+                "score": 22.0,
+                "quality_flags": [],
+                "rejection_reasons": ["LOW_STANDALONE_CONTEXT"],
+                "quality_tier": "REJECTED",
+                "eligible_to_recommend": False,
+            },
+            "platform_score": 25.0,
+            "recommendation_score": 10.0,
+        },
+    ]
+
+    diagnostics = scoring_stage.ranking_diagnostics(entries)
+
+    assert diagnostics[0]["candidate_id"] == "candidate-a"
+    assert diagnostics[0]["raw_llm"]["judgment"]["hook"] == 8
+    assert diagnostics[0]["after_cross_validation"]["adjustments"][0]["rule"] == "funny_no_laugh"
+    assert diagnostics[0]["adjustments"]["candidate_evidence"][0]["rule"] == "candidate_evidence_prior"
+    assert diagnostics[0]["adjustments"]["bait"] == []
+    assert diagnostics[0]["ranks"]["raw_llm"] == 1
+    assert diagnostics[1]["ranks"]["final"] == 2
+    assert "transcript" not in diagnostics[0]
+
+
 def test_payoff_tail_bonus_is_bounded_and_requires_reaction_window():
     assert scoring_stage._payoff_tail_bonus({
         "end": 28.0,
@@ -398,6 +484,8 @@ def test_local_scoring_actual_model_calls_stay_bounded(monkeypatch, tmp_path, ca
     assert result["good_recommendation_count"] >= 1
     assert result["performance"]["finalist_limit"] == scoring_stage.LOCAL_FINALIST_LIMIT
     assert result["performance"]["music_llm_calls"] == 0
+    assert len(result["ranking_diagnostics"]) == result["scored_count"]
+    assert all("transcript" not in item for item in result["ranking_diagnostics"])
     assert selection_inputs
     assert all("recommendation_score" in item for item in selection_inputs[0])
     assert all("boundary_refinement" in item for item in result["clips"])

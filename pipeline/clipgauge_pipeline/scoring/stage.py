@@ -517,6 +517,167 @@ def quality_audit(quality: dict[str, object]) -> dict[str, object]:
     }
 
 
+_RAW_LLM_JUDGMENT_FIELDS = {
+    "hook", "hook_type", "funniness", "punchline_index", "shock", "curiosity_gap", "value",
+    "self_contained", "bait_phrases", "hook_strength", "hook_reason", "standalone_comprehension",
+    "setup_strength", "escalation_strength", "payoff_strength", "payoff_location",
+    "ending_completeness", "story_shape", "information_density", "reaction_strength",
+    "recommended_start_offset", "recommended_end_offset", "central_premise", "payoff_sentence_id",
+    "payoff_relevance_to_premise", "topic_coherence", "topic_shift_count", "late_new_topic",
+    "syntactic_complete", "semantic_closure", "open_loop_at_end", "quality_tier",
+}
+_RANKING_SUBSCORE_FIELDS = ("hook", "funniness", "shock", "curiosity_gap", "value")
+_CROSS_VALIDATION_RULES = {
+    "funny_no_laugh", "funny_corroborated", "shock_no_arousal",
+    "bait_verification", "bait_penalty",
+}
+
+
+def _safe_raw_llm_judgment(raw: object) -> dict:
+    """Keep model judgment fields, excluding transcript-like text."""
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: value
+        for key, value in raw.items()
+        if key in _RAW_LLM_JUDGMENT_FIELDS
+        and isinstance(value, (str, int, float, bool, list, type(None)))
+    }
+
+
+def _ranking_subscores(values: object) -> dict[str, float]:
+    source = values if isinstance(values, dict) else {}
+    return {
+        key: min(10.0, max(0.0, float(source.get(key, 0.0))))
+        for key in _RANKING_SUBSCORE_FIELDS
+    }
+
+
+def _diagnostic_ranks(rows: list[dict], field: str) -> dict[int, int]:
+    ordered = sorted(
+        range(len(rows)),
+        key=lambda index: (
+            -float(rows[index].get(field, 0.0)),
+            float(rows[index].get("start", 0.0)),
+            str(rows[index].get("candidate_id") or ""),
+        ),
+    )
+    return {index: rank for rank, index in enumerate(ordered, start=1)}
+
+
+def _diagnostic_platform_score(
+    subscores: object,
+    entry: dict,
+    *,
+    constants: dict | None,
+) -> float:
+    platform_scores, _ = rubric.composite(
+        _ranking_subscores(subscores),
+        float(entry.get("curve_score", 0.0)),
+        entry.get("heatmap_pct"),
+        None,
+        constants=constants,
+    )
+    return max(platform_scores.values(), default=0.0)
+
+
+def ranking_diagnostics(
+    entries: list[dict],
+    *,
+    constants: dict | None = None,
+) -> list[dict]:
+    """Expose every scored candidate's raw-to-final ranking layers safely."""
+    rows: list[dict] = []
+    for entry in entries:
+        raw = _safe_raw_llm_judgment(entry.get("t1_raw"))
+        raw_subscores = _ranking_subscores(raw)
+        raw_platform_score = _diagnostic_platform_score(raw_subscores, entry, constants=constants)
+        cross_adjustments = list(entry.get("cross_validation_adjustments") or [])
+        all_adjustments = list(entry.get("adjustments") or [])
+        if not cross_adjustments:
+            cross_adjustments = [
+                item for item in all_adjustments
+                if item.get("rule") in _CROSS_VALIDATION_RULES
+            ]
+        post_adjustments = [
+            item for item in all_adjustments
+            if item.get("rule") not in _CROSS_VALIDATION_RULES
+        ]
+        quality = entry.get("short_quality") or {}
+        cross_validation_score = _diagnostic_platform_score(
+            entry.get("subscores"), entry, constants=constants
+        )
+        rows.append({
+            "candidate_id": entry.get("candidate_id"),
+            "start": entry.get("start"),
+            "end": entry.get("end"),
+            "raw_llm_score": raw_platform_score,
+            "cross_validation_score": cross_validation_score,
+            "short_quality_score": float(quality.get("score", 0.0)),
+            "final_score": float(entry.get("recommendation_score", 0.0)),
+            "raw_llm": {
+                "judgment": raw,
+                "platform_score": raw_platform_score,
+            },
+            "after_cross_validation": {
+                "subscores": _ranking_subscores(entry.get("subscores")),
+                "platform_score": cross_validation_score,
+                "adjustments": cross_adjustments,
+            },
+            "after_short_quality": {
+                "score": float(quality.get("score", 0.0)),
+                "quality": quality_audit(quality),
+                "adjustments": {
+                    "quality_flags": list(quality.get("quality_flags") or []),
+                    "rejection_reasons": list(quality.get("rejection_reasons") or []),
+                },
+            },
+            "adjustments": {
+                "cross_validation": cross_adjustments,
+                "short_quality": {
+                    "quality_flags": list(quality.get("quality_flags") or []),
+                    "rejection_reasons": list(quality.get("rejection_reasons") or []),
+                },
+                "bait": [
+                    item for item in cross_adjustments
+                    if item.get("rule") in {"bait_verification", "bait_penalty"}
+                ],
+                "candidate_evidence": [
+                    item for item in post_adjustments
+                    if item.get("rule") == "candidate_evidence_prior"
+                ],
+                "post_processing": post_adjustments,
+            },
+            "final": {
+                "platform_score": float(entry.get("platform_score", 0.0)),
+                "recommendation_score": float(entry.get("recommendation_score", 0.0)),
+                "quality_tier": quality.get("quality_tier", "STRUCTURALLY_VALID"),
+                "eligible_to_recommend": bool(quality.get("eligible_to_recommend", False)),
+                "strong_recommendation": bool(quality.get("strong_recommendation", False)),
+                "rejection_reasons": list(quality.get("rejection_reasons") or []),
+            },
+        })
+
+    rank_fields = {
+        "raw_llm": "raw_llm_score",
+        "after_cross_validation": "cross_validation_score",
+        "after_short_quality": "short_quality_score",
+        "final": "final_score",
+    }
+    ranks = {
+        name: _diagnostic_ranks(rows, field)
+        for name, field in rank_fields.items()
+    }
+    for index, row in enumerate(rows):
+        row["ranks"] = {
+            name: rank[index]
+            for name, rank in ranks.items()
+        }
+        for field in ("raw_llm_score", "cross_validation_score", "short_quality_score", "final_score"):
+            row.pop(field, None)
+    return rows
+
+
 def other_moment_record(entry: dict) -> dict:
     """Expose useful below-threshold candidates with actionable reasons."""
     quality = entry.get("short_quality") or {}
@@ -609,7 +770,7 @@ def rank_scored_candidates(entries: list[dict]) -> list[dict]:
 
 class ScoreStage(Stage):
     name = "score"
-    schema_version = 30  # v30: transcript-verified candidate evidence hints
+    schema_version = 31  # v31: sanitized all-candidate ranking diagnostics
 
     def dependency_settings(self, ctx: StageContext) -> dict:
         settings = super().dependency_settings(ctx)
@@ -761,6 +922,7 @@ class ScoreStage(Stage):
                     "channel_scores": cand["channel_scores"],
                     "t1_raw": t1,
                     "subscores": {k: round(v, 2) for k, v in sub.items()},
+                    "cross_validation_adjustments": list(adjustments),
                     "adjustments": adjustments,
                     "arousal_pct": round(arousal_pct, 3),
                     "heatmap_pct": round(heatmap_pct, 3) if heatmap_pct is not None else None,
@@ -844,6 +1006,7 @@ class ScoreStage(Stage):
                             "channel_scores": cand["channel_scores"],
                             "t1_raw": t1,
                             "subscores": {k: round(v, 2) for k, v in sub.items()},
+                            "cross_validation_adjustments": list(adjustments),
                             "adjustments": adjustments,
                             "arousal_pct": round(arousal_pct, 3),
                             "heatmap_pct": round(heatmap_pct, 3) if heatmap_pct is not None else None,
@@ -924,6 +1087,7 @@ class ScoreStage(Stage):
                             "channel_scores": cand["channel_scores"],
                             "t1_raw": t1,
                             "subscores": {k: round(v, 2) for k, v in sub.items()},
+                            "cross_validation_adjustments": list(adjustments),
                             "adjustments": adjustments,
                             "arousal_pct": round(arousal_pct, 3),
                             "heatmap_pct": round(heatmap_pct, 3) if heatmap_pct is not None else None,
@@ -1217,6 +1381,7 @@ class ScoreStage(Stage):
             else:
                 entry["music"] = None
 
+        ranking_layer_diagnostics = ranking_diagnostics(scored, constants=cv_constants)
         finalists.sort(key=lambda e: (float(e.get("recommendation_score", 0.0)), -float(e.get("start", 0.0))), reverse=True)
         finalists = apply_output_preference(
             finalists,
@@ -1279,6 +1444,7 @@ class ScoreStage(Stage):
             "rubric_version": providers_mod.RUBRIC_CACHE_VERSION,
             "capabilities": profile.capabilities.to_dict(),
             "clips": finalists,
+            "ranking_diagnostics": ranking_layer_diagnostics,
             "rejected_candidates": rejected,
             "borderline_candidates": [other_moment_record(entry) for entry in borderline],
             "strong_recommendation_count": len(strong),
