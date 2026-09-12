@@ -156,6 +156,40 @@ def test_local_shortlist_preserves_late_temporal_coverage(monkeypatch):
     assert any(item[0]["start"] == 300.0 for item in selected)
 
 
+def test_local_scoring_batch_prefers_quality_over_farther_distance():
+    high_quality = (
+        {
+            "start": 30.0,
+            "end": 60.0,
+            "curve_score": 0.5,
+            "channel_scores": {},
+            "payoff_candidate": True,
+            "payoff_time": 55.0,
+            "payoff_boundary_explicit": True,
+            "hook_strength": 0.8,
+            "start_topic_boundary": 0.9,
+        },
+        "",
+        "Why would anyone attempt this challenge? The result is shown and everyone laughed!",
+    )
+    far_lower_quality = (
+        {
+            "start": 500.0,
+            "end": 530.0,
+            "curve_score": 0.5,
+            "channel_scores": {},
+        },
+        "",
+        "The room is underground and comfortable with several rooms.",
+    )
+
+    selected = scoring_stage.select_diverse_scoring_batch(
+        [high_quality, far_lower_quality], 1, selected_midpoints=[0.0]
+    )
+
+    assert selected[0][0]["start"] == 30.0
+
+
 def test_candidate_evidence_prior_rewards_verified_story_structure():
     plain = {"payoff_candidate": False, "hook_strength": 0.2, "start_topic_boundary": 0.0}
     structured = {

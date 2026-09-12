@@ -35,6 +35,8 @@ LOCAL_FINALIST_LIMIT = 6
 PAYOFF_TAIL_BONUS_MAX = 8.0
 CANDIDATE_PAYOFF_GAP_PENALTY = -14.0
 MATERIAL_EARLIER_OPENING_LEAD_SECONDS = 20.0
+LOCAL_PRERANK_DIVERSITY_BONUS = 6.0
+LOCAL_PRERANK_DIVERSITY_DISTANCE = 180.0
 LOCAL_RECOVERABLE_PROVIDER_CODES = {
     "PROVIDER_UNAVAILABLE",
     "NETWORK_FAILED",
@@ -341,6 +343,11 @@ def _words_for_prerank(text: str) -> list[str]:
     return [word.lower() for word in text.replace("\n", " ").split() if word.strip()]
 
 
+def _local_prerank_score(prerank: tuple[float, ...]) -> float:
+    """Collapse cheap signals for bounded quality-first selection."""
+    return float(sum(prerank))
+
+
 def _story_metadata(candidate: dict) -> dict:
     """Carry transparent story synthesis evidence into score checkpoints."""
     keys = (
@@ -479,7 +486,17 @@ def select_diverse_scoring_batch(
             midpoint = (float(candidate["start"]) + float(candidate["end"])) / 2.0
             distance = min((abs(midpoint - value) for value in used), default=10_000.0)
             prerank = _local_prerank(item)
-            return (min(distance, 10_000.0), *prerank)
+            quality = _local_prerank_score(prerank)
+            diversity_bonus = min(
+                LOCAL_PRERANK_DIVERSITY_BONUS,
+                max(0.0, distance) / LOCAL_PRERANK_DIVERSITY_DISTANCE * LOCAL_PRERANK_DIVERSITY_BONUS,
+            )
+            return (
+                quality + diversity_bonus,
+                quality,
+                *prerank,
+                min(distance, 10_000.0),
+            )
 
         winner = max(remaining, key=key)
         selected.append(winner)
