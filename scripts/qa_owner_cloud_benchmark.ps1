@@ -79,19 +79,22 @@ if ($Provider -eq 'openrouter' -and [string]::IsNullOrWhiteSpace($Model)) {
 
 $backupRoot = Join-Path ([IO.Path]::GetTempPath()) "clipgauge-owner-benchmark-$([Guid]::NewGuid().ToString('N'))"
 $backupJob = Join-Path $backupRoot 'job'
-New-Item -ItemType Directory -Force $backupJob | Out-Null
-Copy-Item -LiteralPath (Join-Path $clipgaugeRoot 'db.sqlite3') -Destination (Join-Path $backupRoot 'db.sqlite3')
-Copy-Item -Path (Join-Path $ownerJob '*') -Destination $backupJob -Recurse -Force
-
 $previousHome = $env:CLIPGAUGE_HOME
 $previousPath = $env:PYTHONPATH
 $providerEnv = if ($Provider -eq 'groq') { 'CLIPGAUGE_GROQ_API_KEY' } else { 'CLIPGAUGE_OPENROUTER_API_KEY' }
 $previousKey = [Environment]::GetEnvironmentVariable($providerEnv, 'Process')
-$env:CLIPGAUGE_HOME = $clipgaugeRoot
-$env:PYTHONPATH = Join-Path $repoRoot 'pipeline'
-Set-Item -Path "Env:$providerEnv" -Value $secret
+$backupReady = $false
 
 try {
+    New-Item -ItemType Directory -Force $backupJob | Out-Null
+    Copy-Item -LiteralPath (Join-Path $clipgaugeRoot 'db.sqlite3') -Destination (Join-Path $backupRoot 'db.sqlite3')
+    Copy-Item -Path (Join-Path $ownerJob '*') -Destination $backupJob -Recurse -Force
+    $backupReady = $true
+
+    $env:CLIPGAUGE_HOME = $clipgaugeRoot
+    $env:PYTHONPATH = Join-Path $repoRoot 'pipeline'
+    Set-Item -Path "Env:$providerEnv" -Value $secret
+
     $scorePath = Join-Path $ownerJob 'score.json'
     Remove-Item -LiteralPath $scorePath -Force -ErrorAction SilentlyContinue
     $commandErrorAction = $ErrorActionPreference
@@ -153,12 +156,14 @@ try {
     exit $exitCode
 }
 finally {
-    if (Test-Path -LiteralPath $ownerJob) {
-        Remove-Item -LiteralPath $ownerJob -Recurse -Force
+    if ($backupReady) {
+        if (Test-Path -LiteralPath $ownerJob) {
+            Remove-Item -LiteralPath $ownerJob -Recurse -Force
+        }
+        New-Item -ItemType Directory -Force (Split-Path -Parent $ownerJob) | Out-Null
+        Copy-Item -LiteralPath $backupJob -Destination $ownerJob -Recurse -Force
+        Copy-Item -LiteralPath (Join-Path $backupRoot 'db.sqlite3') -Destination (Join-Path $clipgaugeRoot 'db.sqlite3') -Force
     }
-    New-Item -ItemType Directory -Force (Split-Path -Parent $ownerJob) | Out-Null
-    Copy-Item -LiteralPath $backupJob -Destination $ownerJob -Recurse -Force
-    Copy-Item -LiteralPath (Join-Path $backupRoot 'db.sqlite3') -Destination (Join-Path $clipgaugeRoot 'db.sqlite3') -Force
     Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
     if ($null -eq $previousHome) { Remove-Item Env:CLIPGAUGE_HOME -ErrorAction SilentlyContinue } else { $env:CLIPGAUGE_HOME = $previousHome }
     if ($null -eq $previousPath) { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue } else { $env:PYTHONPATH = $previousPath }
