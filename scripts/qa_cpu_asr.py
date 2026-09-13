@@ -52,10 +52,11 @@ def main() -> int:
         if not (managed.asr_model_path() / "model.bin").is_file():
             raise RuntimeError("verified speech model is missing")
 
-        from faster_whisper import WhisperModel
+        from faster_whisper import BatchedInferencePipeline, WhisperModel
 
         model = WhisperModel(str(managed.asr_model_path()), device="cpu", compute_type="int8")
-        segments, info = model.transcribe(
+        inference = BatchedInferencePipeline(model)
+        segments, info = inference.transcribe(
             str(args.audio),
             batch_size=1,
             beam_size=1,
