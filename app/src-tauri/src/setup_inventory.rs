@@ -1034,15 +1034,15 @@ fn youtube_node_spec() -> Option<AssetSpec> {
             ),
             _ => return None,
         };
-    let root_path = format!("runtimes/youtube/bgutil/1.3.2/node/{root}");
+    let root_path = format!("runtimes/youtube/bgutil/2.0.0/node/{root}");
     Some(static_spec_with_paths(
         &format!("runtime:node:{platform}"),
         "YouTube support runtime",
         "Portable Node.js runtime for the managed PO-token provider",
-        &format!("runtimes/youtube/bgutil/1.3.2/node/{archive}"),
+        &format!("runtimes/youtube/bgutil/2.0.0/node/{archive}"),
         &[
             (
-                &format!("runtimes/youtube/bgutil/1.3.2/node/{archive}"),
+                &format!("runtimes/youtube/bgutil/2.0.0/node/{archive}"),
                 sha256,
             ),
             (&format!("{root_path}/{node}"), ""),
@@ -1059,29 +1059,29 @@ fn youtube_node_spec() -> Option<AssetSpec> {
 
 fn youtube_provider_spec() -> AssetSpec {
     static_spec_with_paths(
-        "youtube:bgutil-provider:1.3.2",
+        "youtube:bgutil-provider:2.0.0",
         "YouTube PO-token provider",
         "yt-dlp plugin and loopback PO-token server source",
-        "runtimes/youtube/bgutil/1.3.2/bgutil-ytdlp-pot-provider-1.3.2.zip",
+        "runtimes/youtube/bgutil/2.0.0/bgutil-ytdlp-pot-provider-2.0.0.zip",
         &[
             (
-                "runtimes/youtube/bgutil/1.3.2/bgutil-ytdlp-pot-provider-1.3.2.zip",
-                "9055f9cbe9f47d242586a542c5b040a17d8e5ddbd1fbc72d3d80841b63dfed8b",
+                "runtimes/youtube/bgutil/2.0.0/bgutil-ytdlp-pot-provider-2.0.0.zip",
+                "e95324ee24b1b0f1b4ad43d336343afe7cf1914acdf65d9cc1977f51d7b137c2",
             ),
             (
-                "runtimes/youtube/bgutil/1.3.2/plugin/yt_dlp_plugins/extractor/getpot_bgutil_http.py",
+                "runtimes/youtube/bgutil/2.0.0/plugin/yt_dlp_plugins/extractor/getpot_bgutil_http.py",
                 "",
             ),
             (
-                "runtimes/youtube/bgutil/1.3.2/source/bgutil-ytdlp-pot-provider-1.3.2/server/build/main.js",
+                "runtimes/youtube/bgutil/2.0.0/source/bgutil-ytdlp-pot-provider-2.0.0/server/build/main.js",
                 "",
             ),
         ],
-        "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/tags/1.3.2.zip",
-        125_366,
-        "9055f9cbe9f47d242586a542c5b040a17d8e5ddbd1fbc72d3d80841b63dfed8b",
+        "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/tags/2.0.0.zip",
+        126_968,
+        "e95324ee24b1b0f1b4ad43d336343afe7cf1914acdf65d9cc1977f51d7b137c2",
         "GPL-3.0-only",
-        "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/tree/1.3.2",
+        "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/tree/2.0.0",
         "core:youtube",
     )
 }

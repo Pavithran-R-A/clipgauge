@@ -1,5 +1,3 @@
-import json
-
 import pytest
 
 from clipgauge_pipeline import cli, setup_models
@@ -91,6 +89,86 @@ def test_youtube_readiness_reports_install_and_build_boundaries(monkeypatch, tmp
     assert result['ready'] is False
 
 
+def test_youtube_repair_reextracts_partial_managed_directories(monkeypatch, tmp_path):
+    monkeypatch.setattr(youtube_compat, '_root', lambda: tmp_path / 'bgutil' / youtube_compat.PROVIDER_VERSION)
+    root = youtube_compat._root()
+    node_root = root / 'node' / youtube_compat.NODE_SPECS[youtube_compat.platform_key()].root_name
+    source_root = root / 'source' / youtube_compat.PROVIDER_SOURCE_ROOT
+    (node_root / 'partial').mkdir(parents=True)
+    (source_root / 'server').mkdir(parents=True)
+    (root / 'plugin' / 'yt_dlp_plugins').mkdir(parents=True)
+    node_archive = root / 'node' / 'node.zip'
+    provider_archive = root / 'provider.zip'
+    node_archive.parent.mkdir(parents=True, exist_ok=True)
+    node_archive.write_bytes(b'node archive')
+    provider_archive.write_bytes(b'provider archive')
+    extracted = []
+
+    def extract(archive, destination, *, archive_type):
+        extracted.append((archive, destination, archive_type))
+        if archive == node_archive:
+            installed = destination / youtube_compat.NODE_SPECS[youtube_compat.platform_key()].root_name
+            installed.mkdir(parents=True)
+            (installed / 'node.exe').touch()
+            (installed / 'npm.cmd').touch()
+        else:
+            installed = destination / youtube_compat.PROVIDER_SOURCE_ROOT
+            (installed / 'server').mkdir(parents=True)
+            (installed / 'server' / 'package.json').write_text('{}', encoding='utf-8')
+            (installed / 'plugin' / 'yt_dlp_plugins' / 'extractor').mkdir(parents=True)
+            (installed / 'plugin' / 'yt_dlp_plugins' / 'extractor' / 'getpot_bgutil_http.py').write_text('', encoding='utf-8')
+
+    monkeypatch.setattr(youtube_compat.runtime, 'extract_archive_verified', extract)
+
+    youtube_compat._extract_assets(object(), [node_archive, provider_archive])
+
+    assert [item[0] for item in extracted] == [node_archive, provider_archive]
+
+    youtube_compat._extract_assets(object(), [node_archive, provider_archive])
+
+    assert [item[0] for item in extracted] == [node_archive, provider_archive]
+
+
+def test_provider_build_readiness_rejects_empty_output(tmp_path, monkeypatch):
+    monkeypatch.setattr(youtube_compat, "_root", lambda: tmp_path)
+    monkeypatch.setattr(youtube_compat, "node_path", lambda: tmp_path / "node")
+    monkeypatch.setattr(youtube_compat, "npm_path", lambda: tmp_path / "npm")
+    monkeypatch.setattr(youtube_compat, "_provider_plugin_ready", lambda: True)
+    server = tmp_path / "source" / youtube_compat.PROVIDER_SOURCE_ROOT / "server"
+    (server / "node_modules").mkdir(parents=True)
+    (server / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "node").touch()
+    (tmp_path / "npm").touch()
+    (server / "build").mkdir()
+    (server / "build" / "main.js").write_text("", encoding="utf-8")
+
+    assert youtube_compat._server_ready() is False
+
+    (server / "build" / "main.js").write_text("compiled provider", encoding="utf-8")
+    assert youtube_compat._server_ready() is True
+
+
+def test_provider_build_swaps_compiled_output_atomically(tmp_path, monkeypatch):
+    server = tmp_path / "server"
+    server.mkdir()
+    old_build = server / "build"
+    old_build.mkdir()
+    (old_build / "main.js").write_text("old", encoding="utf-8")
+    npm = tmp_path / "npm"
+    npm.touch()
+
+    def fake_command(args, *, cwd, failure_code, event):
+        staged = tmp_path / args[args.index("--outDir") + 1]
+        staged.mkdir(parents=True)
+        (staged / "main.js").write_text("new", encoding="utf-8")
+
+    monkeypatch.setattr(youtube_compat, "_run_provider_command", fake_command)
+    youtube_compat._build_provider(npm, server, event=None)
+
+    assert (server / "build" / "main.js").read_text(encoding="utf-8") == "new"
+    assert not list(server.glob(".provider-build-*.backup"))
+
+
 def test_youtube_setup_group_includes_pinned_ytdlp_asset():
     asset_ids = {asset.asset_id for asset in youtube_compat.assets()}
     assert any(asset_id.startswith('runtime:yt-dlp:') for asset_id in asset_ids)
@@ -133,7 +211,7 @@ def test_youtube_test_refreshes_loopback_health_on_success(monkeypatch, tmp_path
     monkeypatch.setattr(youtube_compat.ProviderSupervisor, 'self_test', lambda self: {
         'plugin_discoverable': True,
         'server_installed': True,
-        'health': {'healthy': True, 'running': True, 'version': '1.3.2'},
+        'health': {'healthy': True, 'running': True, 'version': '2.0.0'},
         'loopback_only': True,
         'ok': True,
     })
@@ -240,7 +318,7 @@ def test_youtube_readiness_distinguishes_dependencies_from_public_download(monke
     monkeypatch.setattr(youtube_compat, '_provider_plugin_ready', lambda: True)
     monkeypatch.setattr(youtube_compat.ProviderSupervisor, 'self_test', lambda self: {
         'plugin_discoverable': True, 'server_installed': True,
-        'health': {'healthy': True, 'running': True, 'version': '1.3.2'}, 'loopback_only': True, 'ok': True,
+        'health': {'healthy': True, 'running': True, 'version': '2.0.0'}, 'loopback_only': True, 'ok': True,
     })
     result = youtube_compat.readiness()
     assert result['state'] == 'DEPENDENCIES_READY'
@@ -326,11 +404,11 @@ def test_youtube_failure_diagnostic_is_sanitized_and_classifies_gvs():
     diagnostic = ytdlp.compatibility_diagnostic(
         phase='GVS_TRANSFER',
         method='bgutil-http',
-        stderr='[debug] [youtube] [pot] PO Token Providers: bgutil:http-1.3.2 (external)\nERROR: HTTP Error 403: Forbidden',
+        stderr='[debug] [youtube] [pot] PO Token Providers: bgutil:http-2.0.0 (external)\nERROR: HTTP Error 403: Forbidden',
         http_status=403,
     )
     assert diagnostic['failure_phase'] == 'GVS_TRANSFER'
-    assert diagnostic['provider'] == 'bgutil:http-1.3.2'
+    assert diagnostic['provider'] == 'bgutil:http-2.0.0'
     assert diagnostic['http_status'] == 403
     assert diagnostic['token_contexts_requested'] == ['GVS']
     assert diagnostic['cache_invalidated'] is False
@@ -356,7 +434,7 @@ def test_readiness_exposes_wpc_as_optional_metadata_only(monkeypatch, tmp_path):
     monkeypatch.setattr(youtube_compat, '_provider_plugin_ready', lambda: True)
     monkeypatch.setattr(youtube_compat.ProviderSupervisor, 'self_test', lambda self: {
         'plugin_discoverable': True, 'server_installed': True,
-        'health': {'healthy': True, 'running': True, 'version': '1.3.2'}, 'loopback_only': True, 'ok': True,
+        'health': {'healthy': True, 'running': True, 'version': '2.0.0'}, 'loopback_only': True, 'ok': True,
     })
     monkeypatch.setattr(youtube_compat, '_find_browser', lambda: None)
     result = youtube_compat.readiness()

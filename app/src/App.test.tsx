@@ -32,12 +32,14 @@ vi.mock('./components/Onboarding', () => ({ default: () => <div data-testid="onb
 vi.mock('./components/Loop', () => ({ default: () => <div data-testid="loop" /> }))
 vi.mock('./components/Review', () => ({ default: ({ results }: { results: { job_id: string } }) => <div data-testid="review">{results.job_id}</div> }))
 vi.mock('./components/Studio', () => ({
-  default: ({ error, notice, running, runState, stages, onRun, onCancel, onContinueCpu, onRepairGpu, onResume }: { error: string | null; notice: string | null; running: boolean; runState?: string; stages?: Record<string, { message: string }>; onRun: (...args: Array<string | undefined>) => void; onCancel: () => void; onContinueCpu?: () => void; onRepairGpu?: () => void; onResume?: (id: string) => void }) => (
+  default: ({ error, notice, running, runState, stages, elapsedSeconds, resultsLoadFailed, onRetryResults, onRun, onCancel, onContinueCpu, onRepairGpu, onResume }: { error: string | null; notice: string | null; running: boolean; runState?: string; stages?: Record<string, { message: string }>; elapsedSeconds?: number | null; resultsLoadFailed?: boolean; onRetryResults?: () => void; onRun: (...args: Array<string | undefined>) => void; onCancel: () => void; onContinueCpu?: () => void; onRepairGpu?: () => void; onResume?: (id: string) => void }) => (
     <>
       <div data-testid="studio-error">{error}</div>
       <div data-testid="studio-notice">{notice}</div>
       <div data-testid="studio-state">{runState}</div>
+      <div data-testid="studio-elapsed">{elapsedSeconds ?? ''}</div>
       <div data-testid="stage-asr">{stages?.asr?.message}</div>
+      {resultsLoadFailed && <button data-testid="retry-review" onClick={onRetryResults}>Retry Review loading</button>}
       <button data-testid="create-job" disabled={running} onClick={() => onRun('C:\\Videos\\source.mp4', 'clipgauge-local', 'classic')}>create</button>
       <button data-testid="create-custom-job" disabled={running} onClick={() => onRun('C:\\Videos\\source.mp4', 'custom', 'classic', undefined, undefined, undefined, undefined, undefined, 'best', 'recommended')}>custom</button>
       <button data-testid="create-cloudflare-job" disabled={running} onClick={() => onRun('C:\\Videos\\source.mp4', 'cloudflare', 'classic')}>cloudflare</button>
@@ -57,9 +59,10 @@ vi.mock('./components/SetupCenter', () => ({
   )
 }))
 vi.mock('./components/ProviderCenter', () => ({
-  default: ({ onOpenSetup, onBack }: { onOpenSetup?: () => void; onBack: () => void }) => (
+  default: ({ onOpenSetup, onBack, onSelectProvider }: { onOpenSetup?: () => void; onBack: () => void; onSelectProvider?: (provider: string) => void }) => (
     <div data-testid="provider-center">
       <button onClick={onOpenSetup}>Set up local AI</button>
+      <button data-testid="select-cloud-provider" onClick={() => onSelectProvider?.('groq')}>Select Groq</button>
       <button onClick={onBack}>Back to Create</button>
     </div>
   )
@@ -115,7 +118,7 @@ describe('application navigation handoffs', () => {
   it('reuses the cached local model without another inventory scan', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.16',
+      app_version: '0.5.17',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: 1_700_000_000,
@@ -149,7 +152,7 @@ describe('application navigation handoffs', () => {
   it('does not reuse a local model from an incomplete inventory envelope', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.16',
+      app_version: '0.5.17',
       value: {
         state: 'ready',
         local_ai: { selected_model_id: 'clipgauge-local/balanced' },
@@ -187,7 +190,7 @@ describe('application navigation handoffs', () => {
     await waitFor(() => expect(mocks.api.runJob).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(JSON.parse(window.localStorage.getItem('clipgauge.setup.inventory.v1') ?? '{}')).toMatchObject({
       schema_version: 1,
-      app_version: '0.5.16',
+      app_version: '0.5.17',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       value: { local_ai: { selected_model_id: 'clipgauge-local/balanced' } },
@@ -257,6 +260,15 @@ describe('application navigation handoffs', () => {
     expect(await screen.findByTestId('setup-center')).toBeInTheDocument()
   })
 
+  it('refreshes provider readiness when returning to Create', async () => {
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'AI Providers' }))
+    await userEvent.click(screen.getByTestId('select-cloud-provider'))
+    await userEvent.click(screen.getByRole('button', { name: 'Back to Create' }))
+
+    await waitFor(() => expect(mocks.api.setupState).toHaveBeenCalledTimes(3))
+  })
+
   it('surfaces saved-session load failures instead of leaving the action silent', async () => {
     mocks.api.listJobs.mockResolvedValue([{ id: 'job-a', title: 'Saved clip', ingested: true, rendered: true }])
     mocks.api.jobResults.mockRejectedValueOnce(new Error('session unavailable'))
@@ -307,6 +319,33 @@ describe('structured pipeline terminal events', () => {
     render(<App />)
     await userEvent.click(await screen.findByTestId('create-job'))
     expect(await screen.findByTestId('studio-error')).toHaveTextContent('The video could not be processed. Retry the job.')
+  })
+
+  it('clears the preflight runtime notice when processing starts', async () => {
+    mocks.api.preflight.mockResolvedValueOnce({
+      state: 'ready',
+      selected_llm: 'local',
+      checks: [{ name: 'runtime', state: 'warning', ready: false, message: 'runtime update required' }],
+    })
+    render(<App />)
+
+    await userEvent.click(await screen.findByTestId('create-job'))
+    await waitFor(() => expect(screen.getByTestId('studio-notice')).toHaveTextContent('Before you start: runtime update required'))
+    await waitFor(() => expect(mocks.api.runJob).toHaveBeenCalledTimes(1))
+
+    mocks.pipelineHandler?.({ payload: { event: 'job', job_id: 'job-runtime-notice', attempt_id: 'attempt-runtime-notice' } })
+
+    await waitFor(() => expect(screen.getByTestId('studio-notice')).toHaveTextContent(''))
+  })
+
+  it('freezes terminal elapsed time from the pipeline payload', async () => {
+    render(<App />)
+    await waitFor(() => expect(mocks.pipelineHandler).toBeDefined())
+    mocks.pipelineHandler?.({ payload: { event: 'job', job_id: 'job-elapsed', attempt_id: 'attempt-elapsed' } })
+    mocks.pipelineHandler?.({ payload: { event: 'progress', job_id: 'job-elapsed', attempt_id: 'attempt-elapsed', stage: 'asr', elapsed_seconds: 12.4, message: 'working' } })
+    mocks.pipelineHandler?.({ payload: { event: 'terminal', job_id: 'job-elapsed', attempt_id: 'attempt-elapsed', ok: false, code: 'FAILED', message: 'failed', elapsed_seconds: 83.7 } })
+
+    await waitFor(() => expect(screen.getByTestId('studio-elapsed')).toHaveTextContent('83.7'))
   })
 
   it('prevents a second creator launch while preflight is pending', async () => {
@@ -551,6 +590,22 @@ describe('structured pipeline terminal events', () => {
       },
     })
     expect(await screen.findByTestId('review')).toHaveTextContent('job-no-recommendations')
+  })
+
+  it('retries completed Review loading without rerunning the pipeline', async () => {
+    mocks.api.jobResults.mockRejectedValueOnce(new Error('results temporarily unavailable')).mockResolvedValueOnce({ job_id: 'job-review-retry' })
+    mocks.api.preflight.mockResolvedValue({ state: 'ready', selected_llm: 'local', checks: [] })
+    render(<App />)
+    await waitFor(() => expect(mocks.pipelineHandler).toBeDefined())
+    mocks.pipelineHandler?.({ payload: { event: 'job', job_id: 'job-review-retry', attempt_id: 'attempt-review-retry' } })
+    mocks.pipelineHandler?.({ payload: { event: 'terminal', job_id: 'job-review-retry', attempt_id: 'attempt-review-retry', ok: true, code: 'OK' } })
+
+    expect(await screen.findByTestId('studio-error')).toHaveTextContent('Your clips were created, but Review could not load them.')
+    await userEvent.click(screen.getByTestId('retry-review'))
+
+    await waitFor(() => expect(mocks.api.jobResults).toHaveBeenCalledTimes(2))
+    expect(mocks.api.runJob).not.toHaveBeenCalled()
+    expect(mocks.api.resumeJob).not.toHaveBeenCalled()
   })
 
   it('surfaces rejected resume actions instead of silently staying busy', async () => {

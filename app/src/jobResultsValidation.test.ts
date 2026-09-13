@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { validateJobResults } from './jobResultsValidation'
+import { normalizeJobResults, validateJobResults } from './jobResultsValidation'
 
 describe('validateJobResults', () => {
   it('accepts the minimal successful job envelope', () => {
@@ -32,5 +32,30 @@ describe('validateJobResults', () => {
     expect(validateJobResults({ job_id: 'job-1', score: { clips: [], borderline_candidates: [moment] } })).toBe(true)
     expect(validateJobResults({ job_id: 'job-1', score: { clips: [], borderline_candidates: [{ ...moment, candidate_id: 7 }] } })).toBe(false)
     expect(validateJobResults({ job_id: 'job-1', score: { clips: [], borderline_candidates: [{ ...moment, status: 7 }] } })).toBe(false)
+  })
+
+  it('normalizes historical bait verification adjustments', () => {
+    const clip = {
+      start: 2,
+      end: 8,
+      score: 76,
+      best_platform: 'tiktok',
+      platform_scores: { tiktok: 76 },
+      subscores: { hook: 8, funniness: 7, shock: 6, curiosity_gap: 7, value: 8 },
+      adjustments: [{ rule: 'bait_verification', factor: 1 }],
+      signals_fired: ['story'],
+      signals_missing: [],
+      confidence: 'high',
+      summary: 'A complete moment.',
+      arousal_pct: 0.7,
+      heatmap_pct: null,
+      curve_score: 0.8,
+    }
+
+    const value = { job_id: 'job-1', score: { clips: [clip] } }
+    expect(validateJobResults(value)).toBe(false)
+    const normalized = normalizeJobResults(value)
+    expect(normalized?.score?.clips[0]?.adjustments[0]?.reason).toContain('Historical bait verification')
+    expect(value.score.clips[0].adjustments[0]).not.toHaveProperty('reason')
   })
 })

@@ -84,3 +84,31 @@ export function validateJobResults(value: unknown): value is JobResults {
   }
   return true
 }
+
+const HISTORICAL_BAIT_REASON = 'Historical bait verification was recorded without a reason; transcript verification details were preserved.'
+
+function normalizeAdjustment(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  if (value.rule === 'bait_verification' && value.reason === undefined) {
+    return { ...value, reason: HISTORICAL_BAIT_REASON }
+  }
+  return { ...value }
+}
+
+export function normalizeJobResults(value: unknown): JobResults | null {
+  if (!isRecord(value)) return null
+  const score = value.score
+  const normalized = !isRecord(score) || !Array.isArray(score.clips)
+    ? { ...value }
+    : {
+        ...value,
+        score: {
+          ...score,
+          clips: score.clips.map((clip) => {
+            if (!isRecord(clip) || !Array.isArray(clip.adjustments)) return clip
+            return { ...clip, adjustments: clip.adjustments.map(normalizeAdjustment) }
+          }),
+        },
+      }
+  return validateJobResults(normalized) ? normalized : null
+}

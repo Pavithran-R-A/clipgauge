@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import socket
@@ -17,10 +18,11 @@ import subprocess
 import tempfile
 import threading
 import time
-from datetime import datetime, timezone
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 
@@ -28,12 +30,17 @@ from .. import config, downloads, runtime
 
 DownloadManager = downloads.DownloadManager
 
-PROVIDER_VERSION = "1.3.2"
+PROVIDER_VERSION = "2.0.0"
 NODE_VERSION = "24.19.0"
 PROVIDER_GROUP = "core:youtube"
 DEFAULT_PORT = 4416
 STARTUP_TIMEOUT_SECONDS = 30.0
 PUBLIC_COMPATIBILITY_FILENAME = "youtube-public-compatibility.json"
+PROVIDER_SOURCE_URL = "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/tags/2.0.0.zip"
+PROVIDER_SOURCE_SHA256 = "e95324ee24b1b0f1b4ad43d336343afe7cf1914acdf65d9cc1977f51d7b137c2"
+PROVIDER_SOURCE_SIZE_BYTES = 126_968
+PROVIDER_SOURCE_ROOT = "bgutil-ytdlp-pot-provider-2.0.0"
+PROVIDER_PLUGIN_RELATIVE = "plugin/yt_dlp_plugins/extractor/getpot_bgutil_http.py"
 WPC_VERSION = "1.1.2"
 WPC_SOURCE = "https://github.com/coletdjnz/yt-dlp-getpot-wpc/tree/v1.1.2"
 WPC_LICENSE = "MIT"
@@ -145,19 +152,19 @@ def node_asset() -> downloads.ManagedAsset:
 
 
 def provider_source_asset() -> downloads.ManagedAsset:
-    archive = _root() / "bgutil-ytdlp-pot-provider-1.3.2.zip"
+    archive = _root() / f"bgutil-ytdlp-pot-provider-{PROVIDER_VERSION}.zip"
     return downloads.ManagedAsset(
-        asset_id="youtube:bgutil-provider:1.3.2",
+        asset_id=f"youtube:bgutil-provider:{PROVIDER_VERSION}",
         display_name="YouTube PO-token provider",
         purpose="yt-dlp plugin and loopback PO-token server source",
         destination=str(archive.relative_to(config.home_dir())),
-        url="https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/tags/1.3.2.zip",
-        size_bytes=125_366,
-        sha256="9055f9cbe9f47d242586a542c5b040a17d8e5ddbd1fbc72d3d80841b63dfed8b",
+        url=PROVIDER_SOURCE_URL,
+        size_bytes=PROVIDER_SOURCE_SIZE_BYTES,
+        sha256=PROVIDER_SOURCE_SHA256,
         required=True,
         one_time=True,
         license="GPL-3.0-only",
-        source="https://github.com/Brainicism/bgutil-ytdlp-pot-provider/tree/1.3.2",
+        source="https://github.com/Brainicism/bgutil-ytdlp-pot-provider/tree/2.0.0",
         consent_group=PROVIDER_GROUP,
         archive_type="zip",
         source_revision=PROVIDER_VERSION,
@@ -187,8 +194,7 @@ def npm_path() -> Path:
 
 
 def source_home() -> Path:
-    candidates = sorted((_root() / "source").glob("bgutil-ytdlp-pot-provider-*"))
-    return candidates[-1] if candidates else _root() / "source" / "bgutil-ytdlp-pot-provider-1.3.2"
+    return _root() / "source" / PROVIDER_SOURCE_ROOT
 
 
 def server_home() -> Path:
@@ -207,22 +213,98 @@ def _provider_plugin_ready() -> bool:
     return (plugin_dir() / "yt_dlp_plugins" / "extractor" / "getpot_bgutil_http.py").is_file()
 
 
+def _node_install_ready() -> bool:
+    return node_path().is_file() and npm_path().is_file()
+
+
+def _source_install_ready() -> bool:
+    source = source_home()
+    return (source / "server" / "package.json").is_file() and (source / PROVIDER_PLUGIN_RELATIVE).is_file()
+
+
+def _remove_managed_tree(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _atomic_replace_managed_tree(staged: Path, destination: Path) -> None:
+    backup = destination.with_name(f".{destination.name}.{time.time_ns()}.backup")
+    had_destination = destination.exists() or destination.is_symlink()
+    if had_destination:
+        os.replace(destination, backup)
+    try:
+        os.replace(staged, destination)
+    except Exception:
+        if had_destination and backup.exists():
+            os.replace(backup, destination)
+        raise
+    if backup.exists():
+        _remove_managed_tree(backup)
+
+
+def _extract_archive_tree(archive: Path, destination_parent: Path, root_name: str, archive_type: str) -> None:
+    destination_parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{root_name}.", dir=destination_parent))
+    try:
+        runtime.extract_archive_verified(archive, staging, archive_type=archive_type)
+        extracted_root = staging / root_name
+        if not extracted_root.is_dir():
+            raise runtime.RuntimeIntegrityError("YOUTUBE_PROVIDER_POSTCONDITION_FAILED: archive layout is incomplete")
+        _atomic_replace_managed_tree(extracted_root, destination_parent / root_name)
+    finally:
+        if staging.exists():
+            _remove_managed_tree(staging)
+
+
+def _install_plugin_tree() -> None:
+    plugin_source = source_home() / "plugin" / "yt_dlp_plugins"
+    if not (plugin_source / "extractor" / "getpot_bgutil_http.py").is_file():
+        raise runtime.RuntimeIntegrityError("YOUTUBE_PLUGIN_MISSING: provider archive has no HTTP plugin")
+    plugin_parent = plugin_home()
+    plugin_parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".yt_dlp_plugins.", dir=plugin_parent))
+    try:
+        staged = staging / "yt_dlp_plugins"
+        shutil.copytree(plugin_source, staged)
+        if not (staged / "extractor" / "getpot_bgutil_http.py").is_file():
+            raise runtime.RuntimeIntegrityError("YOUTUBE_PLUGIN_MISSING: provider plugin copy is incomplete")
+        _atomic_replace_managed_tree(staged, plugin_parent / "yt_dlp_plugins")
+    finally:
+        if staging.exists():
+            _remove_managed_tree(staging)
+
+
 def _extract_assets(manager: downloads.DownloadManager, archives: list[Path]) -> None:
     node_archive, provider_archive = archives
-    node_destination = _root() / "node" / NODE_SPECS[platform_key()].root_name
-    if not node_destination.exists():
-        runtime.extract_archive_verified(node_archive, _root() / "node", archive_type=NODE_SPECS[platform_key()].archive_type)
-    if not source_home().exists():
-        runtime.extract_archive_verified(provider_archive, _root() / "source", archive_type="zip")
-    plugin_source = source_home() / "plugin" / "yt_dlp_plugins"
-    plugin_destination = plugin_home() / "yt_dlp_plugins"
-    if plugin_source.is_dir() and not plugin_destination.exists():
-        plugin_home().mkdir(parents=True, exist_ok=True)
-        shutil.copytree(plugin_source, plugin_destination)
+    spec = NODE_SPECS[platform_key()]
+    if not _node_install_ready():
+        _extract_archive_tree(node_archive, _root() / "node", spec.root_name, spec.archive_type)
+    if not _source_install_ready():
+        _extract_archive_tree(provider_archive, _root() / "source", PROVIDER_SOURCE_ROOT, "zip")
+    if not _provider_plugin_ready():
+        _install_plugin_tree()
 
 
 def _server_ready() -> bool:
-    return (server_home() / "build" / "main.js").is_file() and _provider_plugin_ready() and node_path().is_file()
+    server = server_home()
+    return (
+        node_path().is_file()
+        and npm_path().is_file()
+        and (server / "package.json").is_file()
+        and (server / "node_modules").is_dir()
+        and _build_ready(server / "build")
+        and _provider_plugin_ready()
+    )
+
+
+def _build_ready(build: Path) -> bool:
+    main = build / "main.js"
+    try:
+        return main.is_file() and main.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def _yt_dlp_ready() -> bool:
@@ -273,7 +355,7 @@ def record_public_compatibility_success(*, method: str, ytdlp_version: str, prov
     config.ensure_home()
     payload = {
         "verified": True,
-        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "verified_at": datetime.now(UTC).isoformat(),
         "yt_dlp_version": str(ytdlp_version)[:64],
         "provider_version": str(provider_version)[:64],
         "method": str(method)[:64],
@@ -440,6 +522,89 @@ def test() -> dict[str, Any]:
         supervisor.stop()
 
 
+def _sanitize_provider_diagnostics(value: str | None) -> str:
+    lines = []
+    for line in (value or "").splitlines():
+        sanitized = re.sub(r"[A-Za-z]:[^\r\n]*", "<path>", line)
+        sanitized = re.sub(r"/(?:[^/\s]+/)+[^/\s]*", "<path>", sanitized)
+        lines.append(sanitized[:240])
+    return " ".join(lines)[-800:]
+
+
+def _run_provider_command(args: list[str], *, cwd: Path, failure_code: str, event: downloads.EventFn | None) -> None:
+    try:
+        _completed = subprocess.run(
+            args,
+            cwd=cwd,
+            env={
+                **os.environ,
+                "npm_config_audit": "false",
+                "npm_config_fund": "false",
+                "npm_config_update_notifier": "false",
+            },
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=900,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise runtime.RuntimeIntegrityError(f"{failure_code}: command timed out") from exc
+    except subprocess.CalledProcessError as exc:
+        diagnostics = _sanitize_provider_diagnostics(exc.stderr or exc.stdout)
+        suffix = f": {diagnostics}" if diagnostics else ""
+        raise runtime.RuntimeIntegrityError(f"{failure_code}{suffix}") from exc
+    if event:
+        event({
+            "asset_id": f"youtube:bgutil-provider:{PROVIDER_VERSION}",
+            "display_name": "PO-token provider",
+            "operation": "Provider command completed",
+            "bytes_done": 0,
+            "bytes_total": None,
+            "bytes_per_second": 0.0,
+            "fraction": None,
+            "eta_seconds": None,
+            "elapsed_seconds": 0.0,
+            "one_time_download": True,
+            "cached": False,
+            "state": "INSTALLED",
+            "command": args[1] if len(args) > 1 else args[0],
+        })
+
+
+def _build_provider(npm: Path, server: Path, *, event: downloads.EventFn | None) -> None:
+    staging = Path(tempfile.mkdtemp(prefix=".provider-build-", dir=server))
+    staged_build = staging / "build"
+    try:
+        _run_provider_command(
+            [
+                str(npm),
+                "exec",
+                "tsc",
+                "--",
+                "--pretty",
+                "false",
+                "--outDir",
+                str(staged_build),
+            ],
+            cwd=server,
+            failure_code="YOUTUBE_PROVIDER_BUILD_FAILED",
+            event=event,
+        )
+        if not _build_ready(staged_build):
+            _raise_install_code(
+                "YOUTUBE_PROVIDER_POSTCONDITION_FAILED",
+                "provider compiler produced no complete server entrypoint",
+            )
+        _atomic_replace_managed_tree(staged_build, server / "build")
+    finally:
+        if staging.exists():
+            _remove_managed_tree(staging)
+
+
+def _raise_install_code(code: str, message: str) -> None:
+    raise runtime.RuntimeIntegrityError(f"{code}: {message}")
+
+
 def install(*, event: downloads.EventFn | None = None, cancel: Callable[[], bool] | None = None, require_consent: bool = True) -> dict[str, Any]:
     manager = downloads.DownloadManager(event=event)
     group_assets = assets()
@@ -451,21 +616,45 @@ def install(*, event: downloads.EventFn | None = None, cancel: Callable[[], bool
     npm = npm_path()
     server = server_home()
     if not node.is_file() or not npm.is_file():
-        raise runtime.RuntimeIntegrityError("managed Node.js runtime is missing after verified extraction")
-    if not (server / "node_modules").is_dir() or not (server / "build" / "main.js").is_file():
-        event and event({"asset_id": "youtube:bgutil-server:1.3.2", "display_name": "PO-token provider", "operation": "Installing locked provider dependencies", "bytes_done": 0, "bytes_total": None, "bytes_per_second": 0.0, "fraction": None, "eta_seconds": None, "elapsed_seconds": 0.0, "one_time_download": True, "cached": False, "state": "INSTALLING"})
-        env = os.environ.copy()
-        env.update({"npm_config_audit": "false", "npm_config_fund": "false", "npm_config_update_notifier": "false"})
-        subprocess.run([str(npm), "ci", "--no-audit", "--no-fund"], cwd=server, env=env, check=True, timeout=900)
-        subprocess.run([str(npm), "exec", "tsc", "--", "--pretty", "false"], cwd=server, env=env, check=True, timeout=900)
+        _raise_install_code("YOUTUBE_NODE_MISSING", "managed Node.js runtime is missing after verified extraction")
+    if not (server / "package.json").is_file():
+        _raise_install_code("YOUTUBE_PROVIDER_POSTCONDITION_FAILED", "provider source layout is incomplete")
+    if not _provider_plugin_ready():
+        _raise_install_code("YOUTUBE_PLUGIN_MISSING", "provider plugin is not installed")
+    if not (server / "node_modules").is_dir():
+        event and event({"asset_id": f"youtube:bgutil-server:{PROVIDER_VERSION}", "display_name": "PO-token provider", "operation": "Installing locked provider dependencies", "bytes_done": 0, "bytes_total": None, "bytes_per_second": 0.0, "fraction": None, "eta_seconds": None, "elapsed_seconds": 0.0, "one_time_download": True, "cached": False, "state": "INSTALLING"})
+        _run_provider_command([str(npm), "ci", "--no-audit", "--no-fund"], cwd=server, failure_code="YOUTUBE_NPM_INSTALL_FAILED", event=event)
+    if not _build_ready(server / "build"):
+        event and event({"asset_id": f"youtube:bgutil-server:{PROVIDER_VERSION}", "display_name": "PO-token provider", "operation": "Building the managed provider", "bytes_done": 0, "bytes_total": None, "bytes_per_second": 0.0, "fraction": None, "eta_seconds": None, "elapsed_seconds": 0.0, "one_time_download": True, "cached": False, "state": "BUILDING"})
+        _build_provider(npm, server, event=event)
+    if not _server_ready():
+        _raise_install_code("YOUTUBE_PROVIDER_POSTCONDITION_FAILED", "provider build, node runtime, or plugin is incomplete")
+    supervisor = ProviderSupervisor()
+    try:
+        endpoint = supervisor.start()
+        result = supervisor.self_test()
+        if not result.get("plugin_discoverable"):
+            _raise_install_code("YOUTUBE_PLUGIN_MISSING", "provider plugin discovery failed")
+        if not result.get("server_installed"):
+            _raise_install_code("YOUTUBE_PROVIDER_POSTCONDITION_FAILED", "provider server postcondition failed")
+        if not (result.get("health") or {}).get("healthy"):
+            _raise_install_code("YOUTUBE_PROVIDER_HEALTH_FAILED", "provider loopback health check failed")
+    except runtime.RuntimeIntegrityError as error:
+        if "PORT_IN_USE" in str(error):
+            _raise_install_code("YOUTUBE_PORT_IN_USE", "the managed provider port is occupied")
+        if str(error).startswith(("BUILD_MISSING", "NODE_FAILURE", "PROCESS_EXITED", "HEALTH_TIMEOUT")):
+            _raise_install_code("YOUTUBE_PROVIDER_HEALTH_FAILED", "provider loopback health check failed")
+        raise
+    finally:
+        supervisor.stop()
     return {
         "provider_version": PROVIDER_VERSION,
         "node_version": NODE_VERSION,
         "node_path": str(node),
         "server_home": str(server),
         "plugin_dir": str(plugin_dir()),
-        "endpoint": f"http://127.0.0.1:{DEFAULT_PORT}",
-        "installed": _server_ready(),
+        "endpoint": endpoint,
+        "installed": True,
     }
 
 
@@ -582,7 +771,7 @@ class ProviderSupervisor:
             if not _server_ready():
                 raise runtime.RuntimeIntegrityError("BUILD_MISSING: YouTube compatibility provider is not installed or built.")
 
-            command = [str(node_path()), "build/main.js", "--port", str(DEFAULT_PORT)]
+            command = [str(node_path()), "build/main.js", "--port", str(DEFAULT_PORT), "--host", "127.0.0.1,::1"]
             env = os.environ.copy()
             env["PATH"] = str(node_path().parent) + os.pathsep + env.get("PATH", "")
             creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0

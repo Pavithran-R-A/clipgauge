@@ -347,6 +347,33 @@ mod tests {
     }
 
     #[test]
+    fn preserves_python_score_adjustment_reasons_for_review() {
+        let home = fixture();
+        let job = home.join("jobs/20260818-155237-c6b118");
+        let score = json!({
+            "data": {
+                "outcome": "SUCCESS_WITH_CLIPS",
+                "clips": [{
+                    "adjustments": [{
+                        "rule": "bait_verification",
+                        "factor": 1.0,
+                        "reason": "Bait phrases were checked against the candidate transcript."
+                    }]
+                }]
+            }
+        });
+        fs::write(job.join("score.json"), serde_json::to_vec(&score).unwrap()).unwrap();
+
+        let result = job_results(&home, "20260818-155237-c6b118").unwrap();
+
+        assert_eq!(
+            result["score"]["clips"][0]["adjustments"][0]["reason"],
+            "Bait phrases were checked against the candidate transcript."
+        );
+        assert_eq!(result["outcome"], "SUCCESS_WITH_CLIPS");
+    }
+
+    #[test]
     fn reports_available_relative_render_artifact() {
         let home = relative_fixture();
         let result = job_results(&home, "20260818-155237-c6b118").unwrap();
