@@ -30,6 +30,9 @@ def main() -> int:
     except Exception as exc:
         print(f"SBOM validation FAILED: invalid JSON: {exc}")
         return 1
+    if not isinstance(data, dict):
+        print("SBOM validation FAILED: top-level JSON value must be an object")
+        return 1
 
     expected_version_match = re.fullmatch(r"v(\d+\.\d+\.\d+)", args.tag)
     if expected_version_match is None:
@@ -54,13 +57,29 @@ def main() -> int:
         errors.append("forbidden stale v0.1.0 tag object is present")
 
     metadata = data.get("metadata", {})
+    if not isinstance(metadata, dict):
+        errors.append("metadata must be an object")
+        metadata = {}
     metadata_component = metadata.get("component", {})
+    if not isinstance(metadata_component, dict):
+        errors.append("metadata component must be an object")
+        metadata_component = {}
     if metadata_component.get("name") != "ClipGauge":
         errors.append(f"metadata component must be ClipGauge, found {metadata_component.get('name')!r}")
     if metadata_component.get("version") != expected_version:
         errors.append("metadata component version does not match release tag")
 
-    properties = {p.get("name"): p.get("value") for p in metadata.get("properties", [])}
+    metadata_properties = metadata.get("properties", [])
+    if not isinstance(metadata_properties, list):
+        errors.append("metadata properties must be an array")
+        metadata_properties = []
+    if not all(isinstance(property_value, dict) for property_value in metadata_properties):
+        errors.append("metadata properties entries must be objects")
+    properties = {
+        property_value.get("name"): property_value.get("value")
+        for property_value in metadata_properties
+        if isinstance(property_value, dict)
+    }
     if properties.get("source.repository") != REPOSITORY:
         errors.append(f"source.repository must be {REPOSITORY!r}")
     if properties.get("source.tag") != args.tag:
@@ -72,6 +91,9 @@ def main() -> int:
     if not isinstance(components, list) or not components:
         errors.append("components must be a non-empty array")
         components = []
+    elif not all(isinstance(component, dict) for component in components):
+        errors.append("components entries must be objects")
+        components = [component for component in components if isinstance(component, dict)]
     refs = [component.get("bom-ref") for component in components]
     if any(not ref for ref in refs):
         errors.append("every component must have a BOM reference")

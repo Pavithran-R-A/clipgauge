@@ -62,3 +62,26 @@ def test_cluster_windows_two_clear_speakers():
     assert len(set(labels[:40])) == 1
     assert len(set(labels[40:])) == 1
     assert labels[0] != labels[40]
+
+
+def test_spectral_labels_has_numpy_fallback(monkeypatch):
+    original_import = __import__
+
+    def block_sklearn(name, *args, **kwargs):
+        if name.startswith("sklearn"):
+            raise ImportError("scikit-learn unavailable")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", block_sklearn)
+    affinity = np.array(
+        [
+            [1.0, 0.9, 0.1, 0.1],
+            [0.9, 1.0, 0.1, 0.1],
+            [0.1, 0.1, 1.0, 0.9],
+            [0.1, 0.1, 0.9, 1.0],
+        ]
+    )
+    labels = cluster._spectral_labels(affinity, 2)
+    assert len(set(labels[:2])) == 1
+    assert len(set(labels[2:])) == 1
+    assert labels[0] != labels[2]

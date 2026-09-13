@@ -33,6 +33,25 @@ def test_selection_prefers_persisted_valid_installed_model():
 def test_selection_falls_back_to_valid_installed_then_recommended():
     rows = [_row('clipgauge-local/qwen3-1.7b-q8_0', installed=True), _row('clipgauge-local/qwen3-4b-q4_k_m', installed=False)]
     assert setup_models.select_model_id(rows, persisted_id='missing') == 'clipgauge-local/qwen3-1.7b-q8_0'
+
+
+@pytest.mark.parametrize(
+    ('module', 'pattern'),
+    [(setup_models, '.local-ai-settings.json.*.part'), (youtube_compat, '.youtube-public-compatibility.json.*.part')],
+)
+def test_atomic_setup_writes_clean_failed_temporaries(monkeypatch, tmp_path, module, pattern):
+    destination = tmp_path / 'state.json'
+    destination.write_text('previous', encoding='utf-8')
+
+    def fail_replace(*_args):
+        raise OSError('replace failed')
+
+    monkeypatch.setattr(module.os, 'replace', fail_replace)
+    with pytest.raises(OSError, match='replace failed'):
+        module._atomic_write_text(destination, 'new')
+
+    assert destination.read_text(encoding='utf-8') == 'previous'
+    assert list(tmp_path.glob(pattern)) == []
     assert setup_models.select_model_id([_row('clipgauge-local/qwen3-4b-q4_k_m')], persisted_id='missing') == 'clipgauge-local/qwen3-4b-q4_k_m'
 
 

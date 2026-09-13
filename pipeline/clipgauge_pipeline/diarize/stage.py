@@ -3,6 +3,8 @@ turns → word-level speaker labels merged back into the transcript."""
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +12,30 @@ import numpy as np
 from ..jobs.queue import Stage, StageContext, StageError
 from ..memory import release_cpu_memory
 from ..models import registry, specs
+
+
+def _atomic_save_npy(path: Path, value: np.ndarray) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            np.save(handle, value, allow_pickle=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
 
 
 class DiarizeStage(Stage):
@@ -106,7 +132,7 @@ class DiarizeStage(Stage):
                     device,
                     progress=lambda f: ctx.emit(0.25 + f * 0.55, "Embedding speech…"),
                 )
-                np.save(cache_path, embeddings)
+                _atomic_save_npy(cache_path, embeddings)
             except Exception as exc:  # noqa: BLE001 - embedding boundary is intentionally typed
                 raise StageError(
                     "Speaker analysis couldn’t analyze the speech windows. Retry speaker analysis or continue without speaker-aware reframing.",

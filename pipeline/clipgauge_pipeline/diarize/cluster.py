@@ -16,7 +16,6 @@ SUBSAMPLE_LIMIT = 3000
 
 def _spectral_labels(affinity: np.ndarray, k: int) -> np.ndarray:
     from scipy.linalg import eigh
-    from sklearn.cluster import KMeans
 
     # Normalized Laplacian embedding, then k-means — standard recipe.
     deg = affinity.sum(axis=1)
@@ -28,7 +27,39 @@ def _spectral_labels(affinity: np.ndarray, k: int) -> np.ndarray:
     norms = np.linalg.norm(embedding, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     embedding = embedding / norms
+    try:
+        from sklearn.cluster import KMeans
+    except ImportError:
+        return _numpy_kmeans(embedding, k)
     return KMeans(n_clusters=k, n_init=10, random_state=0).fit_predict(embedding)
+
+
+def _numpy_kmeans(points: np.ndarray, k: int, max_iter: int = 100) -> np.ndarray:
+    """Deterministic fallback for environments without scikit-learn."""
+    if k <= 1 or len(points) <= 1:
+        return np.zeros(len(points), dtype=int)
+    centroids = [points[0].copy()]
+    while len(centroids) < k:
+        distances = np.min(
+            np.stack([np.sum((points - centroid) ** 2, axis=1) for centroid in centroids]),
+            axis=0,
+        )
+        centroids.append(points[int(np.argmax(distances))].copy())
+    centroids = np.stack(centroids)
+    labels = np.zeros(len(points), dtype=int)
+    for _ in range(max_iter):
+        next_labels = np.argmin(
+            np.sum((points[:, None, :] - centroids[None, :, :]) ** 2, axis=2),
+            axis=1,
+        )
+        if np.array_equal(next_labels, labels):
+            break
+        labels = next_labels
+        for index in range(k):
+            members = points[labels == index]
+            if len(members):
+                centroids[index] = members.mean(axis=0)
+    return labels
 
 
 def _eigengap_k(affinity: np.ndarray, max_k: int = MAX_SPEAKERS) -> int:

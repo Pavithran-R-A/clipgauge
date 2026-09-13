@@ -15,8 +15,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .. import protocol
-from ..jobs.queue import Stage, StageContext, StageError
+from .. import config, protocol
+from ..jobs.queue import Stage, StageContext, StageError, _atomic_write_json
 from ..music import brief as music_brief
 from . import constants as constants_mod
 from . import frames as frames_mod
@@ -30,7 +30,14 @@ LOCAL_T1_ROUND_SIZE = 10
 LOCAL_T1_MIN_CALLS = 12
 LOCAL_STRONG_MINIMUM = 3
 LOCAL_T1_WALL_BUDGET_SECONDS = 180.0
+CLOUD_T1_WALL_BUDGET_SECONDS = 180.0
 LOCAL_FINALIST_LIMIT = 6
+PAYOFF_TAIL_BONUS_MAX = 8.0
+CANDIDATE_PAYOFF_GAP_PENALTY = -14.0
+MATERIAL_EARLIER_OPENING_LEAD_SECONDS = 20.0
+LOCAL_PRERANK_DIVERSITY_BONUS = 6.0
+LOCAL_PRERANK_DIVERSITY_DISTANCE = 180.0
+LOCAL_SCORING_REGION_SECONDS = 90.0
 LOCAL_RECOVERABLE_PROVIDER_CODES = {
     "PROVIDER_UNAVAILABLE",
     "NETWORK_FAILED",
@@ -41,7 +48,13 @@ LOCAL_RECOVERABLE_PROVIDER_CODES = {
 }
 
 
-def _scoring_failure_code(error: providers_mod.ProviderError) -> str:
+def _scoring_failure_code(
+    error: providers_mod.ProviderError,
+    *,
+    provider_kind: str = "clipgauge-local",
+) -> str:
+    if provider_kind != "clipgauge-local":
+        return error.code
     if error.code == "TIMEOUT":
         return "LOCAL_SCORING_TIMEOUT"
     if error.code in {"STRUCTURED_OUTPUT_INVALID", "PROVIDER_RESPONSE_INVALID"}:
@@ -54,7 +67,11 @@ def _scoring_failure_code(error: providers_mod.ProviderError) -> str:
     return "LOCAL_SCORING_UNAVAILABLE"
 
 
-def _safe_failure_record(error: providers_mod.ProviderError) -> dict:
+def _safe_failure_record(
+    error: providers_mod.ProviderError,
+    *,
+    provider_kind: str = "clipgauge-local",
+) -> dict:
     safe_keys = {
         "provider_code",
         "provider_kind",
@@ -73,12 +90,16 @@ def _safe_failure_record(error: providers_mod.ProviderError) -> dict:
         "http_status",
     }
     return {
-        "code": _scoring_failure_code(error),
+        "code": _scoring_failure_code(error, provider_kind=provider_kind),
         "provider_code": error.code,
         "details": {
             key: value for key, value in error.details.items() if key in safe_keys
         },
     }
+
+
+def _unexpected_scoring_failure_code(provider_kind: str) -> str:
+    return "LOCAL_SCORING_UNAVAILABLE" if provider_kind == "clipgauge-local" else "INTERNAL_PROVIDER_ERROR"
 
 
 def recommendation_outcome(
@@ -109,6 +130,18 @@ def recommendation_outcome(
     }
 
 
+def apply_output_preference(
+    finalists: list[dict], preference: str, borderline: list[dict] | None = None, limit: int = 12
+) -> list[dict]:
+    """Apply output controls without promoting rejected candidates."""
+    if preference == "best":
+        return finalists[:2]
+    if preference == "more":
+        extra = list(borderline or [])
+        return (finalists + extra)[: max(1, int(limit))]
+    return finalists
+
+
 def scoring_budget(*, local: bool, candidate_count: int) -> dict[str, int | float | bool]:
     """Return the deterministic expensive-work ceiling for one scoring run."""
     count = max(0, int(candidate_count))
@@ -116,7 +149,7 @@ def scoring_budget(*, local: bool, candidate_count: int) -> dict[str, int | floa
         "candidate_count": count,
         "t1_limit": count,
         "tier_two_limit": min(count, LOCAL_T1_CANDIDATE_LIMIT) if local else count,
-        "wall_time_seconds": LOCAL_T1_WALL_BUDGET_SECONDS if local else 0.0,
+        "wall_time_seconds": LOCAL_T1_WALL_BUDGET_SECONDS if local else CLOUD_T1_WALL_BUDGET_SECONDS,
         "finalist_limit": LOCAL_FINALIST_LIMIT if local else SELECT_COUNT,
         "music_llm": not local,
     }
@@ -179,13 +212,27 @@ def _events_desc(events: list[dict]) -> str:
     return "; ".join(parts)
 
 
+def _scoring_context(cand: dict, duration: float, events_desc: str) -> dict:
+    """Pass candidate evidence to every scoring round as untrusted hints."""
+    return {
+        "duration": duration,
+        "events_desc": events_desc,
+        "candidate_evidence": {
+            "hook_sentence": cand.get("hook_sentence"),
+            "payoff_sentence": cand.get("payoff_sentence"),
+            "story_shape": cand.get("story_shape"),
+            "central_premise": cand.get("central_premise"),
+        },
+    }
+
+
 def _generate_t1(client, prompt: str, schema: dict, sentence_ids: set[str]) -> dict:
     """Run one T1 judgment and enforce managed balanced boundaries."""
     for attempt in range(2):
         try:
             result = client.generate_json(prompt, schema)
             if schema is rubric.BALANCED_T1_SCHEMA:
-                result = rubric.normalize_balanced_output(result)
+                result = rubric.normalize_balanced_output(result, sentence_ids)
                 rubric.validate_balanced_output(result, sentence_ids)
             return result
         except ValueError as error:
@@ -276,6 +323,10 @@ def _local_prerank(item: tuple[dict, str, str]) -> tuple[float, ...]:
     concrete_detail = float(bool(any(any(char.isdigit() for char in word) for word in words)))
     concrete_detail += float(bool(set(words) & {"money", "year", "years", "dollars", "percent", "first", "only"}))
     reaction = float(bool(set(words) & {"wow", "what", "no", "oh", "laugh", "laughed", "shocked", "insane"}))
+    payoff_tail = 0.0
+    if cand.get("payoff_candidate"):
+        payoff_time = float(cand.get("payoff_time") or 0.0)
+        payoff_tail = min(30.0, max(0.0, float(cand.get("end", 0.0)) - payoff_time))
     speaker_change = float(max(0, text.count("\n")))
     scene_change = float(cand.get("scene_change", cand.get("shot_change", 0.0)) or 0.0)
     context = float(bool(words and words[0] not in {"he", "she", "they", "it", "that", "this"}))
@@ -283,7 +334,7 @@ def _local_prerank(item: tuple[dict, str, str]) -> tuple[float, ...]:
     overlap = float(cand.get("overlap", cand.get("redundancy", 0.0)) or 0.0)
     return (
         starts_complete, ends_complete, question_or_open_loop, concrete_detail,
-        reaction, speaker_change, scene_change, context, density, -overlap,
+        payoff_tail, reaction, speaker_change, scene_change, context, density, -overlap,
         float(cand.get("curve_score", 0.0)), max(channel_values, default=0.0),
         sum(channel_values),
     )
@@ -293,17 +344,66 @@ def _words_for_prerank(text: str) -> list[str]:
     return [word.lower() for word in text.replace("\n", " ").split() if word.strip()]
 
 
+def _local_prerank_score(prerank: tuple[float, ...]) -> float:
+    """Collapse cheap signals for bounded quality-first selection."""
+    return float(sum(prerank))
+
+
 def _story_metadata(candidate: dict) -> dict:
     """Carry transparent story synthesis evidence into score checkpoints."""
     keys = (
-        "candidate_id", "sentence_ids", "central_premise", "hook_sentence", "hook_time",
+        "candidate_id", "anchor_sentence_id", "sentence_ids", "central_premise", "hook_sentence", "hook_time",
         "setup_end", "payoff_sentence", "payoff_time", "semantic_closure", "topic_coherence",
         "topic_shift_count", "standalone_comprehension", "story_shape", "syntactic_complete",
         "story_variant", "topic_key", "boundary_confidence", "editorial_signal",
         "hook_strength", "information_density",
-        "duration_fit",
+        "duration_fit", "start_topic_boundary", "payoff_candidate", "payoff_boundary_explicit", "source_final_boundary",
     )
     return {key: candidate.get(key) for key in keys if key in candidate}
+
+
+def _payoff_tail_bonus(entry: dict) -> float:
+    """Reward a bounded reaction tail after a detected payoff."""
+    if not entry.get("payoff_candidate"):
+        return 0.0
+    payoff_time = float(entry.get("payoff_time") or 0.0)
+    tail = float(entry.get("end", 0.0)) - payoff_time
+    if payoff_time <= 0.0 or tail < 2.0 or tail > 30.0:
+        return 0.0
+    return round(min(PAYOFF_TAIL_BONUS_MAX, (tail - 2.0) * 0.8), 1)
+
+
+def _candidate_evidence_bonus(entry: dict) -> float:
+    """Add a bounded prior from deterministic story-unit evidence."""
+    bonus = 0.0
+    if entry.get("payoff_candidate") and entry.get("payoff_time") is not None:
+        bonus += 1.5
+    if entry.get("payoff_boundary_explicit"):
+        bonus += 2.5
+    if entry.get("source_final_boundary"):
+        bonus += 1.5
+    boundary = max(0.0, min(1.0, float(entry.get("start_topic_boundary") or 0.0)))
+    hook = max(0.0, min(1.0, float(entry.get("hook_strength") or 0.0)))
+    bonus += boundary * 1.5
+    bonus += hook
+    return round(min(8.0, bonus), 1)
+
+
+def _candidate_evidence_adjustment(entry: dict) -> dict | None:
+    if not any(entry.get(field) for field in ("payoff_candidate", "payoff_boundary_explicit")):
+        return {
+            "rule": "candidate_payoff_evidence_gap",
+            "bonus": CANDIDATE_PAYOFF_GAP_PENALTY,
+            "reason": "bounded penalty keeps spans without deterministic payoff evidence below complete stories",
+        }
+    bonus = _candidate_evidence_bonus(entry)
+    if bonus:
+        return {
+            "rule": "candidate_evidence_prior",
+            "bonus": bonus,
+            "reason": "bounded deterministic story-unit evidence supports this candidate",
+        }
+    return None
 
 
 def shortlist_local_candidates(
@@ -313,7 +413,7 @@ def shortlist_local_candidates(
     *,
     include_sentence_ids: bool = False,
 ) -> list[tuple[dict, str, str]]:
-    """Prepare and deterministically cap expensive local scoring work."""
+    """Prepare and cap local work without losing distant story regions."""
     prepared: list[tuple[dict, str, str]] = []
     for candidate in candidates:
         labeled, flat = _transcript_slice(
@@ -324,8 +424,54 @@ def shortlist_local_candidates(
         )
         if len(flat.split()) >= 20:
             prepared.append((candidate, labeled, flat))
-    prepared.sort(key=_local_prerank, reverse=True)
-    return prepared[: max(0, int(limit))]
+    return select_diverse_scoring_batch(prepared, max(0, int(limit)))
+
+
+def _has_later_payoff_story_variant(
+    item: tuple[dict, str, str],
+    prepared: list[tuple[dict, str, str]],
+) -> bool:
+    candidate = item[0]
+    candidate_sentences = set(candidate.get("sentence_ids") or [])
+    candidate_payoff = float(candidate.get("payoff_time") or 0.0)
+    for other_item in prepared:
+        other = other_item[0]
+        if other is candidate or not other.get("payoff_candidate") or not candidate.get("payoff_candidate"):
+            continue
+        other_sentences = set(other.get("sentence_ids") or [])
+        shared = len(candidate_sentences & other_sentences)
+        overlap_ratio = shared / min(len(candidate_sentences), len(other_sentences)) if candidate_sentences and other_sentences else 0.0
+        opening_lead = float(other.get("start", 0.0)) - float(candidate.get("start", 0.0))
+        if (
+            opening_lead >= 8.0
+            and float(other.get("start_topic_boundary") or 0.0) >= 0.62
+        ):
+            continue
+        if (
+            opening_lead >= MATERIAL_EARLIER_OPENING_LEAD_SECONDS
+            and candidate.get("payoff_boundary_explicit")
+        ):
+            same_opening_peer = any(
+                peer is not candidate
+                and abs(float(peer.get("start", 0.0)) - float(candidate.get("start", 0.0))) <= 2.0
+                and abs(float(peer.get("payoff_time") or 0.0) - float(candidate.get("payoff_time") or 0.0)) <= 2.0
+                and float(peer.get("end", 0.0)) > float(candidate.get("end", 0.0)) + 0.5
+                for peer_item in prepared
+                for peer in [peer_item[0]]
+            )
+            if same_opening_peer:
+                return True
+            # An explicit payoff does not justify discarding a materially
+            # earlier setup.  Both spans can be scored and ranked later.
+            continue
+        if (
+            overlap_ratio >= 0.2
+            and float(other.get("payoff_time") or 0.0) > candidate_payoff + 10.0
+            and float(other["end"]) > float(candidate["end"]) + 8.0
+            and float(other["start"]) <= float(candidate["end"]) + 30.0
+        ):
+            return True
+    return False
 
 
 def select_diverse_scoring_batch(
@@ -334,18 +480,57 @@ def select_diverse_scoring_batch(
     selected_midpoints: list[float] | None = None,
 ) -> list[tuple[dict, str, str]]:
     """Choose a bounded batch using prerank and temporal diversity."""
-    remaining = list(prepared)
+    remaining = [
+        item for item in prepared
+        if not _has_later_payoff_story_variant(item, prepared)
+    ]
     selected: list[tuple[dict, str, str]] = []
     used = list(selected_midpoints or [])
+
+    def region(item: tuple[dict, str, str]) -> int:
+        candidate = item[0]
+        midpoint = (float(candidate["start"]) + float(candidate["end"])) / 2.0
+        return int(midpoint // LOCAL_SCORING_REGION_SECONDS)
+
+    def has_evidence(item: tuple[dict, str, str]) -> bool:
+        candidate = item[0]
+        return bool(
+            candidate.get("payoff_candidate")
+            and (
+                candidate.get("payoff_boundary_explicit")
+                or candidate.get("source_final_boundary")
+                or float(candidate.get("start_topic_boundary") or 0.0) >= 0.75
+            )
+        )
+
     while remaining and len(selected) < max(0, int(batch_size)):
         def key(item: tuple[dict, str, str]) -> tuple[float, ...]:
             candidate = item[0]
             midpoint = (float(candidate["start"]) + float(candidate["end"])) / 2.0
             distance = min((abs(midpoint - value) for value in used), default=10_000.0)
             prerank = _local_prerank(item)
-            return (min(distance, 10_000.0), *prerank)
+            quality = _local_prerank_score(prerank)
+            diversity_bonus = min(
+                LOCAL_PRERANK_DIVERSITY_BONUS,
+                max(0.0, distance) / LOCAL_PRERANK_DIVERSITY_DISTANCE * LOCAL_PRERANK_DIVERSITY_BONUS,
+            )
+            return (
+                quality + diversity_bonus,
+                quality,
+                *prerank,
+                min(distance, 10_000.0),
+            )
 
-        winner = max(remaining, key=key)
+        covered_regions = {
+            region(item)
+            for item in selected
+            if has_evidence(item)
+        }
+        uncovered_evidence = [
+            item for item in remaining
+            if has_evidence(item) and region(item) not in covered_regions
+        ]
+        winner = max(uncovered_evidence or remaining, key=key)
         selected.append(winner)
         used.append((float(winner[0]["start"]) + float(winner[0]["end"])) / 2.0)
         remaining.remove(winner)
@@ -366,19 +551,54 @@ def is_strong_recommendation(quality: dict[str, object]) -> bool:
 
 
 def is_good_recommendation(quality: dict[str, object]) -> bool:
-    """Accept only GOOD or STRONG results for final rendering."""
+    """Accept good results and clean near-good stories."""
+    if not quality.get("eligible_to_recommend"):
+        return False
+    if quality.get("quality_tier") in {"GOOD", "STRONG"}:
+        return True
+    if quality.get("quality_tier") != "STRUCTURALLY_VALID":
+        return False
+    return bool(
+        not quality.get("quality_flags")
+        and quality.get("complete_ending")
+        and quality.get("story_consistent", True)
+        and float(quality.get("effective_hook_0_100", 0.0)) >= 35.0
+        and float(quality.get("payoff", 0.0)) >= 55.0
+        and float(quality.get("standalone", 0.0)) >= 60.0
+        and float(quality.get("semantic_closure_0_100", 0.0)) >= 60.0
+        and float(quality.get("topic_coherence_0_100", 0.0)) >= 65.0
+        and float(quality.get("payoff_relevance_to_premise", 0.0)) >= 50.0
+    )
+
+
+def is_evidence_backed_recommendation(entry: dict) -> bool:
+    """Keep explicit deterministic payoffs available for final review."""
+    if not entry.get("payoff_boundary_explicit"):
+        return False
+    quality = entry.get("short_quality") or {}
+    flags = set(quality.get("quality_flags") or [])
+    allowed_flags = {
+        "WEAK_SEMANTIC_CLOSURE",
+        "PAYOFF_NOT_RELEVANT",
+        "TOPIC_DRIFT",
+        "LATE_NEW_TOPIC",
+        "WEAK_COLD_HOOK",
+    }
     return bool(
         quality.get("eligible_to_recommend")
-        and quality.get("quality_tier") in {"GOOD", "STRONG"}
+        and quality.get("quality_tier") == "STRUCTURALLY_VALID"
+        and quality.get("complete_ending")
+        and quality.get("story_consistent", True)
+        and flags <= allowed_flags
+        and float(quality.get("effective_hook_0_100", 0.0)) >= 20.0
+        and float(quality.get("payoff", 0.0)) >= 45.0
+        and float(quality.get("standalone", 0.0)) >= 45.0
     )
 
 
 def is_search_strong(quality: dict[str, object]) -> bool:
-    """Count promising candidates before final boundary repair."""
+    """Count candidates safe to use for local early stopping."""
     flags = set(quality.get("quality_flags") or [])
-    # Segment-boundary evidence is collected during the repair pass.  The
-    # provisional search may use the T1 ending score instead.
-    flags.discard("WEAK_SEMANTIC_CLOSURE")
     rejection_reasons = set(quality.get("rejection_reasons") or [])
     provisional_ending = (
         rejection_reasons <= {"INCOMPLETE_ENDING"}
@@ -400,6 +620,7 @@ def quality_audit(quality: dict[str, object]) -> dict[str, object]:
         "structured_hook_0_10": quality.get("structured_hook_0_10"),
         "deterministic_hook_0_100": quality.get("deterministic_hook_0_100"),
         "effective_hook_0_100": quality.get("effective_hook_0_100"),
+        "candidate_hook_verified": quality.get("candidate_hook_verified", False),
         "hook_disagreement": quality.get("hook_disagreement", False),
         "payoff": quality.get("payoff"),
         "standalone": quality.get("standalone"),
@@ -413,6 +634,7 @@ def quality_audit(quality: dict[str, object]) -> dict[str, object]:
         "topic_shift_count": quality.get("topic_shift_count", 0),
         "late_new_topic": quality.get("late_new_topic", False),
         "payoff_relevance_to_premise": quality.get("payoff_relevance_to_premise"),
+        "candidate_payoff_verified": quality.get("candidate_payoff_verified", False),
         "quality_flags": quality.get("quality_flags", []),
         "quality_tier": quality.get("quality_tier", "STRUCTURALLY_VALID"),
         "story_consistent": quality.get("story_consistent", True),
@@ -422,17 +644,261 @@ def quality_audit(quality: dict[str, object]) -> dict[str, object]:
     }
 
 
+_RAW_LLM_JUDGMENT_FIELDS = {
+    "hook", "hook_type", "funniness", "punchline_index", "shock", "curiosity_gap", "value",
+    "self_contained", "bait_phrases", "hook_strength", "hook_reason", "standalone_comprehension",
+    "setup_strength", "escalation_strength", "payoff_strength", "payoff_location",
+    "ending_completeness", "story_shape", "information_density", "reaction_strength",
+    "recommended_start_offset", "recommended_end_offset", "central_premise", "payoff_sentence_id",
+    "payoff_relevance_to_premise", "topic_coherence", "topic_shift_count", "late_new_topic",
+    "syntactic_complete", "semantic_closure", "open_loop_at_end", "quality_tier",
+}
+_RANKING_SUBSCORE_FIELDS = ("hook", "funniness", "shock", "curiosity_gap", "value")
+_CROSS_VALIDATION_RULES = {
+    "funny_no_laugh", "funny_corroborated", "shock_no_arousal",
+    "bait_verification", "bait_penalty",
+}
+
+
+def _safe_raw_llm_judgment(raw: object) -> dict:
+    """Keep model judgment fields, excluding transcript-like text."""
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: value
+        for key, value in raw.items()
+        if key in _RAW_LLM_JUDGMENT_FIELDS
+        and isinstance(value, (str, int, float, bool, list, type(None)))
+    }
+
+
+def _ranking_subscores(values: object) -> dict[str, float]:
+    source = values if isinstance(values, dict) else {}
+    return {
+        key: min(10.0, max(0.0, float(source.get(key, 0.0))))
+        for key in _RANKING_SUBSCORE_FIELDS
+    }
+
+
+def _diagnostic_ranks(rows: list[dict], field: str) -> dict[int, int]:
+    ordered = sorted(
+        range(len(rows)),
+        key=lambda index: (
+            -float(rows[index].get(field, 0.0)),
+            float(rows[index].get("start", 0.0)),
+            str(rows[index].get("candidate_id") or ""),
+        ),
+    )
+    return {index: rank for rank, index in enumerate(ordered, start=1)}
+
+
+def _diagnostic_platform_score(
+    subscores: object,
+    entry: dict,
+    *,
+    constants: dict | None,
+) -> float:
+    platform_scores, _ = rubric.composite(
+        _ranking_subscores(subscores),
+        float(entry.get("curve_score", 0.0)),
+        entry.get("heatmap_pct"),
+        None,
+        constants=constants,
+    )
+    return max(platform_scores.values(), default=0.0)
+
+
+def ranking_diagnostics(
+    entries: list[dict],
+    *,
+    constants: dict | None = None,
+) -> list[dict]:
+    """Expose every scored candidate's raw-to-final ranking layers safely."""
+    rows: list[dict] = []
+    for entry in entries:
+        raw = _safe_raw_llm_judgment(entry.get("t1_raw"))
+        raw_subscores = _ranking_subscores(raw)
+        raw_platform_score = _diagnostic_platform_score(raw_subscores, entry, constants=constants)
+        cross_adjustments = list(entry.get("cross_validation_adjustments") or [])
+        all_adjustments = list(entry.get("adjustments") or [])
+        if not cross_adjustments:
+            cross_adjustments = [
+                item for item in all_adjustments
+                if item.get("rule") in _CROSS_VALIDATION_RULES
+            ]
+        post_adjustments = [
+            item for item in all_adjustments
+            if item.get("rule") not in _CROSS_VALIDATION_RULES
+        ]
+        quality = entry.get("short_quality") or {}
+        cross_validation_score = _diagnostic_platform_score(
+            entry.get("subscores"), entry, constants=constants
+        )
+        rows.append({
+            "candidate_id": entry.get("candidate_id"),
+            "start": entry.get("start"),
+            "end": entry.get("end"),
+            "raw_llm_score": raw_platform_score,
+            "cross_validation_score": cross_validation_score,
+            "short_quality_score": float(quality.get("score", 0.0)),
+            "final_score": float(entry.get("recommendation_score", 0.0)),
+            "raw_llm": {
+                "judgment": raw,
+                "platform_score": raw_platform_score,
+            },
+            "after_cross_validation": {
+                "subscores": _ranking_subscores(entry.get("subscores")),
+                "platform_score": cross_validation_score,
+                "adjustments": cross_adjustments,
+            },
+            "after_short_quality": {
+                "score": float(quality.get("score", 0.0)),
+                "quality": quality_audit(quality),
+                "adjustments": {
+                    "quality_flags": list(quality.get("quality_flags") or []),
+                    "rejection_reasons": list(quality.get("rejection_reasons") or []),
+                },
+            },
+            "adjustments": {
+                "cross_validation": cross_adjustments,
+                "short_quality": {
+                    "quality_flags": list(quality.get("quality_flags") or []),
+                    "rejection_reasons": list(quality.get("rejection_reasons") or []),
+                },
+                "bait": [
+                    item for item in cross_adjustments
+                    if item.get("rule") in {"bait_verification", "bait_penalty"}
+                ],
+                "candidate_evidence": [
+                    item for item in post_adjustments
+                    if item.get("rule") == "candidate_evidence_prior"
+                ],
+                "post_processing": post_adjustments,
+            },
+            "final": {
+                "platform_score": float(entry.get("platform_score", 0.0)),
+                "recommendation_score": float(entry.get("recommendation_score", 0.0)),
+                "quality_tier": quality.get("quality_tier", "STRUCTURALLY_VALID"),
+                "eligible_to_recommend": bool(quality.get("eligible_to_recommend", False)),
+                "strong_recommendation": bool(quality.get("strong_recommendation", False)),
+                "rejection_reasons": list(quality.get("rejection_reasons") or []),
+            },
+        })
+
+    rank_fields = {
+        "raw_llm": "raw_llm_score",
+        "after_cross_validation": "cross_validation_score",
+        "after_short_quality": "short_quality_score",
+        "final": "final_score",
+    }
+    ranks = {
+        name: _diagnostic_ranks(rows, field)
+        for name, field in rank_fields.items()
+    }
+    for index, row in enumerate(rows):
+        row["ranks"] = {
+            name: rank[index]
+            for name, rank in ranks.items()
+        }
+        for field in ("raw_llm_score", "cross_validation_score", "short_quality_score", "final_score"):
+            row.pop(field, None)
+    return rows
+
+
+def other_moment_record(entry: dict) -> dict:
+    """Expose useful below-threshold candidates with actionable reasons."""
+    quality = entry.get("short_quality") or {}
+    reasons = list(quality.get("quality_flags") or [])
+    reasons.extend(reason for reason in quality.get("rejection_reasons") or [] if reason not in reasons)
+    if not reasons:
+        reasons = ["STRONG_RECOMMENDATION_REQUIRED"]
+    return {
+        "candidate_id": entry.get("candidate_id"),
+        "start": entry["start"],
+        "end": entry["end"],
+        "recommendation_score": entry.get(
+            "recommendation_score", quality.get("score", 0.0)
+        ),
+        "status": "OTHER_MOMENT",
+        "summary": entry.get("summary", ""),
+        "story": quality.get("story_shape"),
+        "reasons": reasons,
+        "quality": quality_audit(quality),
+    }
+
+
 def select_diverse_finalists(entries: list[dict], limit: int = LOCAL_FINALIST_LIMIT) -> list[dict]:
-    """Select strong clips while suppressing nearby redundant moments."""
+    """Select strong clips while suppressing duplicate story moments."""
     remaining = [
         dict(entry) for entry in entries
         if entry.get("eligible_to_recommend", True)
     ]
     selected: list[dict] = []
     separation = 120.0
+    region_seconds = 90.0
+
+    def evidence_region(entry: dict) -> int | None:
+        if not (
+            entry.get("payoff_candidate")
+            and (
+                entry.get("payoff_boundary_explicit")
+                or entry.get("source_final_boundary")
+                or float(entry.get("start_topic_boundary") or 0.0) >= 0.75
+            )
+        ):
+            return None
+        midpoint = (float(entry.get("start", 0.0)) + float(entry.get("end", 0.0))) / 2.0
+        return int(midpoint // region_seconds)
+
+    def same_story(left: dict, right: dict) -> bool:
+        if left.get("anchor_sentence_id") and left.get("anchor_sentence_id") == right.get("anchor_sentence_id"):
+            return True
+        left_sentences = set(left.get("sentence_ids") or [])
+        right_sentences = set(right.get("sentence_ids") or [])
+        midpoint_gap = abs(
+            (float(left.get("start", 0.0)) + float(left.get("end", 0.0))) / 2.0
+            - (float(right.get("start", 0.0)) + float(right.get("end", 0.0))) / 2.0
+        )
+        if left_sentences and right_sentences:
+            overlap = len(left_sentences & right_sentences) / min(len(left_sentences), len(right_sentences))
+            if overlap >= 0.2:
+                return True
+        if midpoint_gap > separation:
+            return False
+        left_topics = set(left.get("topic_key") or [])
+        right_topics = set(right.get("topic_key") or [])
+        if left_topics and right_topics:
+            similarity = len(left_topics & right_topics) / len(left_topics | right_topics)
+            return similarity >= 0.65
+        return False
+
     while remaining and len(selected) < max(0, int(limit)):
+        distinct_remaining = [
+            entry for entry in remaining
+            if not any(same_story(entry, previous) for previous in selected)
+        ]
+        if not distinct_remaining:
+            break
+        covered_regions = {
+            region
+            for region in (evidence_region(entry) for entry in selected)
+            if region is not None
+        }
+        uncovered_evidence = [
+            entry
+            for entry in distinct_remaining
+            if evidence_region(entry) is not None
+            and evidence_region(entry) not in covered_regions
+        ]
+        pool = uncovered_evidence or distinct_remaining
+
         def utility(entry: dict) -> tuple[float, float, float]:
             base = float(entry.get("recommendation_score", entry.get("score", 0.0)))
+            quality = entry.get("short_quality") or {}
+            quality_tier = entry.get("quality_tier", quality.get("quality_tier"))
+            quality_flags = entry.get("quality_flags", quality.get("quality_flags", []))
+            clean_quality_prior = 10.0 if quality_tier in {"STRONG", "GOOD"} and not quality_flags else 0.0
+            payoff_boundary_prior = 5.0 if entry.get("payoff_boundary_explicit") else 0.0
             midpoint = (float(entry.get("start", 0.0)) + float(entry.get("end", 0.0))) / 2.0
             if not selected:
                 penalty = 0.0
@@ -442,17 +908,38 @@ def select_diverse_finalists(entries: list[dict], limit: int = LOCAL_FINALIST_LI
                     for item in selected
                 )
                 penalty = max(0.0, (separation - distance) / separation * 35.0)
-            return (base - penalty, base, -float(entry.get("start", 0.0)))
+            return (
+                base + clean_quality_prior + payoff_boundary_prior - penalty,
+                base,
+                -float(entry.get("start", 0.0)),
+            )
 
-        winner = max(remaining, key=utility)
+        winner = max(pool, key=utility)
         selected.append(winner)
         remaining.remove(winner)
     return selected
 
 
+def rank_scored_candidates(entries: list[dict]) -> list[dict]:
+    """Order review candidates with bounded temporal diversity."""
+    eligible = [
+        entry for entry in entries
+        if entry.get("eligible_to_recommend", True)
+    ]
+    return select_diverse_finalists(eligible, len(eligible))
+
+
 class ScoreStage(Stage):
     name = "score"
-    schema_version = 26  # v26: bounded local scoring recovery diagnostics
+    schema_version = 38  # v38: preserve explicit outcome setup context
+
+    def dependency_settings(self, ctx: StageContext) -> dict:
+        settings = super().dependency_settings(ctx)
+        settings.update({
+            "rubric_version": providers_mod.RUBRIC_CACHE_VERSION,
+            "scoring_constants_version": constants_mod.active().get("version", 1),
+        })
+        return settings
 
     def run(self, ctx: StageContext) -> dict:
         prior = ctx.prior or {}
@@ -470,6 +957,7 @@ class ScoreStage(Stage):
         except (llm_mod.LlmError, ValueError) as err:
             raise StageError(str(err)) from err
         llm_mode = profile.kind
+        requested_model = getattr(client, "requested_model", client.model)
         is_local = bool(profile.capabilities.local)
         t1_schema = (
             rubric.T1_SCHEMA
@@ -502,6 +990,12 @@ class ScoreStage(Stage):
 
         candidates = cands["candidates"]
         budget = scoring_budget(local=is_local, candidate_count=len(candidates))
+        output_preference = getattr(ctx.settings, "output_preference", "recommended")
+        quality_mode = getattr(ctx.settings, "quality_mode", "private")
+        try:
+            config.validate_quality_mode_for_provider(quality_mode, profile.locality)
+        except ValueError as err:
+            raise StageError(str(err)) from err
 
         # Slice transcripts first so short/non-speech windows do not consume the
         # local model-call budget.  Cloud mode retains the original candidate
@@ -530,21 +1024,20 @@ class ScoreStage(Stage):
         failure_records: list[dict] = []
         t1_calls = 0
         scoring_started = time.monotonic()
+        if not is_local and isinstance(client, providers_mod.ProviderAdapter):
+            client.set_scoring_deadline(scoring_started + float(budget["wall_time_seconds"]))
         round_one = (
             select_diverse_scoring_batch(prepared, LOCAL_T1_ROUND_SIZE)
             if is_local else prepared
         )
         for i, (cand, labeled, flat) in enumerate(round_one):
-            if is_local and time.monotonic() - scoring_started >= LOCAL_T1_WALL_BUDGET_SECONDS:
+            if float(budget["wall_time_seconds"]) > 0 and time.monotonic() - scoring_started >= float(budget["wall_time_seconds"]):
                 break
             start, end = cand["start"], cand["end"]
             ctx.emit(i / max(1, len(prepared)) * 0.6, f"Scoring moment {i + 1}/{len(prepared)}…")
             window_events = _events_in(timeline, start, end)
             near_laughs = [e for e in _events_in(timeline, start, end, pad=3.0) if e["type"] == "laugh"]
-            context = {
-                "duration": end - start,
-                "events_desc": _events_desc(window_events),
-            }
+            context = _scoring_context(cand, end - start, _events_desc(window_events))
             try:
                 t1_calls += 1
                 t1 = _generate_t1(
@@ -554,21 +1047,29 @@ class ScoreStage(Stage):
                     set(cand.get("sentence_ids", [])),
                 )
             except providers_mod.ProviderError as err:
-                failure_records.append(_safe_failure_record(err))
+                failure_records.append(_safe_failure_record(err, provider_kind=profile.kind))
                 ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_records[-1]['code']}); skipping")
                 continue
             except Exception:  # noqa: BLE001
-                failure_records.append({"code": "LOCAL_SCORING_UNAVAILABLE", "provider_code": "UNEXPECTED_SCORING_ERROR", "details": {}})
-                ctx.emit(-1, f"moment {i + 1} scoring unavailable (LOCAL_SCORING_UNAVAILABLE); skipping")
+                failure_code = _unexpected_scoring_failure_code(profile.kind)
+                failure_records.append({"code": failure_code, "provider_code": "UNEXPECTED_SCORING_ERROR", "details": {}})
+                ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_code}); skipping")
                 continue
 
-            quality = short_quality.assess(flat, window_events, end - start, llm=t1)
+            quality = short_quality.assess(
+                flat,
+                window_events,
+                end - start,
+                llm=t1,
+                candidate_evidence=cand,
+            )
             arousal_pct = _window_pct(arousal, arousal_grid, start, end)
             heatmap_pct = (
                 _window_pct(heat_values, 1.0, start, end) if heat_values is not None else None
             )
             sub, adjustments = rubric.cross_validate(
                 t1,
+                transcript=labeled,
                 laughs_near=near_laughs,
                 arousal_pct=arousal_pct,
                 heatmap_pct=heatmap_pct,
@@ -582,6 +1083,7 @@ class ScoreStage(Stage):
                     "channel_scores": cand["channel_scores"],
                     "t1_raw": t1,
                     "subscores": {k: round(v, 2) for k, v in sub.items()},
+                    "cross_validation_adjustments": list(adjustments),
                     "adjustments": adjustments,
                     "arousal_pct": round(arousal_pct, 3),
                     "heatmap_pct": round(heatmap_pct, 3) if heatmap_pct is not None else None,
@@ -620,7 +1122,7 @@ class ScoreStage(Stage):
                         e for e in _events_in(timeline, start, end, pad=3.0)
                         if e["type"] == "laugh"
                     ]
-                    context = {"duration": end - start, "events_desc": _events_desc(window_events)}
+                    context = _scoring_context(cand, end - start, _events_desc(window_events))
                     try:
                         t1_calls += 1
                         t1 = _generate_t1(
@@ -630,20 +1132,28 @@ class ScoreStage(Stage):
                             set(cand.get("sentence_ids", [])),
                         )
                     except providers_mod.ProviderError as err:
-                        failure_records.append(_safe_failure_record(err))
+                        failure_records.append(_safe_failure_record(err, provider_kind=profile.kind))
                         ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_records[-1]['code']}); skipping")
                         continue
                     except Exception:  # noqa: BLE001
-                        failure_records.append({"code": "LOCAL_SCORING_UNAVAILABLE", "provider_code": "UNEXPECTED_SCORING_ERROR", "details": {}})
-                        ctx.emit(-1, f"moment {i + 1} scoring unavailable (LOCAL_SCORING_UNAVAILABLE); skipping")
+                        failure_code = _unexpected_scoring_failure_code(profile.kind)
+                        failure_records.append({"code": failure_code, "provider_code": "UNEXPECTED_SCORING_ERROR", "details": {}})
+                        ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_code}); skipping")
                         continue
-                    quality = short_quality.assess(flat, window_events, end - start, llm=t1)
+                    quality = short_quality.assess(
+                        flat,
+                        window_events,
+                        end - start,
+                        llm=t1,
+                        candidate_evidence=cand,
+                    )
                     arousal_pct = _window_pct(arousal, arousal_grid, start, end)
                     heatmap_pct = (
                         _window_pct(heat_values, 1.0, start, end) if heat_values is not None else None
                     )
                     sub, adjustments = rubric.cross_validate(
                         t1,
+                        transcript=labeled,
                         laughs_near=near_laughs,
                         arousal_pct=arousal_pct,
                         heatmap_pct=heatmap_pct,
@@ -657,6 +1167,7 @@ class ScoreStage(Stage):
                             "channel_scores": cand["channel_scores"],
                             "t1_raw": t1,
                             "subscores": {k: round(v, 2) for k, v in sub.items()},
+                            "cross_validation_adjustments": list(adjustments),
                             "adjustments": adjustments,
                             "arousal_pct": round(arousal_pct, 3),
                             "heatmap_pct": round(heatmap_pct, 3) if heatmap_pct is not None else None,
@@ -692,7 +1203,7 @@ class ScoreStage(Stage):
                         e for e in _events_in(timeline, start, end, pad=3.0)
                         if e["type"] == "laugh"
                     ]
-                    context = {"duration": end - start, "events_desc": _events_desc(window_events)}
+                    context = _scoring_context(cand, end - start, _events_desc(window_events))
                     try:
                         t1_calls += 1
                         t1 = _generate_t1(
@@ -702,20 +1213,28 @@ class ScoreStage(Stage):
                             set(cand.get("sentence_ids", [])),
                         )
                     except providers_mod.ProviderError as err:
-                        failure_records.append(_safe_failure_record(err))
+                        failure_records.append(_safe_failure_record(err, provider_kind=profile.kind))
                         ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_records[-1]['code']}); skipping")
                         continue
                     except Exception:  # noqa: BLE001
-                        failure_records.append({"code": "LOCAL_SCORING_UNAVAILABLE", "provider_code": "UNEXPECTED_SCORING_ERROR", "details": {}})
-                        ctx.emit(-1, f"moment {i + 1} scoring unavailable (LOCAL_SCORING_UNAVAILABLE); skipping")
+                        failure_code = _unexpected_scoring_failure_code(profile.kind)
+                        failure_records.append({"code": failure_code, "provider_code": "UNEXPECTED_SCORING_ERROR", "details": {}})
+                        ctx.emit(-1, f"moment {i + 1} scoring unavailable ({failure_code}); skipping")
                         continue
-                    quality = short_quality.assess(flat, window_events, end - start, llm=t1)
+                    quality = short_quality.assess(
+                        flat,
+                        window_events,
+                        end - start,
+                        llm=t1,
+                        candidate_evidence=cand,
+                    )
                     arousal_pct = _window_pct(arousal, arousal_grid, start, end)
                     heatmap_pct = (
                         _window_pct(heat_values, 1.0, start, end) if heat_values is not None else None
                     )
                     sub, adjustments = rubric.cross_validate(
                         t1,
+                        transcript=labeled,
                         laughs_near=near_laughs,
                         arousal_pct=arousal_pct,
                         heatmap_pct=heatmap_pct,
@@ -729,6 +1248,7 @@ class ScoreStage(Stage):
                             "channel_scores": cand["channel_scores"],
                             "t1_raw": t1,
                             "subscores": {k: round(v, 2) for k, v in sub.items()},
+                            "cross_validation_adjustments": list(adjustments),
                             "adjustments": adjustments,
                             "arousal_pct": round(arousal_pct, 3),
                             "heatmap_pct": round(heatmap_pct, 3) if heatmap_pct is not None else None,
@@ -743,7 +1263,7 @@ class ScoreStage(Stage):
                     refill_rounds = 2
 
         failure_reason_counts = dict(Counter(item["code"] for item in failure_records))
-        if not scored:
+        if not scored and prepared:
             if failure_reason_counts:
                 dominant_code = max(failure_reason_counts, key=failure_reason_counts.get)
             else:
@@ -762,7 +1282,7 @@ class ScoreStage(Stage):
                 },
             )
             raise StageError(
-                "ClipGauge Local could not score any candidate.",
+                f"{profile.display_name} could not score any candidate.",
                 code=dominant_code,
                 diagnostic_id=diagnostic_id,
             )
@@ -778,6 +1298,25 @@ class ScoreStage(Stage):
             entry["recommendation_score"] = short_quality.recommendation_score(
                 entry["platform_score"], entry["short_quality"]
             )
+            payoff_bonus = _payoff_tail_bonus(entry)
+            if payoff_bonus:
+                entry["recommendation_score"] = round(
+                    min(100.0, entry["recommendation_score"] + payoff_bonus), 1
+                )
+                adjustments.append({
+                    "rule": "payoff_tail_completeness",
+                    "bonus": payoff_bonus,
+                    "reason": "bounded reaction tail follows the detected payoff",
+                })
+            candidate_adjustment = _candidate_evidence_adjustment(entry)
+            if candidate_adjustment:
+                candidate_bonus = float(candidate_adjustment["bonus"])
+                entry["recommendation_score"] = round(
+                    max(0.0, min(100.0, entry["recommendation_score"] + candidate_bonus)), 1
+                )
+                recorded = entry.setdefault("adjustments", [])
+                if not any(item.get("rule") == candidate_adjustment["rule"] for item in recorded):
+                    recorded.append(candidate_adjustment)
             entry["score"] = entry["platform_score"]
             entry["best_platform"] = max(platform_scores, key=platform_scores.get)
             return platform_scores, adjustments
@@ -796,6 +1335,21 @@ class ScoreStage(Stage):
                 original_start,
                 original_end,
                 entry.get("t1_raw"),
+                preserve_candidate_opening=(
+                    float(entry.get("start_topic_boundary") or 0.0) >= 0.62
+                    or bool(entry.get("payoff_boundary_explicit"))
+                ),
+                preserve_candidate_payoff=bool(
+                    entry.get("payoff_candidate")
+                    or entry.get("payoff_boundary_explicit")
+                    or entry.get("source_final_boundary")
+                ),
+                payoff_time=(
+                    float(entry["payoff_time"])
+                    if entry.get("payoff_time") is not None
+                    else None
+                ),
+                preserve_candidate_end=bool(entry.get("source_final_boundary")),
             )
             refined_end, segment_boundary = _repair_to_segment_boundary(
                 segments, refined_start, refined_end
@@ -815,6 +1369,7 @@ class ScoreStage(Stage):
                 refined_end - refined_start,
                 llm=entry.get("t1_raw"),
                 segment_boundary=segment_boundary,
+                candidate_evidence=entry,
                 ending_evidence=_ending_evidence(
                     flat,
                     segments,
@@ -856,13 +1411,19 @@ class ScoreStage(Stage):
             entry for entry in scored
             if entry["short_quality"].get("eligible_to_recommend", False)
         ]
+        eligible = rank_scored_candidates(eligible)
         strong = [entry for entry in eligible if is_strong_recommendation(entry["short_quality"])]
         good = [
             entry for entry in eligible
-            if entry not in strong and is_good_recommendation(entry["short_quality"])
+            if entry not in strong and (
+                is_good_recommendation(entry["short_quality"])
+                or is_evidence_backed_recommendation(entry)
+            )
         ]
         borderline = [entry for entry in eligible if entry not in strong and entry not in good]
         finalists = select_diverse_finalists(strong + good, int(budget["finalist_limit"]))
+        borderline_for_more = borderline[: max(0, int(budget["finalist_limit"]) - len(finalists))]
+        review_entries = finalists + borderline_for_more if output_preference == "more" else finalists
 
         # T2 visual pass + music brief on finalists only.  Current local models
         # are text-only and intentionally skip extra music-model generations so
@@ -870,8 +1431,8 @@ class ScoreStage(Stage):
         supports_vision = client.profile.capabilities.vision is True
         music_llm_calls = 0
         t2_calls = 0
-        for j, entry in enumerate(finalists):
-            ctx.emit(0.6 + j / max(1, len(finalists)) * 0.35, f"Visual pass {j + 1}/{len(finalists)}…")
+        for j, entry in enumerate(review_entries):
+            ctx.emit(0.6 + j / max(1, len(review_entries)) * 0.35, f"Visual pass {j + 1}/{len(review_entries)}…")
             visual = None
             if supports_vision:
                 times = frames_mod.sample_times(entry["start"], entry["end"], scene_times)
@@ -891,7 +1452,7 @@ class ScoreStage(Stage):
                         visual = None
             entry["t2"] = visual
 
-            platform_scores, comp_adjustments = _apply_platform_scores(entry, visual)
+            _, comp_adjustments = _apply_platform_scores(entry, visual)
             entry["adjustments"].extend(comp_adjustments)
 
             window_events = _events_in(timeline, entry["start"], entry["end"])
@@ -910,7 +1471,8 @@ class ScoreStage(Stage):
             degraded_signals = list(provider_result.degraded_signals) if provider_result else []
             if not supports_vision and any("visual" in item for item in missing):
                 degraded_signals.append("vision_unavailable")
-            entry["confidence"] = "standard" if structured_level == "native_schema" and not profile.capabilities.local else "local-estimate" if profile.capabilities.local else "degraded"
+            effective_profile = getattr(client, "profile", profile)
+            entry["confidence"] = "standard" if structured_level == "native_schema" and not effective_profile.capabilities.local else "local-estimate" if effective_profile.capabilities.local else "degraded"
             entry["ledger"] = {
                 "score": entry["recommendation_score"],
                 "platform_score": entry["platform_score"],
@@ -954,14 +1516,18 @@ class ScoreStage(Stage):
                 "signals_missing": missing,
                 "provenance": {
                     "llm_mode": llm_mode,
-                    "provider_profile_id": profile.id,
-                    "provider_kind": profile.kind,
-                    "model": client.model,
-                    "endpoint_identity": profile.endpoint_identity,
-                    "capabilities": profile.capabilities.to_dict(),
+                    "provider_profile_id": effective_profile.id,
+                    "provider_kind": effective_profile.kind,
+                    "model": getattr(client, "actual_model", client.model),
+                    "requested_model": requested_model,
+                    "actual_model": getattr(client, "actual_model", client.model),
+                    "endpoint_identity": effective_profile.endpoint_identity,
+                    "capabilities": effective_profile.capabilities.to_dict(),
                     "structured_level": structured_level,
                     "degraded_signals": degraded_signals,
                     "scoring_config_version": scoring_config["version"],
+                    "rubric_version": providers_mod.RUBRIC_CACHE_VERSION,
+                    "quality_mode": quality_mode,
                     "arousal_source": arousal_source,
                     "visual_pass": supports_vision,
                 },
@@ -983,7 +1549,14 @@ class ScoreStage(Stage):
             else:
                 entry["music"] = None
 
+        ranking_layer_diagnostics = ranking_diagnostics(scored, constants=cv_constants)
         finalists.sort(key=lambda e: (float(e.get("recommendation_score", 0.0)), -float(e.get("start", 0.0))), reverse=True)
+        finalists = apply_output_preference(
+            finalists,
+            output_preference,
+            borderline_for_more,
+            int(budget["finalist_limit"]),
+        )
         for entry in finalists:
             entry.pop("transcript", None)  # bulky; review UI re-slices from diarize
 
@@ -1012,25 +1585,55 @@ class ScoreStage(Stage):
             best_candidate=best_candidate,
         )
 
+        actual_model = getattr(client, "actual_model", client.model)
+        effective_profile = getattr(client, "profile", profile)
+        effective_capabilities = effective_profile.capabilities.to_dict()
+        structured_level_reader = getattr(client, "structured_level", None)
+        structured_output_mode = (
+            structured_level_reader()
+            if callable(structured_level_reader)
+            else getattr(getattr(client, "last_result", None), "structured_level", None)
+        )
+        provider_metadata = dict(getattr(ctx.settings, "provider_metadata", {}) or {})
+        provider_metadata.update({
+            "requested_model": requested_model,
+            "actual_model": actual_model,
+            "structured_output_mode": structured_output_mode,
+            "rubric_version": providers_mod.RUBRIC_CACHE_VERSION,
+            "scoring_constants_version": scoring_config["version"],
+        })
+        if hasattr(ctx.settings, "provider_profile_id"):
+            ctx.settings.provider_profile_id = effective_profile.id
+        if hasattr(ctx.settings, "provider_kind"):
+            ctx.settings.provider_kind = effective_profile.kind
+        if hasattr(ctx.settings, "provider_model"):
+            ctx.settings.provider_model = requested_model
+        if hasattr(ctx.settings, "provider_endpoint_identity"):
+            ctx.settings.provider_endpoint_identity = effective_profile.endpoint_identity
+        if hasattr(ctx.settings, "provider_capabilities"):
+            ctx.settings.provider_capabilities = effective_capabilities
+        if hasattr(ctx.settings, "provider_metadata"):
+            ctx.settings.provider_metadata = provider_metadata
+        settings_snapshot = getattr(ctx.settings, "to_json", None)
+        if callable(settings_snapshot):
+            _atomic_write_json(ctx.job_dir / "settings.json", settings_snapshot())
+
         return {
             **outcome,
             "llm_mode": llm_mode,
-            "provider_profile_id": profile.id,
-            "provider_kind": profile.kind,
-            "model": client.model,
-            "capabilities": profile.capabilities.to_dict(),
+            "provider_profile_id": effective_profile.id,
+            "provider_kind": effective_profile.kind,
+            "model": actual_model,
+            "requested_model": requested_model,
+            "actual_model": actual_model,
+            "quality_mode": quality_mode,
+            "output_preference": output_preference,
+            "rubric_version": providers_mod.RUBRIC_CACHE_VERSION,
+            "capabilities": effective_capabilities,
             "clips": finalists,
+            "ranking_diagnostics": ranking_layer_diagnostics,
             "rejected_candidates": rejected,
-            "borderline_candidates": [
-                {
-                    "start": entry["start"],
-                    "end": entry["end"],
-                    "recommendation_score": entry["recommendation_score"],
-                    "reasons": ["STRONG_RECOMMENDATION_REQUIRED"],
-                    "quality": quality_audit(entry["short_quality"]),
-                }
-                for entry in borderline
-            ],
+            "borderline_candidates": [other_moment_record(entry) for entry in borderline],
             "strong_recommendation_count": len(strong),
             "good_recommendation_count": len(good),
             "scored_count": len(scored),

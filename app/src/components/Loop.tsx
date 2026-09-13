@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { api } from '../api'
 import type { LoopClip, LoopLinked, LoopOverview, LoopUnlinked } from '../types'
 import IgModal from './IgModal'
+import { validateInstagramActionResult, validateLoopOverview, validateSyncSummary } from '../loopValidation'
+import { friendlyErrorMessage } from '../errorMessaging'
 
 /**
  * The Loop — predicted score vs what Instagram actually did.
@@ -147,13 +149,28 @@ export default function Loop({ onBack }: Props) {
   const [showConnect, setShowConnect] = useState(false)
   const [showChangelog, setShowChangelog] = useState(false)
   const [pickerFor, setPickerFor] = useState<LoopUnlinked | null>(null)
+  const overviewRequestRef = useRef(0)
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   const refresh = useCallback(async () => {
+    const requestId = ++overviewRequestRef.current
     try {
-      setOverview(await api.igOverview())
+      const next = await api.igOverview()
+      if (!mountedRef.current || requestId !== overviewRequestRef.current) return
+      if (!validateLoopOverview(next)) {
+        setLoadError('Instagram feedback data is malformed. Restart ClipGauge and retry.')
+        return
+      }
+      setOverview(next)
       setLoadError(null)
     } catch (err) {
-      setLoadError(String(err))
+      if (!mountedRef.current || requestId !== overviewRequestRef.current) return
+      setLoadError(friendlyErrorMessage(err, 'Instagram feedback data is unavailable. Retry the connection check.'))
     }
   }, [])
 
@@ -162,6 +179,8 @@ export default function Loop({ onBack }: Props) {
     setSyncNote(null)
     try {
       const summary = await api.igSync()
+      if (!mountedRef.current) return
+      if (!validateSyncSummary(summary)) throw new Error('Instagram sync response is malformed. Restart ClipGauge and retry.')
       if (!summary.ok) {
         setSyncNote(summary.error === 'not_connected' ? null : `sync failed: ${summary.error}`)
       } else {
@@ -173,10 +192,12 @@ export default function Loop({ onBack }: Props) {
         setSyncNote(bits.length ? bits.join(' · ') : 'up to date')
       }
     } catch (err) {
-      setSyncNote(`sync failed: ${err}`)
+      if (mountedRef.current) setSyncNote(friendlyErrorMessage(err, 'Instagram sync could not complete. Retry the sync.'))
     } finally {
-      setSyncing(false)
-      refresh()
+      if (mountedRef.current) {
+        setSyncing(false)
+        void refresh()
+      }
     }
   }, [refresh])
 
@@ -196,11 +217,15 @@ export default function Loop({ onBack }: Props) {
     async (jobId: string, clip: number, mediaId: string, source: 'manual' | 'match_confirmed') => {
       setBusy(mediaId)
       try {
-        await api.igLink(jobId, clip, mediaId, source)
+        const result = await api.igLink(jobId, clip, mediaId, source)
+        if (!mountedRef.current) return
+        if (!validateInstagramActionResult(result) || !result.ok) throw new Error('Instagram link was not saved. Retry the action.')
         setPickerFor(null)
         await refresh()
+      } catch (error) {
+        if (mountedRef.current) setLoadError(friendlyErrorMessage(error, 'This clip could not be linked. Retry the action.'))
       } finally {
-        setBusy(null)
+        if (mountedRef.current) setBusy(null)
       }
     },
     [refresh]
@@ -210,10 +235,14 @@ export default function Loop({ onBack }: Props) {
     async (mediaId: string, jobId: string, clip: number) => {
       setBusy(mediaId)
       try {
-        await api.igReject(mediaId, jobId, clip)
+        const result = await api.igReject(mediaId, jobId, clip)
+        if (!mountedRef.current) return
+        if (!validateInstagramActionResult(result) || !result.ok) throw new Error('Instagram match was not rejected. Retry the action.')
         await refresh()
+      } catch (error) {
+        if (mountedRef.current) setLoadError(friendlyErrorMessage(error, 'This match could not be rejected. Retry the action.'))
       } finally {
-        setBusy(null)
+        if (mountedRef.current) setBusy(null)
       }
     },
     [refresh]
@@ -223,14 +252,26 @@ export default function Loop({ onBack }: Props) {
     async (mediaId: string) => {
       setBusy(mediaId)
       try {
-        await api.igUnlink(mediaId)
+        const result = await api.igUnlink(mediaId)
+        if (!mountedRef.current) return
+        if (!validateInstagramActionResult(result) || !result.ok) throw new Error('Instagram link was not removed. Retry the action.')
         await refresh()
+      } catch (error) {
+        if (mountedRef.current) setLoadError(friendlyErrorMessage(error, 'This clip could not be unlinked. Retry the action.'))
       } finally {
-        setBusy(null)
+        if (mountedRef.current) setBusy(null)
       }
     },
     [refresh]
   )
+
+  const openInstagram = useCallback(async (permalink: string) => {
+    try {
+      await openUrl(permalink)
+    } catch (error) {
+      if (mountedRef.current) setLoadError(friendlyErrorMessage(error, 'Instagram could not open. Retry the action.'))
+    }
+  }, [])
 
   const calib = overview?.calibration
   const activeConstants = calib?.active.constants ?? {}
@@ -415,7 +456,7 @@ export default function Loop({ onBack }: Props) {
                     <p className="mono loop-dim">{fmtDate(media.posted_at)}</p>
                     <p className="loop-caption">{media.caption || '(no caption)'}</p>
                     {media.permalink && (
-                      <button className="btn-ghost" onClick={() => openUrl(media.permalink!)}>
+                      <button className="btn-ghost" aria-label="Open Instagram post" onClick={() => void openInstagram(media.permalink!)}>
                         open ↗
                       </button>
                     )}
@@ -441,6 +482,7 @@ export default function Loop({ onBack }: Props) {
                     <div className="loop-suggest-actions">
                       <button
                         className="btn-secondary"
+                        aria-label="Confirm suggested clip"
                         disabled={busy === media.media_id}
                         onClick={() =>
                           link(
@@ -455,6 +497,7 @@ export default function Loop({ onBack }: Props) {
                       </button>
                       <button
                         className="btn-ghost"
+                        aria-label="Reject suggested clip"
                         disabled={busy === media.media_id}
                         onClick={() =>
                           reject(media.media_id, media.suggestion!.job_id, media.suggestion!.clip_index)
@@ -465,7 +508,7 @@ export default function Loop({ onBack }: Props) {
                     </div>
                   </div>
                 ) : (
-                  <button className="btn-secondary" onClick={() => setPickerFor(media)}>
+                  <button type="button" className="btn-secondary" aria-label="Link reel to a clip" onClick={() => setPickerFor(media)}>
                     link a clip…
                   </button>
                 )}
@@ -555,11 +598,12 @@ export default function Loop({ onBack }: Props) {
                     <span className="led led-on" />
                   )}
                   {row.permalink && (
-                    <button className="btn-ghost" onClick={() => openUrl(row.permalink!)}>↗</button>
+                    <button className="btn-ghost" aria-label="Open linked Instagram post" onClick={() => void openInstagram(row.permalink!)}>↗</button>
                   )}
                   {row.media_id && (
                     <button
                       className="btn-ghost"
+                      aria-label="Unlink Instagram reel"
                       title="unlink"
                       disabled={busy === row.media_id}
                       onClick={() => unlink(row.media_id!)}

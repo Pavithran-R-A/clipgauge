@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import json
+import os
+import tempfile
 import traceback
 import uuid
 from dataclasses import dataclass
@@ -59,13 +61,35 @@ def _redact_json(value: Any) -> Any:
     return value
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def write_json_diagnostic(job_dir: Path, stage: str, payload: dict[str, Any]) -> str:
     """Persist a bounded JSON diagnostic that already contains no secrets."""
     identifier = diagnostic_id()
     directory = job_dir / "diagnostics"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{identifier}.json"
-    path.write_text(json.dumps({"stage": stage, "diagnostic": _redact_json(payload)}, indent=2, sort_keys=True), encoding="utf-8")
+    _atomic_write_text(path, json.dumps({"stage": stage, "diagnostic": _redact_json(payload)}, indent=2, sort_keys=True))
     try:
         path.chmod(0o600)
     except OSError:
@@ -81,7 +105,7 @@ def write_diagnostic(job_dir: Path, stage: str, exc: BaseException) -> str:
     trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     payload = redact_text(trace)[-64_000:]
     path = directory / f"{identifier}.log"
-    path.write_text(f"stage={stage}\n{payload}", encoding="utf-8")
+    _atomic_write_text(path, f"stage={stage}\n{payload}")
     try:
         path.chmod(0o600)
     except OSError:

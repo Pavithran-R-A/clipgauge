@@ -26,8 +26,17 @@ _TOPIC_STOPWORDS = {
     "really", "very", "way", "people", "look", "looks", "looking",
 }
 _PUNCTUATION = (".", "!", "?")
+_EXPLICIT_OUTCOME_CONTEXT = re.compile(
+    r"\b(?:let me|allowed me|managed to|ended up|turned out|touch(?:ed|ing)?|landed)\b",
+    re.IGNORECASE,
+)
 _FRAGMENT_FUNCTION_WORDS = {"and", "because", "but", "here", "or", "so", "these", "then", "to", "with"}
 _GRAMMATICAL_TERMINAL_MARKERS = {"my", "our", "his", "her", "its", "their", "your", "than"}
+_SETUP_CONTEXT_MARKERS = {
+    "before", "challenge", "challenging", "crash", "crashed", "danger",
+    "failed", "failure", "first", "finally", "hard", "risk", "simulator",
+    "training", "try", "tried", "trying", "every",
+}
 _STORY_SCORES = {
     "hook_setup_payoff": 92.0,
     "question_answer": 86.0,
@@ -36,6 +45,7 @@ _STORY_SCORES = {
     "open_ended": 42.0,
     "none": 24.0,
 }
+MAX_PAYOFF_REACTION_TAIL_SECONDS = 12.0
 
 
 def _words(text: str) -> list[str]:
@@ -166,6 +176,27 @@ def _llm_score(fields: dict[str, Any], name: str, fallback: float) -> float:
     return _clamp(float(value) * 10.0) if isinstance(value, (int, float)) else fallback
 
 
+def _verified_candidate_payoff(text: str, candidate_evidence: dict[str, Any]) -> bool:
+    """Trust explicit payoff metadata only when its words are present."""
+    if not candidate_evidence.get("payoff_candidate"):
+        return False
+    if not candidate_evidence.get("payoff_boundary_explicit"):
+        return False
+    if not candidate_evidence.get("payoff_time"):
+        return False
+    phrase = " ".join(_words(str(candidate_evidence.get("payoff_sentence") or "")))
+    transcript = " ".join(_words(text))
+    return len(phrase.split()) >= 3 and phrase in transcript
+
+
+def _verified_candidate_hook(text: str, candidate_evidence: dict[str, Any]) -> bool:
+    """Recognize a candidate opening only at transcript start."""
+    phrase = _words(str(candidate_evidence.get("hook_sentence") or ""))
+    transcript = _words(text)
+    generic_reaction = set(phrase) <= _GENERIC_REACTION_WORDS
+    return len(phrase) >= 2 and not generic_reaction and transcript[: len(phrase)] == phrase
+
+
 def _visual_evidence(events: list[dict[str, Any]]) -> float:
     """Score actual visual changes, not merely event-type cardinality."""
     scene_cuts = sum(1 for event in events if event.get("type") in {"scene_cut", "shot_change"})
@@ -273,6 +304,7 @@ def assess(
     llm: dict[str, Any] | None = None,
     segment_boundary: bool = False,
     ending_evidence: dict[str, Any] | None = None,
+    candidate_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Combine deterministic evidence with fields from the existing T1 call."""
     evidence = _deterministic(
@@ -283,6 +315,9 @@ def assess(
         ending_evidence=ending_evidence,
     )
     fields = llm or {}
+    candidate_evidence = candidate_evidence or {}
+    verified_candidate_payoff = _verified_candidate_payoff(text, candidate_evidence)
+    verified_candidate_hook = _verified_candidate_hook(text, candidate_evidence)
     deterministic_hook = evidence["hook"]
     rubric_hook = None
     rubric_value = fields.get("hook", fields.get("rubric_hook_0_10", fields.get("rubric_hook")))
@@ -295,6 +330,11 @@ def assess(
     effective_hook, hook_disagreement = _effective_hook(
         rubric_hook, structured_hook, deterministic_hook
     )
+    if verified_candidate_hook:
+        hook_strength = _clamp(float(candidate_evidence.get("hook_strength") or 0.0), 0.0, 1.0)
+        boundary_strength = _clamp(float(candidate_evidence.get("start_topic_boundary") or 0.0), 0.0, 1.0)
+        candidate_hook_floor = min(65.0, 32.0 + hook_strength * 24.0 + boundary_strength * 8.0)
+        effective_hook = max(effective_hook, candidate_hook_floor)
     hook = effective_hook
     if fields:
         hook = effective_hook
@@ -304,6 +344,8 @@ def assess(
     payoff = evidence["payoff"]
     ending = evidence["ending"]
     reaction = evidence["reaction"]
+    if verified_candidate_payoff:
+        payoff = max(payoff, 62.0)
     if fields:
         standalone = 0.35 * standalone + 0.65 * _llm_score(fields, "standalone_comprehension", standalone)
         setup = 0.35 * setup + 0.65 * _llm_score(fields, "setup_strength", setup)
@@ -312,6 +354,8 @@ def assess(
         payoff = 0.45 * payoff + 0.55 * payoff_llm if evidence["has_reveal"] or evidence["has_reaction"] else payoff_llm
         ending = 0.45 * ending + 0.55 * _llm_score(fields, "ending_completeness", ending)
         reaction = 0.4 * reaction + 0.6 * _llm_score(fields, "reaction_strength", reaction)
+        if verified_candidate_payoff:
+            payoff = max(payoff, 62.0)
     story_name = str(fields.get("story_shape") or "none")
     story_shape = _STORY_SCORES.get(story_name, evidence["story_shape"]) if fields.get("story_shape") else evidence["story_shape"]
     language_neutral = evidence["language_signal_mode"] == "neutral_non_english"
@@ -329,7 +373,7 @@ def assess(
     story_consistency_reason = ""
     if story_name in requirements:
         requirement, check = requirements[story_name]
-        story_consistent = bool(check())
+        story_consistent = bool(check()) or verified_candidate_payoff
         if not story_consistent:
             story_consistency_reason = f"{story_name} requires {requirement}."
     topic = _topic_metrics(text, fields)
@@ -337,10 +381,19 @@ def assess(
         str(text).rstrip().endswith(_PUNCTUATION)
         or (ending_evidence or {}).get("semantic_complete", False)
     )
-    open_loop_at_end = bool(
-        str(text).rstrip().endswith("?")
-        or story_name == "open_ended"
+    model_open_loop = fields.get("open_loop_at_end")
+    verified_payoff_closure = bool(
+        candidate_evidence.get("payoff_candidate")
+        and candidate_evidence.get("payoff_time") is not None
+        and segment_boundary
+        and payoff >= 45.0
     )
+    if verified_payoff_closure:
+        open_loop_at_end = False
+    elif isinstance(model_open_loop, bool):
+        open_loop_at_end = model_open_loop
+    else:
+        open_loop_at_end = bool(str(text).rstrip().endswith("?") or story_name == "open_ended")
     semantic_closure = 82.0 if syntactic_complete else 35.0
     if open_loop_at_end:
         semantic_closure -= 35.0
@@ -358,8 +411,10 @@ def assess(
             or isinstance(llm_relevance, (int, float)) and float(llm_relevance) < 5.0
         )
     )
-    if isinstance(llm_semantic, (int, float)) and not rich_scores_conflict:
+    if isinstance(llm_semantic, (int, float)) and not rich_scores_conflict and not verified_payoff_closure:
         semantic_closure = min(semantic_closure, _clamp(float(llm_semantic), 0.0, 10.0) * 10.0)
+    if verified_candidate_payoff and not topic["late_new_topic"] and topic["topic_shift_count"] < 2:
+        semantic_closure = max(semantic_closure, 70.0)
     semantic_closure = round(_clamp(semantic_closure), 1)
     payoff_relevance = 100.0
     if topic["late_new_topic"]:
@@ -368,6 +423,8 @@ def assess(
         payoff_relevance -= min(45.0, topic["topic_shift_count"] * 20.0)
     if isinstance(llm_relevance, (int, float)) and not rich_scores_conflict:
         payoff_relevance = min(payoff_relevance, _clamp(float(llm_relevance), 0.0, 10.0) * 10.0)
+    if verified_candidate_payoff and not topic["late_new_topic"] and topic["topic_shift_count"] < 2:
+        payoff_relevance = max(payoff_relevance, 65.0)
     payoff_relevance = round(_clamp(payoff_relevance), 1)
     quality_flags: list[str] = []
     if evidence["generic_opening"]:
@@ -427,6 +484,7 @@ def assess(
         "deterministic_hook_0_100": round(_clamp(deterministic_hook), 1),
         "retention_hook_0_100": round(_clamp(deterministic_hook), 1),
         "effective_hook_0_100": round(_clamp(effective_hook), 1),
+        "candidate_hook_verified": verified_candidate_hook,
         "hook_disagreement": bool(hook_disagreement),
         "hook_reason": str(fields.get("hook_reason") or evidence["hook_reason"]),
         "standalone": round(_clamp(standalone), 1),
@@ -448,6 +506,7 @@ def assess(
         "topic_shift_count": topic["topic_shift_count"],
         "late_new_topic": topic["late_new_topic"],
         "payoff_relevance_to_premise": payoff_relevance,
+        "candidate_payoff_verified": verified_candidate_payoff,
         "ending_evidence": {
             "punctuated": bool(
                 (ending_evidence or {}).get(
@@ -537,6 +596,16 @@ def smart_boundaries(
     return round(float(words[first]["start"]), 3), round(float(words[last]["end"]), 3)
 
 
+def _is_context_setup_segment(segment: dict[str, Any]) -> bool:
+    """Recognize bounded, explicit setup evidence before a strong payoff."""
+    tokens = set(_words(str(segment.get("text", ""))))
+    return bool(tokens & _SETUP_CONTEXT_MARKERS)
+
+
+def _is_explicit_outcome_context(segment: dict[str, Any]) -> bool:
+    return bool(_EXPLICIT_OUTCOME_CONTEXT.search(str(segment.get("text", ""))))
+
+
 def refine_boundaries(
     segments: list[dict[str, Any]],
     start: float,
@@ -544,8 +613,12 @@ def refine_boundaries(
     fields: dict[str, Any] | None = None,
     *,
     max_extension: float = 7.0,
+    preserve_candidate_opening: bool = False,
+    preserve_candidate_payoff: bool = False,
+    payoff_time: float | None = None,
+    preserve_candidate_end: bool = False,
 ) -> tuple[float, float]:
-    """Apply bounded T1 offsets, then snap against aligned words."""
+    """Apply bounded T1 offsets, preserving trusted candidate evidence."""
     words = [
         word for segment in segments
         for word in segment.get("words", [])
@@ -555,6 +628,7 @@ def refine_boundaries(
         return round(start, 3), round(end, 3)
     requested_start = start
     requested_end = end
+    payoff_tail_capped = False
     if fields:
         offset_start = fields.get("recommended_start_offset")
         offset_end = fields.get("recommended_end_offset")
@@ -565,7 +639,94 @@ def refine_boundaries(
             requested_end = start + float(offset_end)
         if requested_end <= requested_start:
             requested_start, requested_end = start, end
-    return smart_boundaries(words, requested_start, requested_end, max_extension=max_extension)
+    if preserve_candidate_opening:
+        requested_start = min(requested_start, start)
+        if preserve_candidate_payoff and payoff_time is not None:
+            outcome_context = next(
+                (
+                    segment
+                    for segment in reversed(segments)
+                    if float(segment.get("end", 0.0)) <= start
+                    and start - float(segment.get("end", 0.0)) <= 15.0
+                    and _is_explicit_outcome_context(segment)
+                ),
+                None,
+            )
+            if outcome_context is not None:
+                requested_start = min(
+                    requested_start,
+                    float(outcome_context.get("start", requested_start)),
+                )
+    if preserve_candidate_end:
+        requested_end = max(requested_end, end)
+    elif preserve_candidate_payoff and payoff_time is not None:
+        requested_end = max(requested_end, float(payoff_time))
+        payoff_segment = next(
+            (
+                segment for segment in segments
+                if float(segment.get("start", 0.0)) <= float(payoff_time)
+                <= float(segment.get("end", 0.0))
+            ),
+            None,
+        )
+        if payoff_segment is not None:
+            requested_end = max(
+                requested_end,
+                float(payoff_segment.get("end", requested_end)),
+            )
+    elif preserve_candidate_payoff:
+        requested_end = max(requested_end, end)
+    if (
+        preserve_candidate_payoff
+        and payoff_time is not None
+        and not preserve_candidate_end
+    ):
+        payoff_tail_capped = requested_end > float(payoff_time) + MAX_PAYOFF_REACTION_TAIL_SECONDS
+        requested_end = min(
+            requested_end,
+            float(payoff_time) + MAX_PAYOFF_REACTION_TAIL_SECONDS,
+        )
+    if requested_start > start and fields:
+        setup_strength = float(fields.get("setup_strength", 0.0) or 0.0)
+        standalone = float(fields.get("standalone_comprehension", 0.0) or 0.0)
+        if setup_strength >= 6.0 or standalone >= 7.0:
+            containing = next(
+                (
+                    segment for segment in segments
+                    if float(segment.get("start", 0.0)) <= start < float(segment.get("end", 0.0))
+                ),
+                None,
+            )
+            if containing is not None:
+                # Strong setup evidence makes the model offset advisory. Keep
+                # the complete source sentence that carries the premise.
+                requested_start = min(requested_start, float(containing.get("start", start)))
+    story_shape = str(fields.get("story_shape", "")) if fields else ""
+    payoff_strength = float(fields.get("payoff_strength", 0.0) or 0.0) if fields else 0.0
+    setup_strength = float(fields.get("setup_strength", 0.0) or 0.0) if fields else 0.0
+    standalone = float(fields.get("standalone_comprehension", 0.0) or 0.0) if fields else 0.0
+    if (
+        fields
+        and not preserve_candidate_opening
+        and requested_start <= start
+        and story_shape in {"conflict_reaction", "question_answer", "hook_setup_payoff"}
+        and payoff_strength >= 5.0
+        and max(setup_strength, standalone) >= 5.0
+    ):
+        preceding = sorted(
+            (
+                segment for segment in segments
+                if float(segment.get("end", 0.0)) <= start
+                and start - float(segment.get("end", 0.0)) <= max_extension
+            ),
+            key=lambda segment: float(segment.get("start", 0.0)),
+            reverse=True,
+        )
+        setup_segment = next((segment for segment in preceding if _is_context_setup_segment(segment)), None)
+        if setup_segment is not None:
+            requested_start = min(requested_start, float(setup_segment.get("start", start)))
+    boundary_extension = min(max_extension, 1.5) if payoff_tail_capped else max_extension
+    return smart_boundaries(words, requested_start, requested_end, max_extension=boundary_extension)
 
 
 def rank(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:

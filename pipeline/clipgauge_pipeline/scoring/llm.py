@@ -47,16 +47,16 @@ class GeminiClient(GeminiAdapter):
     def __init__(self, model: str = GEMINI_MODEL):
         super().__init__(legacy_profile("gemini", model), gemini_api_key())
 
-    def cache_file(self, request: InferenceRequest):
-        return _cache_dir() / f"v2-{cache_key(self.profile, request)}.json"
+    def cache_file(self, request: InferenceRequest, *, actual_model: str | None = None):
+        return _cache_dir() / f"v2-{cache_key(self.profile, request, actual_model=actual_model)}.json"
 
 
 class OllamaClient(OllamaAdapter):
     def __init__(self, model: str | None = None):
         super().__init__(legacy_profile("ollama", model or "auto"))
 
-    def cache_file(self, request: InferenceRequest):
-        return _cache_dir() / f"v2-{cache_key(self.profile, request)}.json"
+    def cache_file(self, request: InferenceRequest, *, actual_model: str | None = None):
+        return _cache_dir() / f"v2-{cache_key(self.profile, request, actual_model=actual_model)}.json"
 
 
 def make_client(llm_mode: str | ProviderProfile):

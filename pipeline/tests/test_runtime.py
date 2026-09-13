@@ -10,6 +10,7 @@ import pytest
 
 from clipgauge_pipeline import local_runtime
 from clipgauge_pipeline import runtime
+from clipgauge_pipeline.models import managed
 from clipgauge_pipeline.models import registry
 from clipgauge_pipeline.models import specs  # noqa: F401 - registers concrete specs
 
@@ -87,6 +88,51 @@ def test_interrupted_download_resumes_from_staging_file(tmp_path, monkeypatch):
     assert not part.exists()
 
 
+def test_transient_http_failure_retries_before_failing(tmp_path, monkeypatch):
+    destination = tmp_path / "tool"
+    responses = iter(
+        [
+            FakeResponse([], status_code=504),
+            FakeResponse([b"payload"], headers={"content-length": "7"}),
+        ]
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(runtime.httpx, "stream", lambda *args, **kwargs: next(responses))
+    monkeypatch.setattr(runtime.time, "sleep", sleeps.append)
+
+    installed = runtime.download_verified(
+        "https://example.invalid/tool",
+        destination,
+        expected_sha256=_sha(b"payload"),
+        max_bytes=100,
+    )
+
+    assert installed == destination
+    assert destination.read_bytes() == b"payload"
+    assert sleeps == [1.0]
+
+
+def test_permanent_http_failure_does_not_retry(tmp_path, monkeypatch):
+    destination = tmp_path / "tool"
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        runtime.httpx,
+        "stream",
+        lambda *args, **kwargs: FakeResponse([], status_code=404),
+    )
+    monkeypatch.setattr(runtime.time, "sleep", sleeps.append)
+
+    with pytest.raises(runtime.RuntimeIntegrityError, match="HTTP 404"):
+        runtime.download_verified(
+            "https://example.invalid/tool",
+            destination,
+            expected_sha256=_sha(b"payload"),
+            max_bytes=100,
+        )
+
+    assert sleeps == []
+
+
 def _archive(path: Path, names: list[str]) -> None:
     with zipfile.ZipFile(path, "w") as archive:
         for name in names:
@@ -105,6 +151,107 @@ def test_unexpected_archive_entry_is_rejected(tmp_path):
     _archive(archive, ["bin/tool", "bin/unexpected"])
     with pytest.raises(runtime.RuntimeIntegrityError, match="unexpected"):
         runtime.extract_zip_verified(archive, tmp_path / "out", expected_members={"bin/tool"})
+
+
+def test_duplicate_archive_member_is_rejected(tmp_path):
+    archive = tmp_path / "duplicate.zip"
+    with zipfile.ZipFile(archive, "w") as handle:
+        handle.writestr("bin/tool", b"first")
+        handle.writestr("bin/tool", b"second")
+
+    with pytest.raises(runtime.RuntimeIntegrityError, match="duplicate archive member"):
+        runtime.extract_zip_verified(archive, tmp_path / "out", expected_members={"bin/tool"})
+
+
+def test_duplicate_full_archive_member_is_rejected(tmp_path):
+    archive = tmp_path / "duplicate-full.zip"
+    with zipfile.ZipFile(archive, "w") as handle:
+        handle.writestr("bin/tool", b"first")
+        handle.writestr("bin/tool", b"second")
+
+    with pytest.raises(runtime.RuntimeIntegrityError, match="duplicate archive member"):
+        runtime.extract_archive_verified(archive, tmp_path / "out", archive_type="zip")
+
+
+def test_punkt_archive_duplicate_member_is_rejected(tmp_path, monkeypatch):
+    archive = tmp_path / "punkt-duplicate.zip"
+    with zipfile.ZipFile(archive, "w") as handle:
+        handle.writestr("punkt_tab/english/collocations.tab", b"first")
+        handle.writestr("punkt_tab/english/collocations.tab", b"second")
+    monkeypatch.setattr(managed.config, "nltk_data_dir", lambda: tmp_path / "nltk")
+
+    with pytest.raises(runtime.RuntimeIntegrityError, match="duplicate archive member"):
+        managed._safe_extract_punkt(archive)
+
+
+def test_punkt_install_failure_restores_previous_assets(tmp_path, monkeypatch):
+    archive = tmp_path / "punkt-replacement.zip"
+    with zipfile.ZipFile(archive, "w") as handle:
+        handle.writestr("punkt_tab/english/collocations.tab", b"replacement")
+    target_root = tmp_path / "nltk"
+    destination = target_root / "tokenizers" / "punkt_tab"
+    destination.mkdir(parents=True)
+    (destination / "old.txt").write_bytes(b"known-good")
+    monkeypatch.setattr(managed.config, "nltk_data_dir", lambda: target_root)
+    real_replace = managed.os.replace
+    failed = False
+
+    def fail_new_install(source, target):
+        nonlocal failed
+        if target == destination and not failed:
+            failed = True
+            raise OSError("simulated extraction replacement failure")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(managed.os, "replace", fail_new_install)
+    with pytest.raises(OSError, match="simulated extraction replacement failure"):
+        managed._safe_extract_punkt(archive)
+
+    assert (destination / "old.txt").read_bytes() == b"known-good"
+
+
+def test_silero_archive_duplicate_member_is_rejected(tmp_path, monkeypatch):
+    archive = tmp_path / "silero-duplicate.zip"
+    with zipfile.ZipFile(archive, "w") as handle:
+        handle.writestr("silero-vad/hubconf.py", b"first")
+        handle.writestr("silero-vad/hubconf.py", b"second")
+    target_root = tmp_path / "hub" / "snakers4_silero-vad_master"
+    target_root.parent.mkdir(parents=True)
+    monkeypatch.setattr(managed, "SILERO_HUB_ROOT", target_root)
+
+    with pytest.raises(runtime.RuntimeIntegrityError, match="duplicate archive member"):
+        managed._safe_extract_silero(archive)
+
+
+def test_silero_install_failure_restores_previous_assets(tmp_path, monkeypatch):
+    archive = tmp_path / "silero-replacement.zip"
+    entries = (
+        "silero-vad-root/hubconf.py",
+        "silero-vad-root/src/silero_vad/utils_vad.py",
+        "silero-vad-root/src/silero_vad/data/silero_vad.jit",
+    )
+    with zipfile.ZipFile(archive, "w") as handle:
+        for name in entries:
+            handle.writestr(name, b"replacement")
+    target_root = tmp_path / "hub" / "snakers4_silero-vad_master"
+    target_root.mkdir(parents=True)
+    (target_root / "old.txt").write_bytes(b"known-good")
+    monkeypatch.setattr(managed, "SILERO_HUB_ROOT", target_root)
+    real_replace = managed.os.replace
+    failed = False
+
+    def fail_new_install(source, target):
+        nonlocal failed
+        if target == target_root and not failed:
+            failed = True
+            raise OSError("simulated extraction replacement failure")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(managed.os, "replace", fail_new_install)
+    with pytest.raises(OSError, match="simulated extraction replacement failure"):
+        managed._safe_extract_silero(archive)
+
+    assert (target_root / "old.txt").read_bytes() == b"known-good"
 
 
 def test_manifest_and_registry_have_concrete_model_hashes():
@@ -300,6 +447,31 @@ def test_local_runtime_inference_probe_rejects_empty_reply(monkeypatch, tmp_path
     assert result["reason"] == "Local inference returned an invalid response."
 
 
+def test_local_runtime_avoids_configured_port_when_already_bound(monkeypatch, tmp_path):
+    instance = local_runtime.LocalRuntime(root=tmp_path, manifest={})
+    binds = []
+
+    class Socket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def bind(self, address):
+            binds.append(address)
+            if address[1] == 8080:
+                raise OSError("address already in use")
+
+        def getsockname(self):
+            return ("127.0.0.1", 19001)
+
+    monkeypatch.setattr(local_runtime.socket, "socket", lambda *args, **kwargs: Socket())
+
+    assert instance._port("http://127.0.0.1:8080/v1") == 19001
+    assert binds == [("127.0.0.1", 8080), ("127.0.0.1", 0)]
+
+
 def test_extracted_runtime_stays_ready_after_archive_cache_is_removed(monkeypatch, tmp_path):
     manifest = {
         "runtimes": {
@@ -378,6 +550,44 @@ def test_local_runtime_uses_new_process_group_on_windows(monkeypatch, tmp_path):
     assert instance.start("qwen") == "http://127.0.0.1:18089/v1"
     assert popen_kwargs["creationflags"] == 512
     assert "start_new_session" not in popen_kwargs
+
+
+def test_local_runtime_stops_process_when_inference_probe_raises(monkeypatch, tmp_path):
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"verified-model")
+    instance = local_runtime.LocalRuntime(root=tmp_path, manifest={})
+    monkeypatch.setattr(instance, "command", lambda _model_id, _port: ["llama-server"])
+    monkeypatch.setattr(instance, "model_path", lambda _model_id: model)
+    monkeypatch.setattr(instance, "runtime_backend", lambda: "cpu")
+    monkeypatch.setattr(instance, "runtime_asset_key", lambda: "windows-x86_64")
+    monkeypatch.setattr(instance, "_port", lambda _endpoint=None: 18089)
+
+    class DummyProcess:
+        pid = 1234
+
+        @staticmethod
+        def poll():
+            return None
+
+    process = DummyProcess()
+    monkeypatch.setattr(local_runtime.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return []
+
+    monkeypatch.setattr(local_runtime.httpx, "get", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(instance, "probe_inference", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("probe crashed")))
+    stopped = []
+    monkeypatch.setattr(instance, "stop_process", lambda value: stopped.append(value))
+
+    with pytest.raises(RuntimeError, match="probe crashed"):
+        instance.start("qwen")
+
+    assert stopped == [process]
 
 
 def test_valid_staged_archive_installation(tmp_path):

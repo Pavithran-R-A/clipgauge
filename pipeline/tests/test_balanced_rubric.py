@@ -1,7 +1,7 @@
 import pytest
 
 from clipgauge_pipeline.scoring import rubric, short_quality
-from clipgauge_pipeline.scoring.stage import _transcript_slice
+from clipgauge_pipeline.scoring.stage import _scoring_context, _transcript_slice
 
 
 def test_balanced_schema_requires_editorial_fields():
@@ -43,6 +43,15 @@ def test_balanced_output_normalizes_no_payoff_sentinel():
     assert normalized["payoff_sentence_id"] is None
 
 
+def test_balanced_output_drops_unknown_payoff_identity_for_scoring():
+    payload = {field: None for field in rubric.BALANCED_REQUIRED_FIELDS}
+    payload.update({"payoff_sentence_id": "S9999", "quality_tier": "GOOD"})
+
+    normalized = rubric.normalize_balanced_output(payload, {"S0001"})
+
+    assert normalized["payoff_sentence_id"] is None
+
+
 def test_sentence_ids_are_opt_in_for_balanced_prompts():
     segments = [{"start": 0.0, "end": 2.0, "speaker": 0, "words": [
         {"start": 0.0, "end": 0.5, "word": "Hello"},
@@ -60,6 +69,49 @@ def test_balanced_prompt_calibrates_rich_editorial_scores():
 
     assert "Use 0 only when" in prompt
     assert "quality_tier must agree" in prompt
+
+
+def test_balanced_prompt_exposes_verifiable_story_hints():
+    prompt = rubric.t1_prompt(
+        "S0001 (speaker 0): The result is finally revealed.",
+        {
+            "duration": 12,
+            "candidate_evidence": {
+                "hook_sentence": "Why did this happen?",
+                "payoff_sentence": "The result is finally revealed.",
+                "story_shape": "question_answer",
+            },
+        },
+    )
+
+    assert "algorithmic hints" in prompt.lower()
+    assert "Why did this happen?" in prompt
+    assert "The result is finally revealed." in prompt
+    assert "verify against the transcript" in prompt.lower()
+
+
+def test_scoring_context_preserves_hints_for_fallback_rounds():
+    context = _scoring_context(
+        {
+            "hook_sentence": "The opening question.",
+            "payoff_sentence": "The final answer.",
+            "story_shape": "question_answer",
+            "central_premise": "A challenge is resolved.",
+        },
+        42.0,
+        "laugh at 12s",
+    )
+
+    assert context == {
+        "duration": 42.0,
+        "events_desc": "laugh at 12s",
+        "candidate_evidence": {
+            "hook_sentence": "The opening question.",
+            "payoff_sentence": "The final answer.",
+            "story_shape": "question_answer",
+            "central_premise": "A challenge is resolved.",
+        },
+    }
 
 
 def test_contradictory_balanced_scores_use_independent_floor():

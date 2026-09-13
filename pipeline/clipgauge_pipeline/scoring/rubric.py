@@ -16,6 +16,7 @@ against real outcomes (the M6 feedback loop exists to tune them).
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 # --- T1 structured-output schema (Gemini responseSchema / Ollama format) ---
@@ -138,11 +139,19 @@ def schema_for_model(model_id: str) -> dict[str, Any]:
     return BALANCED_T1_SCHEMA if model_id == "clipgauge-local/qwen3-4b-q4_k_m" else T1_SCHEMA
 
 
-def normalize_balanced_output(payload: dict[str, Any]) -> dict[str, Any]:
-    """Normalize the model's explicit no-payoff sentinel without mutation."""
+def normalize_balanced_output(
+    payload: dict[str, Any], allowed_sentence_ids: set[str] | None = None
+) -> dict[str, Any]:
+    """Normalize untrusted payoff identities without mutating payload."""
     normalized = dict(payload)
     payoff_id = normalized.get("payoff_sentence_id")
-    if isinstance(payoff_id, str) and payoff_id.strip().lower() in {"", "none", "null"}:
+    is_null_payoff = isinstance(payoff_id, str) and payoff_id.strip().lower() in {"", "none", "null"}
+    is_unlisted_payoff = (
+        allowed_sentence_ids is not None
+        and payoff_id is not None
+        and str(payoff_id) not in allowed_sentence_ids
+    )
+    if is_null_payoff or is_unlisted_payoff:
         normalized["payoff_sentence_id"] = None
     return normalized
 
@@ -175,11 +184,34 @@ def t1_prompt(transcript_text: str, context: dict) -> str:
     numbers it will later be checked against. Judge and evidence stay
     independent; that's what makes the cross-validation meaningful."""
     events_desc = context.get("events_desc", "none detected")
+    candidate_evidence = context.get("candidate_evidence")
+    hint_lines: list[str] = []
+    if isinstance(candidate_evidence, dict):
+        for label, key in (
+            ("detected opening", "hook_sentence"),
+            ("detected payoff", "payoff_sentence"),
+            ("detected story shape", "story_shape"),
+            ("detected premise", "central_premise"),
+        ):
+            value = candidate_evidence.get(key)
+            if value is None or not str(value).strip():
+                continue
+            compact = " ".join(str(value).split())[:400]
+            hint_lines.append(f"- {label}: {compact}")
+    hints = ""
+    if hint_lines:
+        hints = (
+            "\nAlgorithmic hints are not ground truth. "
+            "Verify against the transcript before using them.\n"
+            + "\n".join(hint_lines)
+            + "\n"
+        )
     return (
         "You are rating a candidate short-form clip cut from a longer video. "
         "Rate ONLY what is in this transcript — do not assume missing context makes it better.\n\n"
         f"Speakers and transcript ({context.get('duration', 0):.0f} seconds):\n"
         f"{transcript_text}\n\n"
+        f"{hints}"
         f"Audio events detected in this span: {events_desc}\n\n"
         "Score each dimension honestly. Most clips are mediocre; 8+ on any "
         "dimension should be rare. hook rates ONLY the first ~3 seconds. "
@@ -197,6 +229,9 @@ def t1_prompt(transcript_text: str, context: dict) -> str:
         "Use 0 only when a dimension is genuinely absent. "
         "Use the supplied sentence ID for a visible payoff. "
         "Set payoff_sentence_id to null when no payoff exists. "
+        "Do not label ordinary dialogue, rhetorical questions, or in-world "
+        "requests as bait. Only include an exact viewer-directed call to action "
+        "such as subscribe, comment below, or like this video. "
         "quality_tier must agree with the numeric fields. "
         "Treat a final question or newly introduced topic as weak semantic "
         "closure, even when grammatically complete."
@@ -213,15 +248,89 @@ FUNNY_CORROBORATED = 1.25   # laughter confirmed by 2+ independent detectors
 SHOCK_NO_AROUSAL = 0.6      # LLM says shocking, flat arousal + no heatmap lift
 HEATMAP_BOOST = 1.15        # real humans replayed this span (≥ p80)
 BAIT_PENALTY = 0.85         # per detected bait phrase, floor 0.6 (not fitted)
+_BAIT_PATTERNS = (
+    re.compile(r"\b(?:like|follow|share)\s+(?:this|that|the|my|it)\b"),
+    re.compile(r"\bcomment\s+(?:below|your|with|if)\b"),
+    re.compile(r"\bsubscribe(?:\s+(?:to|for|if|and))?\b"),
+    re.compile(r"\bfollow\s+(?:me|us|for|on)\b"),
+    re.compile(r"\b(?:smash|hit|press|tap|click|give)\b.{0,24}\blike\b"),
+    re.compile(r"\bhit\s+(?:the|that)\s+(?:bell|like)\b"),
+)
 
 
 def _c(constants: dict | None, key: str, default: float) -> float:
     return float(constants[key]) if constants and key in constants else default
 
 
+def _normalize_bait_text(value: str) -> str:
+    return " ".join(re.findall(r"[\w']+", str(value).casefold()))
+
+
+def _bait_context_is_viewer_directed(phrase: str, transcript: str) -> bool:
+    """Reject story dialogue that merely contains a bait-shaped phrase."""
+    phrase_tokens = _normalize_bait_text(phrase).split()
+    if not phrase_tokens:
+        return False
+    generic_verbs = {"like", "share", "follow"}
+    if phrase_tokens[0] not in generic_verbs:
+        return True
+    sentences = re.split(r"[.!?]+", str(transcript).casefold())
+    for sentence in sentences:
+        words = _normalize_bait_text(sentence).split()
+        width = len(phrase_tokens)
+        for index in range(max(0, len(words) - width + 1)):
+            if words[index : index + width] != phrase_tokens:
+                continue
+            prefix = words[:index]
+            suffix = words[index + width :]
+            if phrase_tokens[0] in {"like", "share"} and prefix:
+                if prefix[-1] in {"i", "we", "he", "she", "they", "you"}:
+                    return False
+                if prefix[-1] in {"should", "could", "would", "might", "can"}:
+                    return False
+            return not (
+                phrase_tokens[0] == "follow"
+                and suffix
+                and suffix[0] in {"to", "through", "into", "down", "around", "over"}
+            )
+    return False
+
+
+def verify_bait_phrases(reported: object, transcript: str) -> dict[str, Any]:
+    """Verify bait-shaped model claims against supplied dialogue."""
+    phrases = [str(value).strip() for value in reported or [] if str(value).strip()]
+    normalized_transcript = _normalize_bait_text(transcript)
+    bait_shaped = [
+        phrase for phrase in phrases
+        if any(pattern.search(_normalize_bait_text(phrase)) for pattern in _BAIT_PATTERNS)
+    ]
+    verified: list[str] = []
+    rejected: list[dict[str, str]] = []
+    for phrase in phrases:
+        normalized_phrase = _normalize_bait_text(phrase)
+        if not normalized_phrase:
+            rejected.append({"phrase": phrase, "reason": "empty_phrase"})
+        elif not re.search(rf"(?<!\w){re.escape(normalized_phrase)}(?!\w)", normalized_transcript):
+            rejected.append({"phrase": phrase, "reason": "not_in_transcript"})
+        elif (
+            not any(pattern.search(normalized_phrase) for pattern in _BAIT_PATTERNS)
+            or not _bait_context_is_viewer_directed(phrase, transcript)
+        ):
+            rejected.append({"phrase": phrase, "reason": "not_viewer_directed"})
+        else:
+            verified.append(phrase)
+    return {
+        "model_reported_bait": bait_shaped,
+        "ignored_model_reports": [phrase for phrase in phrases if phrase not in bait_shaped],
+        "verified_bait": verified,
+        "rejected_bait": rejected,
+    }
+
+
 def cross_validate(
     t1: dict,
     *,
+    transcript: str = "",
     laughs_near: list[dict],
     arousal_pct: float,
     heatmap_pct: float | None,
@@ -269,7 +378,16 @@ def cross_validate(
             }
         )
 
-    bait = t1.get("bait_phrases") or []
+    bait_verification = verify_bait_phrases(t1.get("bait_phrases"), transcript)
+    bait = bait_verification["verified_bait"]
+    if bait_verification["model_reported_bait"] or bait_verification["rejected_bait"]:
+        adjustments.append(
+            {
+                "rule": "bait_verification",
+                "factor": 1.0,
+                **bait_verification,
+            }
+        )
     if bait:
         factor = max(0.6, BAIT_PENALTY ** len(bait))
         for k in sub:
@@ -319,8 +437,8 @@ def composite(
         platform_scores[platform] = score
 
     if heatmap_pct is not None and heatmap_pct >= 0.8:
-        for platform in platform_scores:
-            platform_scores[platform] = min(1.0, platform_scores[platform] * heatmap_boost)
+        for platform, score in platform_scores.items():
+            platform_scores[platform] = min(1.0, score * heatmap_boost)
         adjustments.append(
             {
                 "rule": "heatmap_boost",

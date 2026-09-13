@@ -17,7 +17,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from . import __version__, config, downloads, environment, local_runtime, protocol, readiness, runtime, setup_models, storage
+from . import __version__, config, downloads, environment, local_runtime, protocol, readiness, runtime, setup_models, storage, storage_estimate
 from .jobs import queue
 from .render import ffmpeg_bin
 from .scoring import providers as providers_mod
@@ -46,6 +46,14 @@ def _stages() -> list[queue.Stage]:
         CameraStage(),
         RenderStage(),
     ]
+
+
+def _terminal_result(results: dict[str, dict]) -> tuple[str, dict]:
+    """Return the last stage carrying a typed terminal outcome."""
+    for stage_name, data in reversed(list(results.items())):
+        if isinstance(data, dict) and data.get("outcome"):
+            return stage_name, data
+    return "score", results.get("score", {})
 
 
 def _progress_printer(jsonl: bool, job_id: str | None = None, attempt_id: str | None = None):
@@ -100,16 +108,53 @@ def _emit_result(jsonl: bool, payload: dict) -> None:
         print(json.dumps(payload, indent=2))
 
 
-def _disk_warning() -> str | None:
-    """Warn before long work when managed storage is getting tight."""
+def _disk_warning(source: str | None = None) -> str | None:
+    """Warn before long work when managed or source storage is tight."""
     try:
         free_bytes = shutil.disk_usage(config.home_dir().parent).free
     except OSError:
         return "Free disk space could not be measured. Check storage before a long run."
-    warning_threshold = 4 * 1024**3
-    if free_bytes < warning_threshold:
-        return f"Only {free_bytes / 1024**3:.1f} GiB is free. Long analysis may need more storage; review Setup & Storage before continuing."
+    source_bytes = 0
+    if source and not source.startswith(("http://", "https://")):
+        try:
+            source_bytes = max(0, Path(source).stat().st_size)
+        except OSError:
+            source_bytes = 0
+    estimate = storage_estimate.for_source(source_bytes)
+    required_threshold = max(4 * 1024**3, int(estimate["required_bytes"]))
+    if free_bytes < required_threshold:
+        estimate_label = f" Source estimate is {required_threshold / 1024**3:.1f} GiB." if source_bytes else ""
+        return f"Only {free_bytes / 1024**3:.1f} GiB is free.{estimate_label} Long analysis may need more storage; review Setup & Storage before continuing."
     return None
+
+
+def _disk_block(source: str | None = None, *, score_only: bool = False) -> str | None:
+    """Stop a run before job work when storage is unsafe."""
+    try:
+        free_bytes = shutil.disk_usage(config.home_dir().parent).free
+    except OSError:
+        return "Free disk space could not be measured. Check storage before starting."
+    source_bytes = 0
+    if source and not source.startswith(("http://", "https://")):
+        try:
+            source_bytes = max(0, Path(source).stat().st_size)
+        except OSError:
+            source_bytes = 0
+    estimate = (
+        storage_estimate.for_cached_score()
+        if score_only
+        else storage_estimate.for_source(source_bytes)
+    )
+    minimum_safe = (
+        storage_estimate.CACHED_SCORE_MIN_SAFE_BYTES
+        if score_only
+        else storage_estimate.MIN_SAFE_BYTES
+    )
+    required_threshold = max(minimum_safe, int(estimate["required_bytes"]))
+    if free_bytes >= required_threshold:
+        return None
+    estimate = f" Source estimate is {required_threshold / 1024**3:.1f} GiB." if source_bytes else ""
+    return f"Only {free_bytes / 1024**3:.1f} GiB is free.{estimate} Free disk space before starting this run."
 
 
 def _preflight_terminal(jsonl: bool, job_id: str | None, code: str, message: str, retryable: bool = False) -> int:
@@ -130,8 +175,12 @@ def _preflight_terminal(jsonl: bool, job_id: str | None, code: str, message: str
     return 2
 
 
-def _profile_from_args(args: argparse.Namespace) -> providers_mod.ProviderProfile:
-    kind = args.provider or args.llm or "gemini"
+def _profile_from_args(
+    args: argparse.Namespace,
+    *,
+    default_kind: str | None = None,
+) -> providers_mod.ProviderProfile:
+    kind = args.provider or args.llm or default_kind or "gemini"
     return providers_mod.preset_profile(
         kind,
         model=args.model,
@@ -139,6 +188,15 @@ def _profile_from_args(args: argparse.Namespace) -> providers_mod.ProviderProfil
         auth_strategy=args.auth,
         secret_header_name=args.secret_header,
     )
+
+
+def _profile_for_quality_mode(args: argparse.Namespace, quality_mode: str) -> providers_mod.ProviderProfile:
+    mode = config.validate_quality_mode(quality_mode)
+    explicit_kind = args.provider or args.llm
+    if mode == "private" and explicit_kind and explicit_kind != "clipgauge-local":
+        raise ValueError("private mode requires ClipGauge Local; choose Balanced or Best Quality for cloud scoring")
+    default_kind = "clipgauge-local" if mode == "private" and not explicit_kind else None
+    return _profile_from_args(args, default_kind=default_kind)
 
 
 def _apply_profile(settings: config.Settings, profile: providers_mod.ProviderProfile) -> None:
@@ -219,19 +277,28 @@ def _is_core_required_asset(asset: downloads.ManagedAsset) -> bool:
     return _is_core_required_asset_id(asset.asset_id, asset.required)
 
 
-def _managed_asset_inventory(extra: list[downloads.ManagedAsset] | None = None, *, verify: bool = True) -> list[dict[str, object]]:
+def _managed_asset_inventory(
+    extra: list[downloads.ManagedAsset] | None = None,
+    *,
+    verify: bool = True,
+    exclude_asset_ids: set[str] | None = None,
+) -> list[dict[str, object]]:
     from .ingest import ytdlp
     from .models import managed
     from .render import ffmpeg_bin
 
-    assets = _managed_asset_objects()
+    excluded = exclude_asset_ids or set()
+    assets = [asset for asset in _managed_asset_objects() if asset.asset_id not in excluded]
     if extra:
-        assets.extend(extra)
+        assets.extend(asset for asset in extra if asset.asset_id not in excluded)
     manager = downloads.DownloadManager()
-    return manager.inventory(assets, verify=verify)
+    return manager.inventory_cached(assets, verify=verify)
 
 
-def _core_setup_inventory(manager: local_runtime.LocalRuntime) -> list[dict[str, object]]:
+def _core_setup_inventory(
+    manager: local_runtime.LocalRuntime,
+    managed_rows: list[dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
     from .ingest import ytdlp
     from .models import registry, specs  # noqa: F401 - ensure concrete specs are registered
     from .render import ffmpeg_bin
@@ -242,7 +309,16 @@ def _core_setup_inventory(manager: local_runtime.LocalRuntime) -> list[dict[str,
         yt_name = ytdlp._binary_name()
         yt_asset = yt_manifest["assets"][yt_name]
         yt_path = ytdlp.binary_path()
-        yt_installed = yt_path.is_file() and runtime.sha256_file(yt_path).lower() == str(yt_asset["sha256"]).lower()
+        cached_yt = next(
+            (row for row in (managed_rows or []) if row.get("asset_id") == "core:yt-dlp"),
+            None,
+        )
+        if cached_yt is not None:
+            yt_installed = bool(cached_yt.get("installed"))
+            yt_integrity = "verified" if yt_installed else "not-installed"
+        else:
+            yt_installed = yt_path.is_file() and runtime.sha256_file(yt_path).lower() == str(yt_asset["sha256"]).lower()
+            yt_integrity = "verified" if yt_installed else "not-installed"
         rows.append({
             "asset_id": "core:yt-dlp",
             "display_name": "YouTube compatibility",
@@ -250,7 +326,7 @@ def _core_setup_inventory(manager: local_runtime.LocalRuntime) -> list[dict[str,
             "version": yt_manifest["version"],
             "size_bytes": yt_asset.get("size"),
             "installed": yt_installed,
-            "integrity": "verified" if yt_installed else "not-installed",
+            "integrity": yt_integrity,
             "source": yt_manifest["provenance"],
             "license": yt_manifest["license"],
             "location": str(yt_path),
@@ -287,15 +363,25 @@ def _core_setup_inventory(manager: local_runtime.LocalRuntime) -> list[dict[str,
         "ultraface": "Finds faces for safe vertical reframing.",
         "lr-asd": "Estimates active-speaker motion for camera direction.",
     }
+    cached_by_path = {
+        str(row.get("managed_path")): row
+        for row in (managed_rows or [])
+        if row.get("managed_path")
+    }
     for key, spec in registry.REGISTRY.items():
         path = registry.model_path(spec)
-        installed = path.is_file()
-        integrity = "not-installed"
-        if installed and spec.sha256:
-            try:
-                integrity = "verified" if runtime.sha256_file(path).lower() == spec.sha256.lower() else "failed"
-            except OSError:
-                integrity = "unreadable"
+        cached_row = cached_by_path.get(str(path))
+        if cached_row is not None:
+            installed = bool(cached_row.get("installed"))
+            integrity = "verified" if installed else "failed" if cached_row.get("status") == "needs-repair" else "not-installed"
+        else:
+            installed = path.is_file()
+            integrity = "not-installed"
+            if installed and spec.sha256:
+                try:
+                    integrity = "verified" if runtime.sha256_file(path).lower() == spec.sha256.lower() else "failed"
+                except OSError:
+                    integrity = "unreadable"
         rows.append({
             "asset_id": f"analysis:{key}",
             "display_name": spec.name.replace("-", " ").replace("_", " ").title(),
@@ -371,7 +457,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
             return 0
         if args.setup_cmd == "inventory":
             runtime_binary = manager.binary_path()
-            rows = [setup_models.enrich_model_row(row) for row in downloads_manager.inventory(model_assets, verify=False)]
+            rows = [setup_models.enrich_model_row(row) for row in downloads_manager.inventory_cached(model_assets)]
             persisted_id = setup_models.load_selected_model(config.home_dir())
             if args.selected_model_id:
                 selected_id = args.selected_model_id
@@ -391,7 +477,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
             storage_assets = [replace(asset, required=_is_core_required_asset(asset)) for asset in managed_assets]
             if selected_model is not None:
                 storage_assets.extend([runtime_asset, selected_model])
-            managed_rows = _managed_asset_inventory([runtime_asset, *model_assets], verify=False)
+            excluded_inventory_assets = {"runtime:ffmpeg:win64-gpl"} if ffmpeg_decision.ready and ffmpeg_decision.source not in {"managed", "legacy-managed"} else set()
+            managed_rows = _managed_asset_inventory([runtime_asset, *model_assets], exclude_asset_ids=excluded_inventory_assets)
             ffmpeg_rows = [row for row in managed_rows if str(row.get("asset_id", "")).startswith("runtime:ffmpeg:")]
             if ffmpeg_decision.ready and ffmpeg_decision.source not in {"managed", "legacy-managed"}:
                 for row in ffmpeg_rows:
@@ -443,7 +530,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
                     **runtime_readiness,
                 },
                 "models": rows,
-                "core_assets": _core_setup_inventory(manager),
+                "core_assets": _core_setup_inventory(manager, managed_rows),
                 "video_tools": ffmpeg_decision.to_dict(),
                 "local_ai": {
                     "state": local_state,
@@ -477,7 +564,18 @@ def cmd_setup(args: argparse.Namespace) -> int:
                     for model in local_runtime.MODEL_CATALOG.values()
                 ],
             }
-            payload["storage"]["breakdown"] = storage.breakdown(config.home_dir())
+            storage_signature = storage.breakdown_signature(config.home_dir())
+            cached_storage = downloads_manager.inventory_cache.payload.get("storage_breakdown")
+            if isinstance(cached_storage, dict) and cached_storage.get("signature") == storage_signature and isinstance(cached_storage.get("rows"), list):
+                payload["storage"]["breakdown"] = cached_storage["rows"]
+            else:
+                payload["storage"]["breakdown"] = storage.breakdown(config.home_dir())
+                downloads_manager.inventory_cache.payload["storage_breakdown"] = {
+                    "signature": storage_signature,
+                    "rows": payload["storage"]["breakdown"],
+                    "updated_at": time.time(),
+                }
+                downloads_manager.inventory_cache.save()
             print(json.dumps(payload))
             return 0
         if args.setup_cmd == "install-runtime":
@@ -619,16 +717,43 @@ def cmd_provider_test(args: argparse.Namespace) -> int:
     return 0 if result.get("state") in {"PASS", "WARNING"} else 2
 
 
+def cmd_provider_models(args: argparse.Namespace) -> int:
+    try:
+        profile = _profile_for_quality_mode(args, args.quality_mode) if args.quality_mode else _profile_from_args(args)
+        adapter = providers_mod.make_adapter(profile)
+        models = adapter.model_descriptors()
+        result = {
+            "state": "PASS" if models else "WARNING",
+            "provider": profile.kind,
+            "requested_model": profile.model,
+            "models": models,
+            "message": "Models refreshed." if models else "The provider returned no compatible model list; manual model entry remains available.",
+        }
+    except providers_mod.ProviderError as err:
+        result = {"state": "FAIL", "provider": args.provider or args.llm or "gemini", "code": err.code, "message": err.message}
+    except Exception as err:  # noqa: BLE001 - return a bounded JSON boundary
+        result = {"state": "FAIL", "provider": args.provider or args.llm or "gemini", "message": protocol.safe_message(str(err))}
+    print(json.dumps(result), flush=True)
+    return 0 if result["state"] in {"PASS", "WARNING"} else 2
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     source = args.source
+    disk_block = _disk_block(source)
+    if disk_block:
+        return _preflight_terminal(args.jsonl, None, "DISK_SPACE_LOW", disk_block, True)
     source_type = "url" if source.startswith(("http://", "https://")) else "file"
     settings = config.Settings()
     try:
-        _apply_profile(settings, _profile_from_args(args))
+        quality_mode = config.validate_quality_mode(args.quality_mode or settings.quality_mode)
+        _apply_profile(settings, _profile_for_quality_mode(args, quality_mode))
     except Exception as err:  # noqa: BLE001 — profile validation is a pre-job boundary
         return _preflight_terminal(args.jsonl, None, "PROVIDER_PROFILE_INVALID", protocol.safe_message(str(err)), False)
     if args.captions:
         settings.caption_preset = args.captions
+    settings.quality_mode = quality_mode
+    if args.output_preference:
+        settings.output_preference = config.validate_output_preference(args.output_preference)
     if args.camera:
         settings.camera.speaker_change = args.camera
     if args.cookies_from_browser:
@@ -647,7 +772,16 @@ def cmd_resume(args: argparse.Namespace) -> int:
     job = queue.get_job(args.job_id)
     if job is None:
         return _preflight_terminal(args.jsonl, args.job_id, "JOB_NOT_FOUND", "The requested job could not be found in the managed job store.")
-    if args.llm or args.provider or args.model or args.endpoint or args.captions or args.camera or args.allow_cpu_asr_fallback:
+    stages = _stages() if args.stop_after == "score" else []
+    cached_replay = False
+    if stages and not args.allow_cpu_asr_fallback:
+        cached_replay = queue.cached_prefix_ready(job, stages, through="candidates")
+        if not cached_replay:
+            cached_replay = queue.cached_prefix_ready(job, stages, through="events")
+    disk_block = _disk_block(job.source, score_only=cached_replay)
+    if disk_block:
+        return _preflight_terminal(args.jsonl, args.job_id, "DISK_SPACE_LOW", disk_block, True)
+    if args.llm or args.provider or args.model or args.endpoint or args.captions or args.camera or args.quality_mode or args.output_preference or args.allow_cpu_asr_fallback:
         settings = config.Settings.from_json(json.loads(job.settings_json))
         if args.llm or args.provider or args.model or args.endpoint:
             try:
@@ -656,6 +790,10 @@ def cmd_resume(args: argparse.Namespace) -> int:
                 return _preflight_terminal(args.jsonl, args.job_id, "PROVIDER_PROFILE_INVALID", protocol.safe_message(str(err)), False)
         if args.captions:
             settings.caption_preset = args.captions
+        if args.quality_mode:
+            settings.quality_mode = config.validate_quality_mode(args.quality_mode)
+        if args.output_preference:
+            settings.output_preference = config.validate_output_preference(args.output_preference)
         if args.camera:
             settings.camera.speaker_change = args.camera
         if args.allow_cpu_asr_fallback:
@@ -667,10 +805,10 @@ def cmd_resume(args: argparse.Namespace) -> int:
         with queue._connect() as conn:  # noqa: SLF001 — CLI is a queue friend
             conn.execute("UPDATE jobs SET settings_json = ? WHERE id = ?", (new_json, job.id))
         job = queue.get_job(args.job_id)
-    return _execute(job, args.jsonl)
+    return _execute(job, args.jsonl, stop_after=args.stop_after)
 
 
-def _execute(job: queue.Job, jsonl: bool) -> int:
+def _execute(job: queue.Job, jsonl: bool, *, stop_after: str | None = None) -> int:
     attempt_id = protocol.diagnostic_id()
     emit = _progress_printer(jsonl, job.id, attempt_id)
     terminal = protocol.TerminalEmitter(
@@ -682,13 +820,19 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
         print(json.dumps({"event": "job", "job_id": job.id, "attempt_id": attempt_id}), flush=True)
     else:
         print(f"job {job.id} → {job.dir}", file=sys.stderr)
-    warning = _disk_warning()
+    warning = _disk_warning(job.source)
     if warning:
         emit("pipeline", -1, warning)
     try:
-        results = queue.run_stages(job, _stages(), emit)
+        results = queue.run_stages(job, _stages(), emit, stop_after=stop_after)
     except queue.StageError as err:
         diagnostic = err.diagnostic_id
+        if diagnostic is None and err.details is not None:
+            diagnostic = protocol.write_json_diagnostic(
+                job.dir,
+                err.stage or "pipeline",
+                err.details,
+            )
         if diagnostic is None and err.__cause__ is not None:
             diagnostic = protocol.write_diagnostic(job.dir, err.stage or "pipeline", err.__cause__)
         if jsonl:
@@ -740,23 +884,23 @@ def _execute(job: queue.Job, jsonl: bool) -> int:
         "title": results.get("ingest", {}).get("title"),
         "heatmap_segments": len(results.get("ingest", {}).get("heatmap") or []),
     }
-    score_result = results.get("score", {})
-    outcome = score_result.get("outcome", "SUCCESS_WITH_CLIPS")
-    code = score_result.get("code", "OK")
+    terminal_stage, terminal_result = _terminal_result(results)
+    outcome = terminal_result.get("outcome", "SUCCESS_WITH_CLIPS")
+    code = terminal_result.get("code", "OK")
     message = (
         "We analyzed this video but did not find a moment that met ClipGauge's quality bar."
         if outcome == "SUCCESS_NO_RECOMMENDATIONS"
         else "Pipeline completed."
     )
-    summary.update({"outcome": outcome, "code": code, "counts": score_result.get("counts", {})})
+    summary.update({"outcome": outcome, "code": code, "counts": terminal_result.get("counts", {})})
     if jsonl:
         terminal.terminal(
             ok=True,
             code=code,
             message=message,
             retryable=False,
-            stage="score" if outcome == "SUCCESS_NO_RECOMMENDATIONS" else "pipeline",
-            diagnostic=score_result.get("diagnostic_id"),
+            stage=terminal_stage if outcome == "SUCCESS_NO_RECOMMENDATIONS" else "pipeline",
+            diagnostic=terminal_result.get("diagnostic_id"),
         )
     else:
         _emit_result(jsonl, summary)
@@ -942,6 +1086,7 @@ def main(argv: list[str] | None = None) -> int:
     p_preflight.add_argument("--auth", choices=["none", "bearer", "api_key_header", "custom_secret_header"], default=None)
     p_preflight.add_argument("--secret-header", default=None, help=argparse.SUPPRESS)
     p_preflight.add_argument("--source", default=None, help=argparse.SUPPRESS)
+    p_preflight.add_argument("--quality-mode", choices=config.QUALITY_MODES, default=None, help=argparse.SUPPRESS)
     p_preflight.set_defaults(fn=cmd_preflight)
 
     p_environment_status = sub.add_parser("environment-status", help="show managed runtime identity")
@@ -990,6 +1135,16 @@ def main(argv: list[str] | None = None) -> int:
     p_test.add_argument("--vision-smoke", action="store_true", help=argparse.SUPPRESS)
     p_test.set_defaults(fn=cmd_provider_test)
 
+    p_models = sub.add_parser("provider-models", help="refresh a provider model list")
+    p_models.add_argument("--llm", choices=["gemini", "ollama"], default=None, help=argparse.SUPPRESS)
+    p_models.add_argument("--provider", default=None, help="provider preset or custom kind")
+    p_models.add_argument("--model", default=None, help="provider model identifier")
+    p_models.add_argument("--endpoint", default=None, help="custom provider base URL")
+    p_models.add_argument("--auth", choices=["none", "bearer", "api_key_header", "custom_secret_header"], default=None)
+    p_models.add_argument("--secret-header", default=None, help=argparse.SUPPRESS)
+    p_models.add_argument("--quality-mode", choices=config.QUALITY_MODES, default=None, help="scoring privacy and quality mode")
+    p_models.set_defaults(fn=cmd_provider_models)
+
     p_run = sub.add_parser("run", help="process a YouTube URL or local video file")
     p_run.add_argument("source")
     p_run.add_argument("--llm", choices=["gemini", "ollama"], default=None, help=argparse.SUPPRESS)
@@ -999,6 +1154,8 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--auth", choices=["none", "bearer", "api_key_header", "custom_secret_header"], default=None)
     p_run.add_argument("--secret-header", default=None, help=argparse.SUPPRESS)
     p_run.add_argument("--captions", default=None, help="caption preset name")
+    p_run.add_argument("--quality-mode", choices=config.QUALITY_MODES, default=None, help="scoring privacy and quality mode")
+    p_run.add_argument("--output-preference", choices=config.OUTPUT_PREFERENCES, default=None, help="how many strong recommendations to show")
     p_run.add_argument("--camera", choices=["cut", "pan", "locked"], default=None)
     p_run.add_argument("--cookies-from-browser", choices=sorted(__import__("clipgauge_pipeline.ingest.ytdlp", fromlist=["SUPPORTED_BROWSER_SESSIONS"]).SUPPORTED_BROWSER_SESSIONS), default=None, help="explicitly use a supported browser session for authenticated video access")
     p_run.add_argument("--allow-cpu-asr-fallback", action="store_true", help="explicitly allow slower CPU speech fallback")
@@ -1013,9 +1170,12 @@ def main(argv: list[str] | None = None) -> int:
     p_resume.add_argument("--auth", choices=["none", "bearer", "api_key_header", "custom_secret_header"], default=None)
     p_resume.add_argument("--secret-header", default=None, help=argparse.SUPPRESS)
     p_resume.add_argument("--captions", default=None, help="caption preset name")
+    p_resume.add_argument("--quality-mode", choices=config.QUALITY_MODES, default=None, help="scoring privacy and quality mode")
+    p_resume.add_argument("--output-preference", choices=config.OUTPUT_PREFERENCES, default=None, help="how many strong recommendations to show")
     p_resume.add_argument("--camera", choices=["cut", "pan", "locked"], default=None)
     p_resume.add_argument("--cookies-from-browser", choices=sorted(__import__("clipgauge_pipeline.ingest.ytdlp", fromlist=["SUPPORTED_BROWSER_SESSIONS"]).SUPPORTED_BROWSER_SESSIONS), default=None, help="explicitly use a supported browser session for authenticated video access")
     p_resume.add_argument("--allow-cpu-asr-fallback", action="store_true", help="explicitly allow slower CPU speech fallback")
+    p_resume.add_argument("--stop-after", choices=["ingest", "asr", "diarize", "events", "candidates", "score", "camera", "render"], default=None, help=argparse.SUPPRESS)
     p_resume.set_defaults(fn=cmd_resume)
 
     p_jobs = sub.add_parser("jobs", help="list jobs")

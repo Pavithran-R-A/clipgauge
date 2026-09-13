@@ -13,9 +13,12 @@ import json
 import os
 import re
 import shutil
+import tempfile
+import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from json import JSONDecodeError
+from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
@@ -25,6 +28,11 @@ from .. import config, local_runtime, protocol
 
 LOCAL_QA_TRACE_ENV = "CLIPGAUGE_QA_RUNTIME_TRACE"
 LOCAL_QA_TRACE_MAX_BYTES = 24_000
+INFERENCE_CACHE_CONTRACT_VERSION = 2
+RUBRIC_CACHE_VERSION = "balanced-v2"
+SCORING_REQUEST_TIMEOUT_CAP_SECONDS = 30.0
+GROQ_QWEN_SCORING_MAX_OUTPUT_TOKENS = 900
+OPENROUTER_SCORING_MAX_OUTPUT_TOKENS = 900
 
 
 def _proc_rss_kb(pid: int) -> int | None:
@@ -110,7 +118,7 @@ class CapabilitySet:
     max_images: int | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "CapabilitySet":
+    def from_dict(cls, data: dict[str, Any] | None) -> CapabilitySet:
         data = data or {}
         values = {name: data.get(name) for name in cls.__dataclass_fields__}
         values["text"] = data.get("text", True)
@@ -139,7 +147,7 @@ class ProviderProfile:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        validate_base_url(self.base_url, allow_remote_http=self.locality == "local")
+        validate_base_url(self.base_url)
         if not self.id or not re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", self.id):
             raise ValueError("provider profile id is invalid")
         if not self.model or len(self.model) > 240:
@@ -175,7 +183,7 @@ class ProviderProfile:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ProviderProfile":
+    def from_dict(cls, data: dict[str, Any]) -> ProviderProfile:
         return cls(
             schema_version=int(data.get("schema_version", 1)),
             id=str(data["id"]),
@@ -206,15 +214,15 @@ def normalize_base_url(value: str) -> str:
     return urlunsplit((parts.scheme.lower(), netloc, path, "", ""))
 
 
-def validate_base_url(value: str, *, allow_remote_http: bool = False) -> str:
+def validate_base_url(value: str) -> str:
     normalized = normalize_base_url(value)
     parts = urlsplit(normalized)
     if parts.scheme not in {"https", "http"}:
         raise ValueError("provider base URL scheme must be HTTPS or approved HTTP")
     host = (parts.hostname or "").lower()
     loopback = host in {"127.0.0.1", "localhost", "::1"}
-    if parts.scheme == "http" and not (loopback or allow_remote_http):
-        raise ValueError("remote HTTP provider endpoints require explicit approval")
+    if parts.scheme == "http" and not loopback:
+        raise ValueError("remote HTTP provider endpoints are not supported")
     return normalized
 
 
@@ -264,6 +272,7 @@ class InferenceRequest:
     schema: dict[str, Any]
     images: list[bytes] = field(default_factory=list)
     temperature: float = 0.2
+    seed: int | None = None
     purpose: str = "scoring"
     job_id: str | None = None
     require_vision: bool = False
@@ -308,9 +317,17 @@ class ProviderAdapter:
     def __init__(self, profile: ProviderProfile, secret: str | None = None) -> None:
         self.profile = profile
         self.model = profile.model
+        self.requested_model = profile.model
+        self.actual_model = profile.model
         self._secret = secret.strip() if secret and secret.strip() else None
         self.last_result: InferenceResult | None = None
         self._request_number = 0
+        self._scoring_deadline: float | None = None
+        self._scoring_request_aborted = False
+        self._scoring_worker: threading.Thread | None = None
+        self._selected_model_parameters: set[str] = set()
+        self._selected_model_reasoning: dict[str, Any] = {}
+        self._selected_model_metadata_model: str | None = None
 
     @property
     def backend_name(self) -> str:
@@ -320,8 +337,93 @@ class ProviderAdapter:
     def supports_vision(self) -> bool:
         return self.profile.capabilities.vision is True
 
-    def cache_file(self, request: InferenceRequest) -> Any:
-        return _cache_dir() / f"{cache_key(self.profile, request)}.json"
+    def set_scoring_deadline(self, deadline: float | None) -> None:
+        self._scoring_deadline = deadline
+        self._scoring_request_aborted = False
+
+    def request_timeout(self, request: InferenceRequest | None = None) -> float:
+        timeout = float(self.profile.timeout_seconds)
+        if request is None or request.purpose != "scoring" or self._scoring_deadline is None:
+            return timeout
+        if self._scoring_request_aborted:
+            raise ProviderError("TIMEOUT", "Provider scoring request was aborted after exceeding its wall-time limit.")
+        if self._scoring_worker is not None:
+            if self._scoring_worker.is_alive():
+                self._scoring_request_aborted = True
+                raise ProviderError("TIMEOUT", "A previous provider scoring request is still stopping.")
+            self._scoring_worker = None
+        remaining = self._scoring_deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProviderError("TIMEOUT", "Provider scoring time budget was exhausted.")
+        return max(0.001, min(timeout, remaining, SCORING_REQUEST_TIMEOUT_CAP_SECONDS))
+
+    def retry_delay(
+        self,
+        error: ProviderError,
+        attempt: int,
+        request: InferenceRequest | None = None,
+    ) -> float:
+        delay = error.retry_after if error.retry_after is not None else 2**attempt
+        if request is None or request.purpose != "scoring" or self._scoring_deadline is None:
+            return delay
+        if self._scoring_request_aborted:
+            raise ProviderError("TIMEOUT", "Provider scoring request was aborted after exceeding its wall-time limit.")
+        remaining = self._scoring_deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProviderError("TIMEOUT", "Provider scoring time budget was exhausted.")
+        # Leave a small clock-resolution margin before sleeping. This keeps
+        # retry backoff inside the hard deadline on coarse Windows clocks.
+        return min(delay, max(0.0, remaining - 1e-6))
+
+    def _post_request(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
+        request: InferenceRequest | None = None,
+    ) -> httpx.Response:
+        timeout = self.request_timeout(request)
+        if request is None or request.purpose != "scoring" or self._scoring_deadline is None:
+            return httpx.post(url, headers=headers, json=json_body, timeout=timeout, follow_redirects=False)
+
+        remaining = self._scoring_deadline - time.monotonic()
+        if remaining <= 0:
+            raise httpx.TimeoutException("Provider scoring time budget was exhausted.")
+        response: list[httpx.Response] = []
+        errors: list[Exception] = []
+
+        def send() -> None:
+            try:
+                response.append(
+                    httpx.post(
+                        url,
+                        headers=headers,
+                        json=json_body,
+                        timeout=timeout,
+                        follow_redirects=False,
+                    )
+                )
+            except Exception as error:  # noqa: BLE001 - preserve worker failure for caller
+                errors.append(error)
+
+        worker = threading.Thread(target=send, name="clipgauge-provider-request", daemon=True)
+        self._scoring_worker = worker
+        worker.start()
+        worker.join(min(timeout, remaining))
+        if not worker.is_alive():
+            self._scoring_worker = None
+        if worker.is_alive():
+            self._scoring_request_aborted = True
+            raise httpx.TimeoutException("Provider scoring request exceeded its wall-time deadline.")
+        if errors:
+            raise errors[0]
+        if not response:
+            raise httpx.TimeoutException("Provider scoring request returned no response.")
+        return response[0]
+
+    def cache_file(self, request: InferenceRequest, *, actual_model: str | None = None) -> Any:
+        return _cache_dir() / f"{cache_key(self.profile, request, actual_model=actual_model or self.model)}.json"
 
     def generate_json(
         self,
@@ -337,28 +439,45 @@ class ProviderAdapter:
                 prompt=prompt,
                 schema=schema,
                 images=images or [],
+                temperature=0.0 if purpose == "scoring" and self.profile.kind == "clipgauge-local" else 0.2,
+                seed=0 if purpose == "scoring" and self.profile.kind == "clipgauge-local" else None,
                 purpose=purpose,
                 job_id=job_id,
             )
         )
         return result.data
 
-    def infer(self, request: InferenceRequest) -> InferenceResult:
+    def infer(self, request: InferenceRequest, *, use_cache: bool = True) -> InferenceResult:
         if request.require_vision and self.profile.capabilities.vision is False:
             raise ProviderError("VISION_UNSUPPORTED", "The selected model does not support vision.")
         if request.max_images is not None and len(request.images) > request.max_images:
             raise ProviderError("VISION_UNSUPPORTED", "Too many images were supplied for this provider.")
+        cache_enabled = use_cache and not (
+            self.profile.kind == "openrouter" and self.requested_model == "openrouter/free"
+        )
         cache_file = self.cache_file(request)
-        if cache_file.exists():
+        if cache_enabled and cache_file.exists():
             try:
-                data = json.loads(cache_file.read_text())
+                cached = json.loads(cache_file.read_text())
+                cached_model = None
+                if (
+                    isinstance(cached, dict)
+                    and cached.get("cache_schema_version") == INFERENCE_CACHE_CONTRACT_VERSION
+                    and isinstance(cached.get("data"), dict)
+                ):
+                    data = cached["data"]
+                    cached_model = cached.get("actual_model")
+                else:
+                    data = cached
                 validate_json_schema(data, request.schema)
+                if isinstance(cached_model, str) and cached_model.strip():
+                    self.actual_model = cached_model.strip()
                 degraded = ["vision_unavailable"] if request.images and self.profile.capabilities.vision is False else []
                 result = InferenceResult(
                     data=data,
                     provider_profile_id=self.profile.id,
                     provider_kind=self.profile.kind,
-                    model=self.model,
+                    model=self.actual_model,
                     capabilities_used={"cache": True, "vision": bool(request.images) and self.profile.capabilities.vision is True},
                     degraded_signals=degraded,
                     structured_level=self.structured_level(),
@@ -375,12 +494,21 @@ class ProviderAdapter:
             validate_json_schema(data, request.schema)
         except ValueError as err:
             raise ProviderError("STRUCTURED_OUTPUT_INVALID", str(err)) from err
-        cache_file.write_text(json.dumps(data, sort_keys=True))
+        if cache_enabled:
+            cache_payload = {
+                "cache_schema_version": INFERENCE_CACHE_CONTRACT_VERSION,
+                "actual_model": self.actual_model,
+                "data": data,
+            }
+            _write_json_atomic(cache_file, cache_payload)
+            resolved_cache_file = self.cache_file(request, actual_model=self.actual_model)
+            if resolved_cache_file != cache_file:
+                _write_json_atomic(resolved_cache_file, cache_payload)
         result = InferenceResult(
             data=data,
             provider_profile_id=self.profile.id,
             provider_kind=self.profile.kind,
-            model=self.model,
+            model=self.actual_model,
             capabilities_used={
                 "text": True,
                 "structured_json": self.profile.capabilities.structured_json,
@@ -405,6 +533,9 @@ class ProviderAdapter:
     def model_listing(self) -> list[str]:
         return []
 
+    def model_descriptors(self) -> list[dict[str, Any]]:
+        return [describe_model(self.profile, model) for model in self.model_listing()]
+
     def failure_context(self) -> dict[str, Any]:
         """Return safe runtime facts for a provider failure diagnostic."""
         return {}
@@ -428,7 +559,8 @@ class ProviderAdapter:
                     schema=schema,
                     purpose="test_connection",
                     temperature=0.0,
-                )
+                ),
+                use_cache=False,
             )
             state = "PASS" if not result.degraded_signals else "WARNING"
             return {
@@ -458,17 +590,100 @@ def _cache_dir():
     return path
 
 
-def cache_key(profile: ProviderProfile, request: InferenceRequest) -> str:
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(payload, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+
+
+def describe_model(
+    profile: ProviderProfile,
+    model: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Describe whether a discovered model can safely score clips."""
+    model_id = str(model).strip()
+    metadata = metadata or {}
+    lowered = model_id.casefold()
+    unsupported = any(token in lowered for token in ("embedding", "whisper", "tts", "text-to-image"))
+    capabilities = profile.capabilities.to_dict()
+    supported_parameters = metadata.get("supported_parameters")
+    if isinstance(supported_parameters, list) and supported_parameters:
+        parameter_names = {str(value).casefold() for value in supported_parameters}
+        structured = bool(parameter_names & {"response_format", "structured_outputs", "json_schema"})
+        schema = "json_schema" in parameter_names or "structured_outputs" in parameter_names
+        capabilities["structured_json"] = structured
+        capabilities["json_schema"] = schema if structured else False
+    else:
+        structured = capabilities["structured_json"]
+        schema = capabilities["json_schema"]
+    architecture = metadata.get("architecture")
+    if isinstance(architecture, dict) and isinstance(architecture.get("input_modalities"), list):
+        capabilities["vision"] = any("image" in str(value).casefold() for value in architecture["input_modalities"])
+    if unsupported:
+        compatibility = "UNSUPPORTED"
+    elif structured is False:
+        compatibility = "NO STRUCTURED OUTPUT"
+    elif structured is True and schema is True:
+        compatibility = "FULL"
+    else:
+        compatibility = "TEXT-ONLY"
+    result = {
+        "id": model_id,
+        "compatibility": compatibility,
+        "capabilities": capabilities,
+        "available": True,
+        "deprecated": bool(metadata.get("deprecated", False)),
+        "local": profile.locality == "local",
+    }
+    context_length = metadata.get("context_length")
+    if isinstance(context_length, int) and context_length > 0:
+        result["capabilities"]["context_window"] = context_length
+    pricing = metadata.get("pricing")
+    if isinstance(pricing, dict):
+        result["price"] = dict(pricing)
+    return result
+
+
+def cache_key(
+    profile: ProviderProfile,
+    request: InferenceRequest,
+    *,
+    actual_model: str | None = None,
+    rubric_version: str = RUBRIC_CACHE_VERSION,
+) -> str:
     h = hashlib.sha256()
     fields = {
-        "schema_version": 1,
+        "schema_version": INFERENCE_CACHE_CONTRACT_VERSION,
         "profile_id": profile.id,
         "kind": profile.kind,
-        "model": profile.model,
+        "requested_model": profile.model,
+        "actual_model": actual_model or profile.model,
         "endpoint": profile.endpoint_identity,
         "prompt": request.prompt,
         "schema": request.schema,
+        "rubric_version": rubric_version,
         "temperature": request.temperature,
+        "seed": request.seed,
         "purpose": request.purpose,
         "require_vision": request.require_vision,
     }
@@ -485,6 +700,18 @@ def _strip_fences(text: str) -> str:
         if value.rstrip().endswith("```"):
             value = value.rstrip()[:-3]
     return value.strip()
+
+
+def _strict_json_schema(value: Any) -> Any:
+    """Add strict object bounds without mutating the scoring schema."""
+    if isinstance(value, list):
+        return [_strict_json_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    normalized = {key: _strict_json_schema(item) for key, item in value.items()}
+    if normalized.get("type") == "object" or "properties" in normalized:
+        normalized.setdefault("additionalProperties", False)
+    return normalized
 
 
 def parse_json_text(text: str) -> dict[str, Any]:
@@ -504,7 +731,7 @@ def parse_json_text(text: str) -> dict[str, Any]:
         else:
             raise
     if not isinstance(parsed, dict):
-        raise ValueError("provider response must be a JSON object")
+        raise TypeError("provider response must be a JSON object")
     return parsed
 
 
@@ -581,13 +808,52 @@ LOCAL_PROVIDER_MAX_ATTEMPTS = 1
 class OpenAICompatibleAdapter(ProviderAdapter):
     backend = "openai-compatible"
 
-    def infer(self, request: InferenceRequest) -> InferenceResult:
+    def infer(self, request: InferenceRequest, *, use_cache: bool = True) -> InferenceResult:
         if self.model == "auto":
             models = self.model_listing()
             if not models:
                 raise ProviderError("PROVIDER_UNAVAILABLE", "The local compatible server is stopped or has no models.")
             self.model = _pick_model(models)
-        return super().infer(request)
+            self.actual_model = self.model
+        self._refresh_selected_model_capabilities()
+        return super().infer(request, use_cache=use_cache)
+
+    def _refresh_selected_model_capabilities(self) -> None:
+        """Resolve unknown OpenRouter capabilities before structured scoring."""
+        if (
+            self.profile.kind != "openrouter"
+            or self._selected_model_metadata_model == self.model
+            or self.profile.capabilities.structured_json is not None
+        ):
+            return
+        if self.requested_model == "openrouter/free":
+            # The route chooses the concrete model after this request. Use
+            # OpenRouter's route-level schema contract, not a false model lookup.
+            self.profile = replace(
+                self.profile,
+                capabilities=replace(
+                    self.profile.capabilities,
+                    structured_json=True,
+                    json_schema=True,
+                ),
+            )
+            return
+        records = self._model_records(strict=True)
+        selected = next((item for item in records if item.get("id") == self.model), None)
+        if selected is None:
+            raise ProviderError("MODEL_NOT_FOUND", "The selected OpenRouter model is unavailable.")
+        parameters = selected.get("supported_parameters")
+        self._selected_model_parameters = {
+            str(value).casefold() for value in parameters
+        } if isinstance(parameters, list) else set()
+        reasoning = selected.get("reasoning")
+        self._selected_model_reasoning = dict(reasoning) if isinstance(reasoning, dict) else {}
+        self._selected_model_metadata_model = self.model
+        descriptor = describe_model(self.profile, self.model, selected)
+        capabilities = descriptor.get("capabilities")
+        if not isinstance(capabilities, dict):
+            raise ProviderError("PROVIDER_RESPONSE_INVALID", "OpenRouter returned incomplete model capabilities.")
+        self.profile = replace(self.profile, capabilities=CapabilitySet.from_dict(capabilities))
 
     def _headers(self) -> dict[str, str]:
         headers = {"content-type": "application/json"}
@@ -610,15 +876,43 @@ class OpenAICompatibleAdapter(ProviderAdapter):
     def _url(self, path: str) -> str:
         return self.profile.endpoint_identity.rstrip("/") + "/" + path.lstrip("/")
 
-    def model_listing(self) -> list[str]:
+    def _model_records(self, *, strict: bool = False) -> list[dict[str, Any]]:
         try:
             response = httpx.get(self._url("models"), headers=self._headers(), timeout=min(10.0, self.profile.timeout_seconds), follow_redirects=False)
             if response.status_code >= 400:
+                if strict:
+                    raise _status_error(response)
                 return []
             payload = response.json()
-            return [str(item["id"]) for item in payload.get("data", []) if isinstance(item, dict) and item.get("id")]
-        except (httpx.HTTPError, JSONDecodeError, KeyError, TypeError):
+            if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+                if strict:
+                    raise ProviderError("PROVIDER_RESPONSE_INVALID", "Provider returned an invalid model list.")
+                return []
+            return [
+                item
+                for item in payload["data"]
+                if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip()
+            ]
+        except ProviderError:
+            raise
+        except httpx.TimeoutException as err:
+            if strict:
+                raise ProviderError("TIMEOUT", "Provider model listing timed out.") from err
             return []
+        except httpx.HTTPError as err:
+            if strict:
+                raise ProviderError("NETWORK_FAILED", "Provider model listing failed.") from err
+            return []
+        except (JSONDecodeError, KeyError, TypeError) as err:
+            if strict:
+                raise ProviderError("PROVIDER_RESPONSE_INVALID", "Provider returned an invalid model list.") from err
+            return []
+
+    def model_listing(self) -> list[str]:
+        return [str(item["id"]) for item in self._model_records()]
+
+    def model_descriptors(self) -> list[dict[str, Any]]:
+        return [describe_model(self.profile, str(item["id"]), item) for item in self._model_records(strict=True)]
 
     def _infer_uncached(self, request: InferenceRequest) -> tuple[dict[str, Any], list[str], str | None]:
         degraded: list[str] = []
@@ -642,15 +936,47 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             "temperature": request.temperature,
             "stream": False,
         }
+        if request.seed is not None and self.profile.kind == "clipgauge-local":
+            body["seed"] = request.seed
+        if request.purpose == "scoring" and self.profile.kind == "groq" and self.model.casefold().startswith("qwen/"):
+            body["max_tokens"] = GROQ_QWEN_SCORING_MAX_OUTPUT_TOKENS
+        if request.purpose == "scoring" and self.profile.kind == "openrouter":
+            body["max_tokens"] = OPENROUTER_SCORING_MAX_OUTPUT_TOKENS
+            if self.requested_model == "openrouter/free":
+                body["reasoning"] = {"effort": "none"}
+            else:
+                supported_efforts = self._selected_model_reasoning.get("supported_efforts")
+                if (
+                    "reasoning_effort" in self._selected_model_parameters
+                    and self._selected_model_reasoning.get("mandatory") is not True
+                    and isinstance(supported_efforts, list)
+                    and "none" in {str(value).casefold() for value in supported_efforts}
+                ):
+                    body["reasoning_effort"] = "none"
+                elif (
+                    "reasoning" in self._selected_model_parameters
+                    and self._selected_model_reasoning.get("mandatory") is not True
+                ):
+                    body["reasoning"] = {"effort": "none"}
         if content != request.prompt:
             body["messages"][0]["content"][0]["text"] = prompt  # type: ignore[index]
         else:
             body["messages"][0]["content"] = prompt
         if self.structured_level() == "native_schema":
-            body["response_format"] = {"type": "json_schema", "json_schema": {"name": "clipgauge", "strict": True, "schema": request.schema}}
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "clipgauge",
+                    "strict": True,
+                    "schema": _strict_json_schema(request.schema),
+                },
+            }
         elif self.structured_level() == "json_mode":
             body["response_format"] = {"type": "json_object"}
         payload = self._post_json("chat/completions", body, request=request)
+        routed_model = payload.get("model") if isinstance(payload, dict) else None
+        if isinstance(routed_model, str) and routed_model.strip():
+            self.actual_model = routed_model.strip()
         try:
             choice = payload["choices"][0]
             message = choice["message"]
@@ -686,7 +1012,12 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     **memory,
                 )
             try:
-                response = httpx.post(self._url(path), headers=self._headers(), json=body, timeout=self.profile.timeout_seconds, follow_redirects=False)
+                response = self._post_request(
+                    self._url(path),
+                    headers=self._headers(),
+                    json_body=body,
+                    request=request,
+                )
                 duration_ms = int((time.monotonic() - started) * 1000)
                 if response.status_code >= 400 or 300 <= response.status_code < 400:
                     error = _status_error(response)
@@ -694,7 +1025,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     if trace_local:
                         _local_qa_trace("request_http_error", attempt=attempt + 1, duration_ms=duration_ms, status_code=response.status_code, error_code=error.code)
                     if error.code in {"RATE_LIMITED", "PROVIDER_UNAVAILABLE", "NETWORK_FAILED", "TIMEOUT"} and attempt + 1 < max_attempts:
-                        time.sleep(error.retry_after if error.retry_after is not None else 2**attempt)
+                        time.sleep(self.retry_delay(error, attempt, request))
                         continue
                     raise error
                 payload = response.json()
@@ -727,6 +1058,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 last.details = self._failure_details(request_number, duration_ms, last)
                 if trace_local:
                     _local_qa_trace("request_timeout", attempt=attempt + 1, duration_ms=duration_ms, timeout_seconds=self.profile.timeout_seconds, **_memory_snapshot(handle.process.pid if handle else None))
+                if self._scoring_request_aborted:
+                    raise last
             except httpx.HTTPError:
                 duration_ms = int((time.monotonic() - started) * 1000)
                 last = ProviderError("NETWORK_FAILED", "Provider network request failed.")
@@ -744,7 +1077,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 )
                 raise error from err
             if attempt + 1 < max_attempts:
-                time.sleep(2**attempt)
+                time.sleep(self.retry_delay(last, attempt, request))
         if last:
             raise last
         error = ProviderError("INTERNAL_PROVIDER_ERROR", "Provider request failed.")
@@ -792,16 +1125,36 @@ class ClipGaugeLocalAdapter(OpenAICompatibleAdapter):
     def _url(self, path: str) -> str:
         return self._endpoint.rstrip("/") + "/" + path.lstrip("/")
 
+    def _managed_endpoint_ready(self) -> bool:
+        health_url = self._endpoint.rsplit("/v1", 1)[0] + "/health"
+        try:
+            health = httpx.get(health_url, timeout=0.5, follow_redirects=False)
+            if health.status_code not in {200, 204}:
+                return False
+            models = httpx.get(self._url("models"), timeout=0.5, follow_redirects=False)
+            if models.status_code != 200:
+                return False
+            payload = models.json()
+            records = payload.get("data") if isinstance(payload, dict) else None
+            identifiers = {
+                str(item.get("id")).strip().casefold()
+                for item in records or []
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            }
+            expected = {self.model.casefold(), self.model.rsplit("/", 1)[-1].casefold()}
+            try:
+                expected.add(local_runtime.MODEL_CATALOG[self.model].filename.casefold())
+            except KeyError:
+                pass
+            return bool(identifiers & expected)
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+            return False
+
     def _ensure_runtime(self) -> None:
         if self.profile.metadata.get("managed", True) is False:
             return
-        health_url = self._endpoint.rsplit("/v1", 1)[0] + "/health"
-        try:
-            response = httpx.get(health_url, timeout=0.5, follow_redirects=False)
-            if response.status_code in {200, 204}:
-                return
-        except httpx.HTTPError:
-            pass
+        if self._managed_endpoint_ready():
+            return
         try:
             self._endpoint = self._runtime.start(self.model)
         except local_runtime.LocalRuntimeError as exc:
@@ -811,9 +1164,9 @@ class ClipGaugeLocalAdapter(OpenAICompatibleAdapter):
         self._ensure_runtime()
         return [self.model]
 
-    def infer(self, request: InferenceRequest) -> InferenceResult:
+    def infer(self, request: InferenceRequest, *, use_cache: bool = True) -> InferenceResult:
         self._ensure_runtime()
-        return super().infer(request)
+        return super().infer(request, use_cache=use_cache)
 
     def failure_context(self) -> dict[str, Any]:
         handle = self._runtime.handle
@@ -828,13 +1181,8 @@ class ClipGaugeLocalAdapter(OpenAICompatibleAdapter):
     def recover_for_scoring(self) -> dict[str, Any]:
         if self.profile.metadata.get("managed", True) is False:
             return {"recovered": False, "runtime_restarted": False, "runtime_alive": True}
-        health_url = self._endpoint.rsplit("/v1", 1)[0] + "/health"
-        try:
-            response = httpx.get(health_url, timeout=0.5, follow_redirects=False)
-            if response.status_code in {200, 204}:
-                return {"recovered": True, "runtime_restarted": False, "runtime_alive": True}
-        except httpx.HTTPError:
-            pass
+        if self._managed_endpoint_ready():
+            return {"recovered": True, "runtime_restarted": False, "runtime_alive": True}
         self._runtime.stop()
         try:
             self._endpoint = self._runtime.start(self.model)
@@ -863,68 +1211,148 @@ class GeminiAdapter(ProviderAdapter):
         for image in request.images:
             parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(image).decode()}})
         body = {"contents": [{"parts": parts}], "generationConfig": {"responseMimeType": "application/json", "responseSchema": request.schema, "temperature": request.temperature}}
-        response = self._post(body)
+        response = self._post(body, request=request)
         try:
             raw = response["candidates"][0]["content"]["parts"][0]["text"]
             return parse_json_text(raw), [], response_request_id(response)
         except (KeyError, IndexError, TypeError, ValueError, JSONDecodeError) as err:
             raise ProviderError("PROVIDER_RESPONSE_INVALID", "Gemini returned no usable JSON content.") from err
 
-    def model_listing(self) -> list[str]:
+    def _model_records(self, *, strict: bool = False) -> list[dict[str, Any]]:
         try:
             response = httpx.get(self.profile.endpoint_identity.rstrip("/") + "/models", headers=self._headers(), timeout=10.0, follow_redirects=False)
             if response.status_code >= 400:
+                if strict:
+                    raise _status_error(response)
                 return []
-            return [str(item["name"]).split("models/", 1)[-1] for item in response.json().get("models", []) if isinstance(item, dict) and item.get("name")]
-        except (httpx.HTTPError, JSONDecodeError, KeyError, TypeError):
+            payload = response.json()
+            if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+                if strict:
+                    raise ProviderError("PROVIDER_RESPONSE_INVALID", "Provider returned an invalid model list.")
+                return []
+            return [
+                item
+                for item in payload["models"]
+                if isinstance(item, dict)
+                and isinstance(item.get("name"), str)
+                and item["name"].strip()
+                and isinstance(item.get("supportedGenerationMethods", ["generateContent"]), list)
+                and "generateContent" in item.get("supportedGenerationMethods", ["generateContent"])
+            ]
+        except ProviderError:
+            raise
+        except httpx.TimeoutException as err:
+            if strict:
+                raise ProviderError("TIMEOUT", "Gemini model listing timed out.") from err
+            return []
+        except httpx.HTTPError as err:
+            if strict:
+                raise ProviderError("NETWORK_FAILED", "Gemini model listing failed.") from err
+            return []
+        except (JSONDecodeError, KeyError, TypeError) as err:
+            if strict:
+                raise ProviderError("PROVIDER_RESPONSE_INVALID", "Provider returned an invalid model list.") from err
             return []
 
-    def _post(self, body: dict[str, Any]) -> dict[str, Any]:
+    def model_listing(self) -> list[str]:
+        return [str(item["name"]).split("models/", 1)[-1] for item in self._model_records()]
+
+    def model_descriptors(self) -> list[dict[str, Any]]:
+        descriptors = []
+        for item in self._model_records(strict=True):
+            metadata: dict[str, Any] = {}
+            input_limit = item.get("inputTokenLimit")
+            if isinstance(input_limit, int) and input_limit > 0:
+                metadata["context_length"] = input_limit
+            descriptors.append(describe_model(self.profile, str(item["name"]).split("models/", 1)[-1], metadata))
+        return descriptors
+
+    def _post(self, body: dict[str, Any], *, request: InferenceRequest | None = None) -> dict[str, Any]:
         url = self.profile.endpoint_identity.rstrip("/") + f"/models/{self.model}:generateContent"
         last: ProviderError | None = None
         for attempt in range(3):
             try:
-                response = httpx.post(url, headers=self._headers(), json=body, timeout=self.profile.timeout_seconds, follow_redirects=False)
+                response = self._post_request(
+                    url,
+                    headers=self._headers(),
+                    json_body=body,
+                    request=request,
+                )
                 if response.status_code >= 400:
                     error = _status_error(response)
                     last = error
                     if error.code in {"RATE_LIMITED", "PROVIDER_UNAVAILABLE"} and attempt < 2:
-                        time.sleep(error.retry_after if error.retry_after is not None else 2**attempt)
+                        time.sleep(self.retry_delay(error, attempt, request))
                         continue
                     raise error
                 return response.json()
             except ProviderError:
                 raise
-            except httpx.TimeoutException as err:
+            except httpx.TimeoutException:
                 last = ProviderError("TIMEOUT", "Gemini request timed out.")
-            except httpx.HTTPError as err:
+                if self._scoring_request_aborted:
+                    raise last
+            except httpx.HTTPError:
                 last = ProviderError("NETWORK_FAILED", "Gemini network request failed.")
             except JSONDecodeError as err:
                 raise ProviderError("PROVIDER_RESPONSE_INVALID", "Gemini returned malformed JSON.") from err
+            if attempt < 2:
+                time.sleep(self.retry_delay(last, attempt, request))
         raise last or ProviderError("INTERNAL_PROVIDER_ERROR", "Gemini request failed.")
 
 
 class OllamaAdapter(ProviderAdapter):
     backend = "ollama"
 
-    def infer(self, request: InferenceRequest) -> InferenceResult:
+    def infer(self, request: InferenceRequest, *, use_cache: bool = True) -> InferenceResult:
         if self.model == "auto":
             models = self.model_listing()
             if not models:
                 raise ProviderError("PROVIDER_UNAVAILABLE", "Ollama is stopped or has no installed models.")
             self.model = _pick_model(models)
-        return super().infer(request)
+            self.actual_model = self.model
+        return super().infer(request, use_cache=use_cache)
 
     def _url(self, path: str) -> str:
         return self.profile.endpoint_identity.rstrip("/") + "/" + path.lstrip("/")
 
-    def model_listing(self) -> list[str]:
+    def _model_records(self, *, strict: bool = False) -> list[dict[str, Any]]:
         try:
             response = httpx.get(self._url("api/tags"), timeout=5.0, follow_redirects=False)
-            response.raise_for_status()
-            return [str(item["name"]) for item in response.json().get("models", []) if isinstance(item, dict) and item.get("name")]
-        except (httpx.HTTPError, JSONDecodeError, KeyError, TypeError):
+            if response.status_code >= 400:
+                if strict:
+                    raise _status_error(response)
+                return []
+            payload = response.json()
+            if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+                if strict:
+                    raise ProviderError("PROVIDER_RESPONSE_INVALID", "Ollama returned an invalid model list.")
+                return []
+            return [
+                item
+                for item in payload["models"]
+                if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"].strip()
+            ]
+        except ProviderError:
+            raise
+        except httpx.TimeoutException as err:
+            if strict:
+                raise ProviderError("TIMEOUT", "Ollama model listing timed out.") from err
             return []
+        except httpx.HTTPError as err:
+            if strict:
+                raise ProviderError("NETWORK_FAILED", "Ollama model listing failed.") from err
+            return []
+        except (JSONDecodeError, KeyError, TypeError) as err:
+            if strict:
+                raise ProviderError("PROVIDER_RESPONSE_INVALID", "Ollama returned an invalid model list.") from err
+            return []
+
+    def model_listing(self) -> list[str]:
+        return [str(item["name"]) for item in self._model_records()]
+
+    def model_descriptors(self) -> list[dict[str, Any]]:
+        return [describe_model(self.profile, str(item["name"]), item) for item in self._model_records(strict=True)]
 
     def _infer_uncached(self, request: InferenceRequest) -> tuple[dict[str, Any], list[str], str | None]:
         models = self.model_listing()
@@ -944,7 +1372,11 @@ class OllamaAdapter(ProviderAdapter):
             degraded.append("vision_unavailable")
         body = {"model": self.model, "messages": [message], "format": request.schema, "stream": False, "options": {"temperature": request.temperature}}
         try:
-            response = httpx.post(self._url("api/chat"), json=body, timeout=self.profile.timeout_seconds, follow_redirects=False)
+            response = self._post_request(
+                self._url("api/chat"),
+                json_body=body,
+                request=request,
+            )
             if response.status_code >= 400:
                 raise _status_error(response)
             payload = response.json()

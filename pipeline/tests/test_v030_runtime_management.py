@@ -1,8 +1,19 @@
 from pathlib import Path
 
+from types import SimpleNamespace
+
 import pytest
 
 from clipgauge_pipeline import downloads, hardware
+
+
+@pytest.fixture(autouse=True)
+def sufficient_test_disk(monkeypatch):
+    monkeypatch.setattr(
+        downloads.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=8 * 1024**3, total=8 * 1024**3, used=0),
+    )
 
 
 def _asset(destination: str = "bin/model.gguf") -> downloads.ManagedAsset:

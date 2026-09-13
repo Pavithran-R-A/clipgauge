@@ -4,8 +4,24 @@ import pytest
 import sys
 
 from clipgauge_pipeline.asr import stage as asr_stage
+from clipgauge_pipeline.asr import probe as asr_probe
 from clipgauge_pipeline.asr.stage import _transcribe_with_fallback
 from clipgauge_pipeline.jobs.queue import StageError
+
+
+def test_cuda_probe_evidence_write_cleans_failed_temporary(monkeypatch, tmp_path):
+    destination = tmp_path / "cuda-probe.json"
+    destination.write_text("previous", encoding="utf-8")
+
+    def fail_replace(*_args):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(asr_probe.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        asr_probe._atomic_write_text(destination, "new")
+
+    assert destination.read_text(encoding="utf-8") == "previous"
+    assert list(tmp_path.glob(".cuda-probe.json.*.part")) == []
 
 
 class _Model:
@@ -57,8 +73,90 @@ def test_long_accelerator_failure_requires_explicit_cpu_approval():
     assert caught.value.code == "ASR_GPU_FALLBACK_REQUIRES_APPROVAL"
 
 
+def test_cpu_transcription_retries_resource_failure_with_smaller_batches():
+    batches = []
+
+    class Model:
+        def transcribe(self, _audio, batch_size):
+            batches.append(batch_size)
+            if batch_size > 1:
+                raise RuntimeError("out of memory while allocating batch")
+            return {"language": "en", "segments": []}
+
+    result, _model, device, compute_type = _transcribe_with_fallback(
+        Model(),
+        audio=[0.0],
+        device="cpu",
+        compute_type="int8",
+        cpu_batch_size=8,
+        load_cpu_model=lambda: pytest.fail("CPU model must not reload"),
+        emit=lambda _message: None,
+    )
+
+    assert result == {"language": "en", "segments": []}
+    assert (device, compute_type) == ("cpu", "int8")
+    assert batches == [8, 4, 2, 1]
+
+
+def test_cpu_transcription_does_not_retry_permanent_failures():
+    batches = []
+
+    class Model:
+        def transcribe(self, _audio, batch_size):
+            batches.append(batch_size)
+            raise RuntimeError("model file is corrupt")
+
+    with pytest.raises(StageError) as caught:
+        _transcribe_with_fallback(
+            Model(),
+            audio=[0.0],
+            device="cpu",
+            compute_type="int8",
+            cpu_batch_size=8,
+            load_cpu_model=lambda: pytest.fail("CPU model must not reload"),
+            emit=lambda _message: None,
+        )
+
+    assert caught.value.code == "ASR_TRANSCRIPTION_FAILED"
+    assert batches == [8]
+
+
 def test_degraded_acceleration_state_uses_canonical_label():
     assert asr_stage.DEGRADED_ACCELERATION_STATE == "GPU PRESENT — RUNTIME DEGRADED"
+
+
+def test_cpu_asr_stage_rejects_unverified_compute_types(monkeypatch, tmp_path):
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"audio")
+
+    class Torch:
+        class backends:
+            class mps:
+                @staticmethod
+                def is_available():
+                    return False
+
+    class Context:
+        prior = {"ingest": {"audio_path": str(audio_path), "probe": {"duration_sec": 1.0}}}
+        settings = SimpleNamespace(allow_cpu_asr_fallback=False)
+
+        def emit(self, _fraction, _message):
+            pass
+
+    monkeypatch.setitem(sys.modules, "torch", Torch)
+    monkeypatch.setitem(sys.modules, "whisperx", SimpleNamespace())
+    monkeypatch.setattr(asr_stage.managed, "ready", lambda _manager: True)
+    monkeypatch.setattr(asr_stage.hardware, "snapshot", lambda _root: {
+        "ram_bytes": 8 * 1024**3,
+        "cpu_ctranslate2": {"verified": False, "compute_types": []},
+    })
+    monkeypatch.setattr(asr_stage.hardware, "asr_readiness", lambda _capabilities: {"state": "CPU FALLBACK", "device": "cpu", "compute_type": "int8", "reason": "cpu"})
+
+    with pytest.raises(StageError) as caught:
+        asr_stage.AsrStage().run(Context())
+
+    assert caught.value.code == "ASR_CPU_COMPUTE_UNSUPPORTED"
+    assert caught.value.details["failing_asr_substep"] == "ASR_CAPABILITY_PROBE"
 
 
 def test_tamil_asr_uses_local_fallback_and_never_loads_english_alignment(monkeypatch, tmp_path):
@@ -76,7 +174,7 @@ def test_tamil_asr_uses_local_fallback_and_never_loads_english_alignment(monkeyp
     class Model:
         @staticmethod
         def transcribe(_audio, batch_size):
-            assert batch_size == 8
+            assert batch_size == 1
             return {"language": "ta", "segments": [{"start": 0.0, "end": 1.0, "text": "தமிழ் மொழி"}]}
 
     class WhisperX:
@@ -104,7 +202,10 @@ def test_tamil_asr_uses_local_fallback_and_never_loads_english_alignment(monkeyp
     monkeypatch.setattr(asr_stage.managed, "ready", lambda _manager: True)
     monkeypatch.setattr(asr_stage.managed, "asr_model_path", lambda: tmp_path / "model")
     monkeypatch.setattr(asr_stage.managed, "alignment_model_dir", lambda: tmp_path / "alignment")
-    monkeypatch.setattr(asr_stage.hardware, "snapshot", lambda _root: {})
+    monkeypatch.setattr(asr_stage.hardware, "snapshot", lambda _root: {
+        "ram_bytes": 8 * 1024**3,
+        "cpu_ctranslate2": {"verified": True, "compute_types": ["int8"]},
+    })
     monkeypatch.setattr(asr_stage.hardware, "select_asr_accelerator", lambda _capabilities: ("cpu", "int8"))
     monkeypatch.setattr(asr_stage.hardware, "asr_readiness", lambda _capabilities: {"state": "CPU FALLBACK", "device": "cpu", "compute_type": "int8", "reason": "cpu"})
 

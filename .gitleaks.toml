@@ -17,3 +17,9 @@ regexes = [
   '''pexels-secret''',
   '''ig-secret'''
 ]
+
+[[allowlists]]
+description = "Historical verification-plan prose falsely detected as an API key"
+commits = ["f809c4a9954b5f27e37efb80b2b0748ccdb35e81"]
+paths = ["docs/qa/AZ_TOTAL_VERIFICATION_PLAN.md"]
+regexes = ['''failure/telemetry/privacy''']

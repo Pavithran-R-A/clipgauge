@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { invoke } from '@tauri-apps/api/core'
 import { api } from '../api'
@@ -92,6 +92,13 @@ describe('ClipEditor loading, recovery, and ready states', () => {
     expect(onClose).toHaveBeenCalledOnce()
   })
 
+  it('rejects malformed timeline arrays before rendering the editor', async () => {
+    vi.mocked(invoke).mockResolvedValue({ ...validContext, auto_cuts: 'not-an-array' } as never)
+    renderEditor()
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Editor data is malformed')
+  })
+
   it('transitions to a ready source-monitor DOM after valid context and media URL', async () => {
     vi.mocked(invoke).mockResolvedValue(validContext as never)
     renderEditor()
@@ -101,6 +108,45 @@ describe('ClipEditor loading, recovery, and ready states', () => {
     expect(screen.getByText(/CLIP 0/)).toBeInTheDocument()
     fireEvent.loadedMetadata(video)
     expect(screen.getByRole('button', { name: 'Render updated clip' })).toBeEnabled()
+  })
+
+  it('shows recovery when the source playback URL is malformed', async () => {
+    vi.mocked(invoke).mockResolvedValue(validContext as never)
+    vi.mocked(api.requestPlaybackUrl).mockResolvedValueOnce(null as never)
+    renderEditor()
+
+    expect(await screen.findByText('The source video could not be loaded. Try again or go back to clips.')).toBeInTheDocument()
+  })
+
+  it('keeps preview controls labeled when playback is rejected', async () => {
+    vi.mocked(invoke).mockResolvedValue(validContext as never)
+    renderEditor()
+    const video = await screen.findByTestId('editor-source-video')
+    Object.defineProperty(video, 'play', { configurable: true, value: vi.fn(() => Promise.reject(new Error('autoplay blocked'))) })
+    fireEvent.click(screen.getByRole('button', { name: 'Play preview' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Play preview' })).toBeInTheDocument())
+  })
+
+  it('surfaces edit-save failures without an unhandled rejection', async () => {
+    vi.mocked(invoke)
+      .mockResolvedValueOnce(validContext as never)
+      .mockRejectedValueOnce(new Error('save unavailable'))
+    renderEditor()
+    await screen.findByTestId('editor-source-video')
+    fireEvent.click(screen.getByRole('button', { name: 'beast' }))
+    expect(await screen.findByText('Could not save clip edits. Retry the action.')).toBeInTheDocument()
+  })
+
+  it('ignores a stale context response after the clip changes', async () => {
+    let resolveFirst: (value: typeof validContext) => void = () => undefined
+    vi.mocked(invoke)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve }) as never)
+      .mockResolvedValue(validContext as never)
+    const view = renderEditor()
+    view.rerender(<ClipEditor jobId="job-1" clipIndex={1} onClose={vi.fn()} onRendered={vi.fn()} />)
+    resolveFirst({ ...validContext, edit: { ...validContext.edit, start: 99, end: 109 } })
+    expect(await screen.findByText(/CLIP 1/)).toHaveTextContent('0:00.0')
+    expect(screen.queryByText(/1:39.0/)).not.toBeInTheDocument()
   })
 
   it('clears Rendering and reports success when the native bridge emits a terminal event', async () => {
@@ -119,5 +165,28 @@ describe('ClipEditor loading, recovery, and ready states', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Render updated clip' })).toBeEnabled())
     expect(screen.queryByRole('button', { name: 'Rendering…' })).not.toBeInTheDocument()
     expect(onRendered).toHaveBeenCalledOnce()
+  })
+
+  it('does not request visual suggestions after unmount during save', async () => {
+    let resolveSave: ((value: unknown) => void) | undefined
+    vi.mocked(invoke)
+      .mockResolvedValueOnce(validContext as never)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSave = resolve }) as never)
+    const view = renderEditor()
+
+    await screen.findByTestId('editor-source-video')
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest stock visuals' }))
+    expect(resolveSave).toBeDefined()
+    view.unmount()
+
+    await act(async () => {
+      resolveSave?.({ ok: true, edit: validContext.edit })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith('edit_tool', {
+      args: ['suggest-visuals', 'job-1', '0', '--prefer', 'pexels']
+    })
   })
 })

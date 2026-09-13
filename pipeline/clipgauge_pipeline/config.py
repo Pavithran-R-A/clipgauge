@@ -62,6 +62,29 @@ SUBPROCESS_INACTIVITY_TIMEOUT = 120.0
 PROBE_TIMEOUT = 60.0
 MAX_HEIGHT = 1080
 AUDIO_SR = 16_000
+QUALITY_MODES = ("private", "balanced", "best")
+OUTPUT_PREFERENCES = ("best", "recommended", "more")
+
+
+def validate_quality_mode(value: str) -> str:
+    mode = str(value).strip().lower()
+    if mode not in QUALITY_MODES:
+        raise ValueError(f"unknown quality mode: {value}")
+    return mode
+
+
+def validate_quality_mode_for_provider(value: str, locality: str) -> str:
+    mode = validate_quality_mode(value)
+    if mode == "private" and str(locality).strip().lower() != "local":
+        raise ValueError("private mode requires a local provider; choose Balanced or Best Quality for cloud scoring")
+    return mode
+
+
+def validate_output_preference(value: str) -> str:
+    preference = str(value).strip().lower()
+    if preference not in OUTPUT_PREFERENCES:
+        raise ValueError(f"output preference must be one of: {', '.join(OUTPUT_PREFERENCES)}")
+    return preference
 
 
 @dataclass
@@ -129,6 +152,8 @@ class Settings:
     provider_locality: str = "cloud"
     provider_metadata: dict[str, Any] = field(default_factory=dict)
     provider_schema_version: int = 0
+    quality_mode: str = "private"
+    output_preference: str = "recommended"
     cookies_from_browser: str | None = None
     caption_preset: str = "classic"
     laughter_specialist: bool = False
@@ -151,8 +176,10 @@ class Settings:
 
     def to_json(self) -> dict[str, Any]:
         snapshot = self.provider_snapshot()
+        quality_mode = validate_quality_mode(self.quality_mode)
+        output_preference = validate_output_preference(self.output_preference)
         return {
-            "settings_schema_version": 2,
+            "settings_schema_version": 4,
             "camera": self.camera.__dict__.copy(),
             "lufs_target": self.lufs_target,
             "true_peak_db": self.true_peak_db,
@@ -167,6 +194,8 @@ class Settings:
             "provider_locality": snapshot.get("locality", "cloud"),
             "provider_metadata": dict(snapshot.get("metadata", {})),
             "provider_schema_version": int(snapshot.get("schema_version", 1)),
+            "quality_mode": quality_mode,
+            "output_preference": output_preference,
             "cookies_from_browser": self.cookies_from_browser,
             "caption_preset": self.caption_preset,
             "laughter_specialist": self.laughter_specialist,
@@ -175,9 +204,19 @@ class Settings:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "Settings":
-        cam = CameraSettings(**data.get("camera", {}))
+        if not isinstance(data, dict):
+            raise ValueError("settings snapshot must be an object")
+        camera_data = data.get("camera", {})
+        if not isinstance(camera_data, dict):
+            raise ValueError("settings snapshot camera must be an object")
+        try:
+            cam = CameraSettings(**camera_data)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("settings snapshot camera is malformed") from exc
         legacy_mode = str(data.get("llm_mode", "gemini"))
         snapshot = data.get("provider_snapshot")
+        if snapshot is not None and not isinstance(snapshot, dict):
+            raise ValueError("settings snapshot provider data is malformed")
         if not isinstance(snapshot, dict):
             snapshot = {
                 "schema_version": data.get("provider_schema_version", 1),
@@ -187,9 +226,23 @@ class Settings:
                 "endpoint_identity": data.get("provider_endpoint_identity"),
                 "capabilities": data.get("provider_capabilities", {}),
             }
+        capabilities = snapshot.get("capabilities", {})
+        if not isinstance(capabilities, dict):
+            raise ValueError("settings snapshot capabilities are malformed")
+        metadata = snapshot.get("metadata", {})
+        if not isinstance(metadata, dict):
+            raise ValueError("settings snapshot metadata is malformed")
         if not snapshot.get("id") or not snapshot.get("kind") or not snapshot.get("model"):
             snapshot = _legacy_provider_snapshot(legacy_mode)
         kind = str(snapshot.get("kind", legacy_mode))
+        if "quality_mode" in data:
+            quality_mode = validate_quality_mode(str(data["quality_mode"]))
+        else:
+            legacy_provider_was_explicit = any(
+                key in data
+                for key in ("llm_mode", "provider_snapshot", "provider_kind", "provider_model")
+            )
+            quality_mode = "best" if legacy_provider_was_explicit and kind not in {"ollama", "lmstudio", "clipgauge-local"} else "private"
         return cls(
             camera=cam,
             lufs_target=data.get("lufs_target", -14.0),
@@ -204,6 +257,8 @@ class Settings:
             provider_locality=str(snapshot.get("locality", "cloud")),
             provider_metadata=dict(snapshot.get("metadata", {})),
             provider_schema_version=int(snapshot.get("schema_version", 1)),
+            quality_mode=quality_mode,
+            output_preference=validate_output_preference(str(data.get("output_preference", "recommended"))),
             cookies_from_browser=data.get("cookies_from_browser"),
             caption_preset=data.get("caption_preset", "classic"),
             laughter_specialist=data.get("laughter_specialist", False),

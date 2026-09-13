@@ -334,12 +334,14 @@ class StageError(Exception):
         retryable: bool = True,
         stage: str | None = None,
         diagnostic_id: str | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
         self.stage = stage
         self.diagnostic_id = diagnostic_id
+        self.details = dict(details) if details else None
 
 
 class StageExecutionError(Exception):
@@ -402,6 +404,8 @@ class Stage:
                     "provider_model",
                     "provider_endpoint_identity",
                     "provider_capabilities",
+                    "quality_mode",
+                    "output_preference",
                 )
             }
         if self.name == "camera":
@@ -475,6 +479,37 @@ def _dependency_fingerprint(stage: Stage, ctx: StageContext, prior: dict[str, di
     )
 
 
+def cached_prefix_ready(job: Job, stages: Iterable[Stage], *, through: str) -> bool:
+    """Return true only when every prefix checkpoint is reusable."""
+    stage_list = list(stages)
+    stop_index = next((index for index, stage in enumerate(stage_list) if stage.name == through), None)
+    if stop_index is None:
+        return False
+    try:
+        settings = config.Settings.from_json(json.loads(job.settings_json))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    ctx = StageContext(job=job, settings=settings, progress=lambda *_: None)
+    prior: dict[str, dict] = {}
+    for stage in stage_list[: stop_index + 1]:
+        dependency_fingerprint = _dependency_fingerprint(stage, ctx, prior)
+        cached, _ = read_checkpoint_detailed(
+            job,
+            stage.name,
+            stage.schema_version,
+            dependency_fingerprint,
+        )
+        if cached is None:
+            return False
+        try:
+            if not stage.artifacts_ok(ctx, cached):
+                return False
+        except (OSError, KeyError, TypeError, ValueError):
+            return False
+        prior[stage.name] = cached
+    return True
+
+
 def _with_checkpoint_metadata(data: dict, dependency_fingerprint: str) -> dict:
     output = dict(data)
     output["_checkpoint"] = {
@@ -484,13 +519,25 @@ def _with_checkpoint_metadata(data: dict, dependency_fingerprint: str) -> dict:
     return output
 
 
-def run_stages(job: Job, stages: Iterable[Stage], progress: ProgressFn) -> dict[str, dict]:
+def run_stages(
+    job: Job,
+    stages: Iterable[Stage],
+    progress: ProgressFn,
+    *,
+    stop_after: str | None = None,
+) -> dict[str, dict]:
     """Run stages in order, skipping fresh checkpoints. Returns stage→data."""
+    stage_list = list(stages)
+    if stop_after is not None:
+        stop_index = next((index for index, stage in enumerate(stage_list) if stage.name == stop_after), None)
+        if stop_index is None:
+            raise ValueError(f"unknown stage stop point: {stop_after}")
+        stage_list = stage_list[: stop_index + 1]
     settings = config.Settings.from_json(json.loads(job.settings_json))
     ctx = StageContext(job=job, settings=settings, progress=progress)
     results: dict[str, dict] = {}
     set_job_status(job.id, "running")
-    for stage in stages:
+    for stage in stage_list:
         dependency_fingerprint = _dependency_fingerprint(stage, ctx, results)
         cached, issue = read_checkpoint_detailed(
             job,

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { api } from '../api'
+import { isPlaybackUrl } from '../nativeValidation'
+import { friendlyErrorMessage } from '../errorMessaging'
 import { traceMedia } from '../mediaDiagnostics'
 
 /**
@@ -39,6 +41,78 @@ interface EditContext {
   events: { type: string; start: number; end: number }[]
   auto_cuts: Cut[]
   run_caption_preset: string
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function isEditState(value: unknown): value is EditState {
+  if (!isRecord(value)) return false
+  return isFiniteNumber(value.start)
+    && isFiniteNumber(value.end)
+    && (value.caption_preset === null || typeof value.caption_preset === 'string')
+    && (value.camera_mode === null || typeof value.camera_mode === 'string')
+    && typeof value.remove_dead_space === 'boolean'
+    && Array.isArray(value.disabled_cuts)
+    && value.disabled_cuts.every((cut) => Number.isInteger(cut))
+    && Array.isArray(value.overlays)
+    && value.overlays.every((overlay) => isRecord(overlay)
+      && typeof overlay.id === 'string'
+      && typeof overlay.query === 'string'
+      && typeof overlay.source === 'string'
+      && typeof overlay.image_path === 'string'
+      && isFiniteNumber(overlay.start)
+      && isFiniteNumber(overlay.end)
+      && isFiniteNumber(overlay.x)
+      && isFiniteNumber(overlay.y)
+      && isFiniteNumber(overlay.scale)
+      && typeof overlay.animation === 'string'
+      && typeof overlay.phrase === 'string')
+}
+
+function isEditContext(value: unknown): value is EditContext {
+  if (!isRecord(value) || value.ok !== true) return false
+  const windowRange = value.window
+  const probe = value.probe
+  const trajectory = value.trajectory
+  return isRecord(windowRange)
+    && isFiniteNumber(windowRange.start)
+    && isFiniteNumber(windowRange.end)
+    && typeof value.media_path === 'string'
+    && isRecord(probe)
+    && isFiniteNumber(probe.width)
+    && isFiniteNumber(probe.height)
+    && (trajectory === null || (isRecord(trajectory)
+      && isFiniteNumber(trajectory.fps)
+      && Array.isArray(trajectory.frames)
+      && trajectory.frames.every((frame) => Array.isArray(frame) && frame.every(isFiniteNumber))))
+    && isEditState(value.edit)
+    && Array.isArray(value.words)
+    && value.words.every((word) => isRecord(word)
+      && typeof word.word === 'string'
+      && isFiniteNumber(word.start)
+      && isFiniteNumber(word.end)
+      && (word.speaker === undefined || Number.isInteger(word.speaker)))
+    && Array.isArray(value.rms)
+    && value.rms.every(isFiniteNumber)
+    && isFiniteNumber(value.rms_grid)
+    && Array.isArray(value.events)
+    && value.events.every((event) => isRecord(event)
+      && typeof event.type === 'string'
+      && isFiniteNumber(event.start)
+      && isFiniteNumber(event.end))
+    && Array.isArray(value.auto_cuts)
+    && value.auto_cuts.every((cut) => isRecord(cut)
+      && isFiniteNumber(cut.start)
+      && isFiniteNumber(cut.end)
+      && typeof cut.kept === 'boolean'
+      && typeof cut.reason === 'string')
+    && typeof value.run_caption_preset === 'string'
 }
 
 const PRESETS = ['classic', 'beast', 'hormozi', 'minimal', 'karaoke-pop']
@@ -84,23 +158,37 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
   ctxRef.current = ctx
   const cutsRef = useRef<Cut[]>([])
   const seekPending = useRef<number | null>(null)
+  const contextRequestRef = useRef(0)
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   const reload = useCallback(() => {
-    invoke<EditContext>('edit_tool', { args: ['context', jobId, String(clipIndex)] })
+    const requestId = ++contextRequestRef.current
+    invoke<unknown>('edit_tool', { args: ['context', jobId, String(clipIndex)] })
       .then((c) => {
-        if (!c.ok || !c.edit || !Array.isArray(c.rms)) {
-          const diagnostic = (c as EditContext).diagnostic_id
-          const message = c.error ?? 'Editor data is unavailable for this clip.'
+        if (!mountedRef.current || requestId !== contextRequestRef.current) return
+        if (!isRecord(c) || c.ok !== true) {
+          const diagnostic = isRecord(c) && typeof c.diagnostic_id === 'string' ? c.diagnostic_id : undefined
+          const message = isRecord(c) && typeof c.error === 'string' ? c.error : 'Editor data is unavailable for this clip.'
           setError(diagnostic ? `${message} Diagnostic ID: ${diagnostic}.` : message)
+          return
+        }
+        if (!isEditContext(c)) {
+          setError('Editor data is malformed for this clip. Retry the session.')
           return
         }
         setCtx(c)
         setEdit(c.edit)
       })
-      .catch((e) => setError(String(e)))
+      .catch((e) => { if (mountedRef.current && requestId === contextRequestRef.current) setError(friendlyErrorMessage(e, 'Editor data is unavailable for this clip. Retry the session.')) })
+    return () => { if (requestId === contextRequestRef.current) contextRequestRef.current += 1 }
   }, [jobId, clipIndex])
 
-  useEffect(reload, [reload])
+  useEffect(() => reload(), [reload])
 
   useEffect(() => {
     let active = true
@@ -109,19 +197,22 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
     if (!ctx?.media_path) return () => { active = false }
     api.requestPlaybackUrl(jobId, 'source')
       .then((url) => {
+        if (!isPlaybackUrl(url)) throw new Error('Playback URL is malformed.')
         if (active) setMediaUrl(url)
       })
-      .catch((reason) => {
-        if (active) setMediaError(String(reason))
+      .catch(() => {
+        if (active) setMediaError('The source video could not be loaded. Try again or go back to clips.')
       })
     return () => { active = false }
   }, [ctx?.media_path, jobId])
 
   useEffect(() => {
     let un: (() => void) | null = null
+    let active = true
     listen<{ event: string; message?: string; ok?: boolean; error?: string }>(
       'pipeline-event',
       ({ payload }) => {
+        if (!active) return
         if (payload.event === 'progress') setRenderMsg(payload.message ?? '')
         if (payload.event === 'terminal' || payload.event === 'result') {
           setRendering(false)
@@ -131,8 +222,8 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
           } else setError(payload.error ?? payload.message ?? 'Rendering failed.')
         }
       }
-    ).then((u) => (un = u))
-    return () => un?.()
+    ).then((u) => { if (active) un = u; else u() }).catch((reason) => { if (active) setError(friendlyErrorMessage(reason, 'Editor events are unavailable. Restart ClipGauge and retry.')) })
+    return () => { active = false; un?.() }
   }, [onRendered])
 
   const win = ctx?.window
@@ -253,8 +344,11 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
     if (!v || !e) return
     if (v.paused) {
       if (v.currentTime < e.start - 0.01 || v.currentTime >= e.end - 0.05) v.currentTime = e.start
-      void v.play()
-      setPlaying(true)
+      void v.play().then(() => {
+        if (videoRef.current === v) setPlaying(true)
+      }).catch(() => {
+        if (videoRef.current === v) setPlaying(false)
+      })
     } else {
       v.pause()
       setPlaying(false)
@@ -344,33 +438,49 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
 
   async function persist(next: EditState) {
     setEdit(next)
-    await invoke('save_clip_edits', { jobId, input: { clip: clipIndex, edit: next } })
+    setError(null)
+    try {
+      await invoke('save_clip_edits', { jobId, input: { clip: clipIndex, edit: next } })
+    } catch (e) {
+      if (mountedRef.current) setError(friendlyErrorMessage(e, 'Could not save clip edits. Retry the action.'))
+    }
   }
 
   async function doRender() {
     if (!edit) return
-    await invoke('save_clip_edits', { jobId, input: { clip: clipIndex, edit } })
-    setRendering(true)
-    setRenderMsg('starting…')
     setError(null)
-    await invoke('run_edit_render', { jobId, clip: clipIndex })
+    try {
+      await invoke('save_clip_edits', { jobId, input: { clip: clipIndex, edit } })
+      if (!mountedRef.current) return
+      setRendering(true)
+      setRenderMsg('starting…')
+      setError(null)
+      await invoke('run_edit_render', { jobId, clip: clipIndex })
+    } catch (e) {
+      if (mountedRef.current) {
+        setRendering(false)
+        setError(friendlyErrorMessage(e, 'Rendering could not be started. Retry the clip.'))
+      }
+    }
   }
 
   async function doSuggest(prefer: string) {
     if (!edit) return
-    await invoke('save_clip_edits', { jobId, input: { clip: clipIndex, edit } })
     setSuggesting(true)
     setError(null)
     try {
+      await invoke('save_clip_edits', { jobId, input: { clip: clipIndex, edit } })
+      if (!mountedRef.current) return
       const res = await invoke<{ ok: boolean; edit?: EditState; error?: string }>('edit_tool', {
         args: ['suggest-visuals', jobId, String(clipIndex), '--prefer', prefer]
       })
+      if (!mountedRef.current) return
       if (res.ok && res.edit) setEdit(res.edit)
       else setError(res.error ?? 'no visuals found')
     } catch (e) {
-      setError(String(e))
+      if (mountedRef.current) setError(friendlyErrorMessage(e, 'Could not suggest visuals. Retry the action.'))
     } finally {
-      setSuggesting(false)
+      if (mountedRef.current) setSuggesting(false)
     }
   }
 
@@ -432,6 +542,9 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
               onStalled={(event) => traceMedia('editor', 'stalled', event.currentTarget)}
               onSuspend={(event) => traceMedia('editor', 'suspend', event.currentTarget)}
               onWaiting={(event) => traceMedia('editor', 'waiting', event.currentTarget)}
+              onPlay={() => setPlaying(true)}
+              onPause={() => setPlaying(false)}
+              onEnded={() => setPlaying(false)}
               onError={(event) => {
                 traceMedia('editor', 'error', event.currentTarget)
                 setMediaError('The source video could not be loaded. Try again or go back to clips.')
@@ -481,7 +594,7 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
           })}
         </div>
         <div className="monitor-src-bar">
-          <button className="play-btn" onClick={togglePlay}>
+          <button type="button" className="play-btn" aria-label={playing ? 'Pause preview' : 'Play preview'} onClick={togglePlay}>
             {playing ? '❚❚' : '▶'}
           </button>
           <span className="mono play-time">{timeLabel}</span>

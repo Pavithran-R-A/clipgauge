@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
-import type { JobResults, JobSummary, LocalSetupInventory, LoopOverview, PreflightResult, PrivacySummary, SaveClipEditsInput, SetupState, StorageCleanupPreview, StorageCleanupResult, SyncSummary, ProviderTestResult } from './types'
+import type { JobResults, JobSummary, LocalSetupInventory, LoopOverview, PreflightResult, PrivacySummary, SaveClipEditsInput, SetupState, StorageCleanupPreview, StorageCleanupResult, SyncSummary, ProviderModelsResult, ProviderTestResult } from './types'
 
 function legacyMode(provider: string): string | undefined {
   return provider === 'gemini' || provider === 'ollama' ? provider : undefined
@@ -13,22 +13,24 @@ type ProviderOptions = {
 }
 
 export const api = {
-  preflight: (provider: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, source?: string) =>
-    invoke<PreflightResult>('preflight', { llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader, source }),
+  preflight: (provider: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, source?: string, qualityMode?: string) =>
+    invoke<PreflightResult>('preflight', { llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader, source, quality_mode: qualityMode }),
   privacySummary: (provider: string, model?: string, endpoint?: string) =>
     invoke<PrivacySummary>('privacy_summary', { llm: legacyMode(provider), provider, model, endpoint }),
   generateSupportBundle: (jobId?: string, diagnosticId?: string) => invoke<string>('generate_support_bundle', { jobId, diagnosticId }),
-  runJob: (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, browserSession?: string) =>
+  runJob: (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, browserSession?: string, qualityMode?: string, outputPreference?: string) =>
     invoke<void>('run_job', {
-      request: { source, llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader, captions, cookies_from_browser: browserSession },
+      request: { source, llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader, captions, cookies_from_browser: browserSession, quality_mode: qualityMode, output_preference: outputPreference },
     }),
-  resumeJob: (jobId: string, provider?: string, captions?: string, camera?: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, allowCpuAsrFallback = false) =>
+  resumeJob: (jobId: string, provider?: string, captions?: string, camera?: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, allowCpuAsrFallback = false, qualityMode?: string, outputPreference?: string) =>
     invoke<void>('resume_job', {
-      request: { job_id: jobId, llm: provider ? legacyMode(provider) : undefined, provider, model, endpoint, auth, secret_header: secretHeader, captions, camera, allow_cpu_asr_fallback: allowCpuAsrFallback },
+      request: { job_id: jobId, llm: provider ? legacyMode(provider) : undefined, provider, model, endpoint, auth, secret_header: secretHeader, captions, camera, allow_cpu_asr_fallback: allowCpuAsrFallback, quality_mode: qualityMode, output_preference: outputPreference },
     }),
   repairGpu: () => invoke<Record<string, unknown>>('setup_tool', { args: ['gpu-repair'] }),
   testConnection: (provider: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
     invoke<ProviderTestResult>('test_connection', { llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader }),
+  listProviderModels: (provider: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string) =>
+    invoke<ProviderModelsResult>('provider_models', { llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader }),
   saveProviderKey: (profileId: string, key: string) => invoke<boolean>('save_provider_key', { profileId, key }),
   removeProviderKey: (profileId: string) => invoke<boolean>('remove_provider_key', { profileId }),
   removeGeminiKey: () => invoke<boolean>('remove_gemini_key'),

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assetLifecycleLabel, formatBytes, formatDuration, formatRate, meaningfulEta, progressPercent } from './setupFormatting'
+import { assetLifecycleLabel, diskState, formatBytes, formatDuration, formatRate, meaningfulEta, progressPercent } from './setupFormatting'
 
 describe('setup formatting', () => {
   it('uses automatic byte units and rates', () => {
@@ -23,5 +23,11 @@ describe('setup formatting', () => {
     expect(assetLifecycleLabel({ installed: false, cached: false, one_time: true })).toBe('ONE-TIME DOWNLOAD')
     expect(assetLifecycleLabel({ installed: true, cached: true, one_time: true })).toBe('INSTALLED · REUSED FOR FUTURE JOBS')
     expect(assetLifecycleLabel({ installed: true, cached: true, one_time: true, reused_from_migration: true })).toBe('REUSED FROM EXISTING INSTALLATION')
+  })
+
+  it('distinguishes healthy, low, and critical space', () => {
+    expect(diskState(8 * 1024 ** 3, 1 * 1024 ** 3).state).toBe('HEALTHY')
+    expect(diskState(3 * 1024 ** 3, 1 * 1024 ** 3).state).toBe('LOW')
+    expect(diskState(900 * 1024 ** 2, 1 * 1024 ** 3).state).toBe('CRITICAL')
   })
 })

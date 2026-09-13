@@ -64,6 +64,10 @@ struct RunJobRequest {
     #[serde(default)]
     captions: Option<String>,
     #[serde(default)]
+    quality_mode: Option<String>,
+    #[serde(default)]
+    output_preference: Option<String>,
+    #[serde(default)]
     cookies_from_browser: Option<String>,
     #[serde(default)]
     allow_cpu_asr_fallback: bool,
@@ -102,14 +106,35 @@ struct ResumeJobRequest {
     #[serde(default)]
     camera: Option<String>,
     #[serde(default)]
+    quality_mode: Option<String>,
+    #[serde(default)]
+    output_preference: Option<String>,
+    #[serde(default)]
     allow_cpu_asr_fallback: bool,
 }
 
+fn application_home_from_env(
+    qa_home: Option<std::ffi::OsString>,
+    profile_home: PathBuf,
+) -> PathBuf {
+    #[cfg(feature = "qualification-vault")]
+    if let Some(value) = qa_home {
+        let candidate = PathBuf::from(value);
+        if candidate.is_absolute() {
+            return candidate;
+        }
+    }
+
+    #[cfg(not(feature = "qualification-vault"))]
+    let _ = qa_home;
+
+    profile_home.join(".clipgauge")
+}
+
 fn home_dir() -> PathBuf {
-    // The desktop owns one stable root. Direct Python CLI tests may still use
-    // CLIPGAUGE_HOME, but packaged Rust commands never accept an arbitrary
-    // user-provided root that could escape the asset scope.
-    dirs_home().join(".clipgauge")
+    // Production always owns one stable profile root.
+    // Qualification builds may use an isolated test root.
+    application_home_from_env(std::env::var_os("CLIPGAUGE_QA_HOME"), dirs_home())
 }
 
 fn profile_home_from_env(
@@ -401,14 +426,21 @@ fn privacy_summary(
         json!({
             "mode": selected.clone(),
             "device": ["source media remains in the managed local job directory"],
-            "network": ["source URL download when a URL is provided", "pinned runtime/model downloads when absent", "Gemini receives transcript slices, scoring context, and sampled finalist frames", "optional Pexels visual queries"],
+            "network": ["source URL download when a URL is provided", "pinned runtime/model downloads when absent", "Gemini receives candidate transcript slices and candidate metadata; sampled finalist images leave the device for visual scoring; the full source file is not sent", "optional Pexels visual queries"],
             "provider": "Gemini is contacted with an operation-scoped vault credential; the API key is not included in requests as a query parameter"
+        })
+    } else if selected == "clipgauge-local" {
+        json!({
+            "mode": selected.clone(),
+            "device": ["source media, transcript, sampled frames, and score inputs remain on this computer"],
+            "network": ["source URL download when a URL is provided", "pinned runtime/model downloads when setup requires them", "optional Pexels visual queries"],
+            "provider": "ClipGauge Local scores on this computer; no transcript or source-derived frames are sent to a cloud AI provider"
         })
     } else {
         json!({
             "mode": selected,
             "device": ["source media remains in the managed local job directory"],
-            "network": ["source URL download when a URL is provided", "provider endpoint receives transcript slices and scoring context", "selected frames leave the device only when the selected model advertises vision"],
+            "network": ["source URL download when a URL is provided", "provider endpoint receives candidate transcript slices and candidate metadata", "sampled images leave the device only when the selected model advertises vision; the full source file is not sent"],
             "provider": "This selected provider is contacted outside ClipGauge; review its current privacy and retention terms before sending source-derived material",
             "model": model,
             "endpoint": endpoint.map(|value| value.split('/').take(3).collect::<Vec<_>>().join("/"))
@@ -542,16 +574,17 @@ fn generate_support_bundle_at(
     let mut included_diagnostics = Vec::new();
     let root_diagnostics = root.join("diagnostics");
     if let Ok(entries) = fs::read_dir(&root_diagnostics) {
-        for entry in entries.flatten().take(8) {
+        let entries = entries.flatten().filter(|entry| {
+            let Some(requested) = &diagnostic_id else {
+                return true;
+            };
+            entry.file_name().to_string_lossy() == format!("{requested}.log")
+        });
+        for entry in entries.take(8) {
             let path = entry.path();
             let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
                 continue;
             };
-            if let Some(requested) = &diagnostic_id {
-                if file_name != format!("{requested}.log") {
-                    continue;
-                }
-            }
             let _ = append_diagnostic_file(
                 &mut archive,
                 options,
@@ -673,6 +706,22 @@ fn append_provider_args(
     }
 }
 
+fn append_quality_mode_arg(args: &mut Vec<String>, quality_mode: Option<String>) {
+    if let Some(mode) = quality_mode {
+        args.push("--quality-mode".to_string());
+        args.push(mode);
+    }
+}
+
+fn append_output_preference_arg(args: &mut Vec<String>, output_preference: Option<String>) {
+    if let Some(preference) = output_preference {
+        args.push("--output-preference".to_string());
+        args.push(preference);
+    }
+}
+
+// Tauri exposes these named fields individually to the frontend.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn preflight(
     llm: Option<String>,
@@ -682,6 +731,7 @@ async fn preflight(
     auth: Option<String>,
     secret_header: Option<String>,
     source: Option<String>,
+    quality_mode: Option<String>,
 ) -> Result<Value, String> {
     spawn_blocking_result(move || {
         let selected_provider = provider.clone();
@@ -700,6 +750,7 @@ async fn preflight(
             args.push("--source".to_string());
             args.push(value);
         }
+        append_quality_mode_arg(&mut args, quality_mode);
         let mut command = quiet_command(&program);
         secrets::apply_operation_env(&mut command);
         if let Some((env_name, profile_id)) = selected_provider_env(selected_provider.as_deref()) {
@@ -745,6 +796,39 @@ async fn test_connection(
 }
 
 #[tauri::command]
+async fn provider_models(
+    llm: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    endpoint: Option<String>,
+    auth: Option<String>,
+    secret_header: Option<String>,
+) -> Result<Value, String> {
+    spawn_blocking_result(move || {
+        let selected_provider = provider.clone();
+        let (program, mut args) = pipeline_invocation();
+        args.push("provider-models".to_string());
+        append_provider_args(
+            &mut args,
+            llm,
+            provider,
+            model,
+            endpoint,
+            auth,
+            secret_header,
+        );
+        let mut command = quiet_command(&program);
+        secrets::apply_operation_env(&mut command);
+        if let Some((env_name, profile_id)) = selected_provider_env(selected_provider.as_deref()) {
+            secrets::apply_provider_operation_env(&mut command, &profile_id, env_name);
+        }
+        command.env("CLIPGAUGE_HOME", home_dir()).args(&args);
+        run_json_sidecar(command, "provider models")
+    })
+    .await
+}
+
+#[tauri::command]
 fn run_job(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -759,6 +843,8 @@ fn run_job(
         auth,
         secret_header,
         captions,
+        quality_mode,
+        output_preference,
         cookies_from_browser,
         allow_cpu_asr_fallback,
     } = request;
@@ -819,6 +905,8 @@ fn run_job(
             args.push("--captions".to_string());
             args.push(preset);
         }
+        append_quality_mode_arg(&mut args, quality_mode);
+        append_output_preference_arg(&mut args, output_preference);
         if let Some(browser) = cookies_from_browser {
             args.push("--cookies-from-browser".to_string());
             args.push(browser);
@@ -854,6 +942,8 @@ fn resume_job(
         secret_header,
         captions,
         camera,
+        quality_mode,
+        output_preference,
         allow_cpu_asr_fallback,
     } = request;
     validate_job_id(&job_id)?;
@@ -884,6 +974,8 @@ fn resume_job(
             args.push("--camera".to_string());
             args.push(cam);
         }
+        append_quality_mode_arg(&mut args, quality_mode);
+        append_output_preference_arg(&mut args, output_preference);
         if allow_cpu_asr_fallback {
             args.push("--allow-cpu-asr-fallback".to_string());
         }
@@ -931,11 +1023,8 @@ fn write_lifecycle_snapshot(processes: &Arc<Mutex<process_manager::ProcessManage
     let Ok(path) = lifecycle_path(&lease.job_id) else {
         return;
     };
-    let temp = path.with_extension("json.tmp");
     if let Ok(payload) = serde_json::to_vec_pretty(&lease) {
-        if fs::write(&temp, payload).is_ok() {
-            let _ = fs::rename(&temp, &path);
-        }
+        let _ = setup_inventory::atomic_write(&path, &payload);
     }
 }
 
@@ -960,11 +1049,8 @@ fn reconcile_stale_leases(processes: &mut process_manager::ProcessManager) {
         };
         if lease.session_id != processes.session_id() && !lease.state.terminal() {
             let stale = process_manager::ProcessManager::mark_interrupted(&lease);
-            let temp = path.with_extension("json.tmp");
             if let Ok(payload) = serde_json::to_vec_pretty(&stale) {
-                if fs::write(&temp, payload).is_ok() {
-                    let _ = fs::rename(temp, path);
-                }
+                let _ = setup_inventory::atomic_write(&path, &payload);
             }
         }
     }
@@ -1501,7 +1587,7 @@ fn stream_setup(
         .spawn();
     let mut child = match child {
         Ok(child) => child,
-        Err(error) => {
+        Err(_error) => {
             if let Ok(mut state) = processes.lock() {
                 let _ = state.finish(&key, false);
             }
@@ -1512,7 +1598,7 @@ fn stream_setup(
                     "event": "terminal",
                     "ok": false,
                     "code": "SETUP_START_FAILED",
-                    "message": diagnostics::redact(&error.to_string()),
+                    "message": setup_start_failure_message(),
                     "retryable": true,
                     "diagnostic_id": diagnostics::diagnostic_id(),
                 }),
@@ -1626,6 +1712,10 @@ fn stream_setup(
     }
 }
 
+fn setup_start_failure_message() -> &'static str {
+    "Setup could not start. Check the installation and retry. Use the diagnostic ID for support."
+}
+
 fn valid_start_setup_args(args: &[String]) -> bool {
     matches!(args, [command] if command == "install-runtime" || command == "install-ffmpeg")
         || matches!(args, [command, group, value] if command == "install-group" && group == "--group" && matches!(value.as_str(), "core:asr" | "core:analysis" | "core:youtube"))
@@ -1676,7 +1766,7 @@ fn start_setup(
     std::thread::spawn(move || {
         let init_processes = processes.clone();
         let init_key = worker_key.clone();
-        if let Err(error) = initialization.ensure_initialized(|| {
+        if let Err(_error) = initialization.ensure_initialized(|| {
             initialize_pipeline_with_registration(|process_id| {
                 if let Ok(mut lifecycle) = init_processes.lock() {
                     let _ = lifecycle.adopt_job_id(&init_key, init_key.clone());
@@ -1694,7 +1784,7 @@ fn start_setup(
             let message = if cancelled {
                 "Setup was cancelled. Verified assets remain reusable.".to_string()
             } else {
-                diagnostics::redact(&error)
+                setup_start_failure_message().to_string()
             };
             if let Ok(mut state) = processes.lock() {
                 let _ = state.finish(&worker_key, false);
@@ -1952,13 +2042,8 @@ fn save_clip_edits_blocking(
     for (key, value) in incoming_obj {
         current_obj.insert(key.clone(), value.clone());
     }
-    let temp = path.with_extension("json.tmp");
-    fs::write(
-        &temp,
-        serde_json::to_vec_pretty(&current).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    fs::rename(&temp, &path).map_err(|e| e.to_string())
+    let payload = serde_json::to_vec_pretty(&current).map_err(|e| e.to_string())?;
+    setup_inventory::atomic_write(&path, &payload)
 }
 
 #[tauri::command]
@@ -1978,7 +2063,7 @@ async fn ig_status() -> Result<Value, String> {
 fn ig_status_blocking() -> Result<Value, String> {
     let connected = secrets::get(secrets::SecretName::InstagramConnection)?
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-    match connected {
+    match connected.filter(instagram_connection_is_valid) {
         Some(v) => Ok(json!({
             "connected": true,
             "username": v["username"],
@@ -1986,6 +2071,27 @@ fn ig_status_blocking() -> Result<Value, String> {
         })),
         None => Ok(json!({"connected": false})),
     }
+}
+
+fn instagram_connection_from_json(raw: &str) -> Result<Value, String> {
+    let value = serde_json::from_str::<Value>(raw)
+        .map_err(|_| "Instagram connection is malformed.".to_string())?;
+    if !instagram_connection_is_valid(&value) {
+        return Err("Instagram connection is incomplete.".to_string());
+    }
+    Ok(value)
+}
+
+fn instagram_connection_is_valid(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    ["user_id", "access_token"].iter().all(|field| {
+        object
+            .get(*field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    })
 }
 
 fn ig_connect_args(mut base_args: Vec<String>, app_id: String) -> Vec<String> {
@@ -2063,7 +2169,9 @@ fn ig_connect_blocking(app_id: String, app_secret: String) -> Result<String, Str
     if out.status.success() {
         let persisted = fs::read_to_string(&connection_output)
             .map_err(|error| diagnostics::redact(&error.to_string()))?;
-        secrets::set(secrets::SecretName::InstagramConnection, &persisted)?;
+        let parsed = instagram_connection_from_json(&persisted)?;
+        let compact = serde_json::to_string(&parsed).map_err(|error| error.to_string())?;
+        secrets::set(secrets::SecretName::InstagramConnection, &compact)?;
         let _ = fs::remove_file(&connection_output);
         Ok(stdout)
     } else {
@@ -2210,6 +2318,7 @@ fn main() {
             preflight,
             privacy_summary,
             test_connection,
+            provider_models,
             generate_support_bundle,
             run_job,
             resume_job,
@@ -2262,8 +2371,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::packaged_resource_dir;
     use super::{
-        canonical_provider_id, generate_support_bundle_at, ig_connect_args, ig_failure_message,
-        is_completion_payload, migrate_legacy_data_from, read_bounded_line, selected_provider_env,
+        append_output_preference_arg, canonical_provider_id, generate_support_bundle_at,
+        ig_connect_args, ig_failure_message, instagram_connection_from_json,
+        instagram_connection_is_valid, is_completion_payload, migrate_legacy_data_from,
+        privacy_summary, read_bounded_line, selected_provider_env, setup_start_failure_message,
         spawn_blocking_result, valid_setup_tool_args, valid_start_setup_args,
         validate_browser_session, ResumeJobRequest, RunJobRequest,
     };
@@ -2311,6 +2422,30 @@ mod tests {
         assert_eq!(
             resolved,
             std::path::PathBuf::from(r"C:\\fake-windows-profile")
+        );
+    }
+
+    #[cfg(not(feature = "qualification-vault"))]
+    #[test]
+    fn application_home_uses_profile_root_by_default() {
+        let profile = std::path::PathBuf::from(r"C:\\fake-windows-profile");
+        assert_eq!(
+            super::application_home_from_env(
+                Some(std::ffi::OsString::from(r"C:\\fake-qa-home")),
+                profile.clone(),
+            ),
+            profile.join(".clipgauge")
+        );
+    }
+
+    #[cfg(feature = "qualification-vault")]
+    #[test]
+    fn qualification_home_accepts_absolute_isolated_root() {
+        let profile = std::path::PathBuf::from(r"C:\\fake-windows-profile");
+        let isolated = std::path::PathBuf::from(r"C:\\qa-output\\clipgauge-home");
+        assert_eq!(
+            super::application_home_from_env(Some(isolated.as_os_str().to_os_string()), profile,),
+            isolated
         );
     }
 
@@ -2403,6 +2538,44 @@ mod tests {
     }
 
     #[test]
+    fn setup_start_failure_uses_safe_user_copy() {
+        let message = setup_start_failure_message();
+        assert!(!message.contains("C:\\Users"));
+        assert!(!message.contains("token="));
+        assert!(message.contains("diagnostic ID"));
+    }
+
+    #[test]
+    fn local_privacy_summary_does_not_claim_cloud_transfer() {
+        let summary =
+            privacy_summary(Some("clipgauge-local".to_string()), None, None, None).unwrap();
+        let text = summary.to_string();
+
+        assert!(text.contains("scores on this computer"));
+        assert!(!text.contains("provider endpoint receives transcript slices"));
+        assert!(!text.contains("selected frames leave the device"));
+    }
+
+    #[test]
+    fn cloud_privacy_summary_names_candidate_data_boundary() {
+        for provider in ["groq", "gemini"] {
+            let summary = privacy_summary(
+                Some(provider.to_string()),
+                Some(provider.to_string()),
+                Some("test-model".to_string()),
+                Some("https://provider.example/v1".to_string()),
+            )
+            .unwrap();
+            let text = summary.to_string();
+
+            assert!(text.contains("candidate transcript slices"));
+            assert!(text.contains("candidate metadata"));
+            assert!(text.contains("sampled"));
+            assert!(text.contains("full source file is not sent"));
+        }
+    }
+
+    #[test]
     fn setup_tool_accepts_gpu_diagnostics_and_repair() {
         assert!(valid_setup_tool_args(&["gpu-status".to_string()]));
         assert!(valid_setup_tool_args(&["gpu-repair".to_string()]));
@@ -2491,6 +2664,30 @@ mod tests {
     }
 
     #[test]
+    fn instagram_status_requires_nonempty_identity_and_token() {
+        assert!(!instagram_connection_is_valid(&json!({})));
+        assert!(!instagram_connection_is_valid(&json!({"user_id": "42"})));
+        assert!(!instagram_connection_is_valid(
+            &json!({"access_token": "token"})
+        ));
+        assert!(!instagram_connection_is_valid(
+            &json!({"user_id": "", "access_token": "token"})
+        ));
+        assert!(instagram_connection_is_valid(
+            &json!({"user_id": "42", "access_token": "token"})
+        ));
+    }
+
+    #[test]
+    fn instagram_connection_parser_rejects_malformed_oauth_output() {
+        assert!(instagram_connection_from_json("not-json").is_err());
+        assert!(instagram_connection_from_json(r#"{"user_id":"42"}"#).is_err());
+        assert!(
+            instagram_connection_from_json(r#"{"user_id":"42","access_token":"token"}"#).is_ok()
+        );
+    }
+
+    #[test]
     fn support_bundle_excludes_known_secrets() {
         let root = std::env::temp_dir().join(format!(
             "clipgauge-support-{}",
@@ -2560,6 +2757,37 @@ mod tests {
             .unwrap();
         assert!(report.contains(&diagnostic_id));
         assert!(report.contains("\"missing_diagnostic\": null"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn support_bundle_finds_requested_root_diagnostic_beyond_sample_limit() {
+        let root = std::env::temp_dir().join(format!(
+            "clipgauge-support-root-limit-{}",
+            super::diagnostics::diagnostic_id()
+        ));
+        let requested_id = "diag-ffffffffffffffff".to_string();
+        let diagnostics_dir = root.join("diagnostics");
+        fs::create_dir_all(&diagnostics_dir).unwrap();
+        for index in 1..=8 {
+            let filler_id = format!("diag-000000000000000{index}");
+            fs::write(
+                diagnostics_dir.join(format!("{filler_id}.log")),
+                "stage=filler",
+            )
+            .unwrap();
+        }
+        fs::write(
+            diagnostics_dir.join(format!("{requested_id}.log")),
+            "stage=requested",
+        )
+        .unwrap();
+
+        let bundle = generate_support_bundle_at(&root, None, Some(requested_id.clone())).unwrap();
+        let file = fs::File::open(bundle).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let name = format!("diagnostics/{requested_id}.log");
+        assert!(archive.by_name(&name).is_ok());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2688,21 +2916,32 @@ mod tests {
             "endpoint": "http://127.0.0.1:11434",
             "auth": "none",
             "secret_header": null,
-            "captions": "classic"
+            "captions": "classic",
+            "output_preference": "more"
         });
         let parsed = serde_json::from_value::<RunJobRequest>(run).unwrap();
         assert_eq!(parsed.source, "clip.mp4");
         assert_eq!(parsed.provider.as_deref(), Some("ollama"));
         assert_eq!(parsed.model.as_deref(), Some("llama3.2"));
+        assert_eq!(parsed.output_preference.as_deref(), Some("more"));
 
         let resume = json!({
             "job_id": "20260819-120000-abcdef",
             "provider": "custom",
             "model": "manual",
-            "camera": "locked"
+            "camera": "locked",
+            "output_preference": "best"
         });
         let parsed = serde_json::from_value::<ResumeJobRequest>(resume).unwrap();
         assert_eq!(parsed.job_id, "20260819-120000-abcdef");
         assert_eq!(parsed.camera.as_deref(), Some("locked"));
+        assert_eq!(parsed.output_preference.as_deref(), Some("best"));
+    }
+
+    #[test]
+    fn output_preference_is_forwarded_as_a_cli_argument() {
+        let mut args = Vec::new();
+        append_output_preference_arg(&mut args, Some("more".to_string()));
+        assert_eq!(args, vec!["--output-preference", "more"]);
     }
 }

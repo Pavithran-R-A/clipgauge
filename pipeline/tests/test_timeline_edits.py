@@ -1,10 +1,31 @@
 """Keep-range / remap math — the A/V-sync-critical core of per-clip editing."""
 
-from clipgauge_pipeline.edits import timeline as tl
+import json
+
+import pytest
+
+from clipgauge_pipeline.edits import store, timeline as tl
 
 
 def _words(spans):
     return [{"word": w, "start": a, "end": b} for w, a, b in spans]
+
+
+def test_edit_save_cleans_failed_temporary(monkeypatch, tmp_path):
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    destination = store.path_for(job_dir)
+    destination.write_text("previous", encoding="utf-8")
+
+    def fail_replace(*_args):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(store.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        store.save(job_dir, {})
+
+    assert destination.read_text(encoding="utf-8") == "previous"
+    assert list(job_dir.glob(".clip_edits.json.*.tmp")) == []
 
 
 def test_dead_space_basic_cut():
@@ -78,3 +99,23 @@ def test_remap_trajectory_length_and_source_pick():
     assert out[0][0] == 0.0
     # first output frame after the cut (t_out=2.0) maps to source t=14 → idx 100
     assert out[50][0] == 100.0
+
+
+def test_malformed_edit_state_is_ignored(tmp_path):
+    (tmp_path / "clip_edits.json").write_text("[]", encoding="utf-8")
+
+    assert store.load(tmp_path) == {}
+
+
+def test_malformed_edit_entry_does_not_hide_valid_entries(tmp_path):
+    payload = {
+        "0": {"start": 1, "end": 2, "overlays": []},
+        "1": {"start": "not-a-time", "end": 2, "overlays": []},
+        "2": None,
+    }
+    (tmp_path / "clip_edits.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = store.load(tmp_path)
+
+    assert list(loaded) == ["0"]
+    assert loaded["0"].start == 1

@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import { chooseExportDestination } from '../exportDestination'
 import { traceMedia } from '../mediaDiagnostics'
 import type { Clip, JobResults, RenderOutput } from '../types'
 import ClipEditor from './ClipEditor'
+import { isPlaybackUrl } from '../nativeValidation'
+import { friendlyErrorMessage } from '../errorMessaging'
 
 const RESTYLE_PRESETS = ['classic', 'beast', 'hormozi', 'minimal', 'karaoke-pop']
 const CAMERA_MODES: [string, string][] = [
@@ -41,6 +43,41 @@ function fmtTime(t: number): string {
   return `${m}:${String(s).padStart(2, '0')}`
 }
 
+function qualityTier(score: number): string {
+  if (score >= 85) return 'Exceptional'
+  if (score >= 70) return 'Recommended'
+  return 'Review manually'
+}
+
+function confidenceLabel(value: string): string {
+  if (value === 'standard') return 'Standard model contract'
+  if (value === 'local-estimate') return 'Local estimate'
+  if (value === 'degraded') return 'Degraded signals'
+  return value || 'Not reported'
+}
+
+function OtherMoments({ moments, jobId }: { moments: NonNullable<JobResults['score']>['borderline_candidates']; jobId: string }) {
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+  if (!moments?.length) return null
+  async function preview(moment: { start: number; end: number }) {
+    setPreviewError(null)
+    try {
+      const url = await api.requestPlaybackUrl(jobId, 'source')
+      if (!isPlaybackUrl(url)) throw new Error('Playback URL is malformed.')
+      if (!mountedRef.current) return
+      window.open(`${url}#t=${moment.start},${moment.end}`, '_blank', 'noopener,noreferrer')
+    } catch (error) {
+      if (mountedRef.current) setPreviewError(friendlyErrorMessage(error, 'Preview unavailable. Retry the preview.'))
+    }
+  }
+  return <details className="other-moments"><summary>Other moments ({moments.length})</summary>{previewError && <p className="field-help" role="alert">{previewError}</p>}<div className="other-moments-list">{moments.map((moment, index) => <div className="other-moment" key={`${moment.start}-${moment.end}-${index}`}><div><strong>{fmtTime(moment.start)}–{fmtTime(moment.end)}</strong><small>Score {Math.round(moment.recommendation_score)} · {moment.reasons?.join(', ') ?? 'Below the recommendation bar'}</small></div><button type="button" className="button button-secondary" onClick={() => void preview(moment)}>Preview source</button></div>)}</div></details>
+}
+
 export default function Review({ results, onBack, onRestyle }: Props) {
   const outputs = results.render?.outputs ?? []
   const clips = results.score?.clips ?? []
@@ -53,7 +90,15 @@ export default function Review({ results, onBack, onRestyle }: Props) {
   const [reloadKey, setReloadKey] = useState(0)
   const [mediaState, setMediaState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [mediaUrl, setMediaUrl] = useState<string | null>(null)
+  const [exportError, setExportError] = useState<string | null>(null)
+  const mountedRef = useRef(true)
   const styleChanged = restylePreset !== currentPreset || restyleCamera !== 'cut'
+  const borderline = results.score?.borderline_candidates
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   const pair = useMemo(() => {
     const out = outputs[selected]
@@ -75,6 +120,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
     if (!artifactAvailable || !pair.out) return () => { active = false }
     api.requestPlaybackUrl(results.job_id, 'render', pair.out.clip)
       .then((url) => {
+        if (!isPlaybackUrl(url)) throw new Error('Playback URL is malformed.')
         if (active) setMediaUrl(url)
       })
       .catch(() => {
@@ -85,14 +131,20 @@ export default function Review({ results, onBack, onRestyle }: Props) {
 
   async function doExport(out: RenderOutput, clip: Clip) {
     if (!out.path || !artifactAvailable) return
-    const suggestedTitle = `${results.ingest?.title ?? 'clip'} ${fmtTime(clip.start)}`
-    const dest = await chooseExportDestination({
-      jobId: results.job_id,
-      clip: out.clip,
-      suggestedTitle,
-    })
-    if (!dest) return
-    setExported((prev) => ({ ...prev, [out.clip]: dest }))
+    setExportError(null)
+    try {
+      const suggestedTitle = `${results.ingest?.title ?? 'clip'} ${fmtTime(clip.start)}`
+      const dest = await chooseExportDestination({
+        jobId: results.job_id,
+        clip: out.clip,
+        suggestedTitle,
+      })
+      if (!dest) return
+      if (!mountedRef.current) return
+      setExported((prev) => ({ ...prev, [out.clip]: dest }))
+    } catch (error) {
+      if (mountedRef.current) setExportError(friendlyErrorMessage(error, 'Export could not be completed. Retry the export.'))
+    }
   }
 
   if (editing !== null) {
@@ -125,6 +177,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
           <h2>We did not find a moment that met ClipGauge&apos;s quality bar.</h2>
           <p>{counts?.scored_count ?? results.score?.scored_count ?? 0} moments were evaluated.</p>
           {results.score?.best_candidate && <p>Best evaluated moment: {fmtTime(results.score.best_candidate.start)}–{fmtTime(results.score.best_candidate.end)} · score {Math.round(results.score.best_candidate.recommendation_score)}.</p>}
+          <OtherMoments moments={borderline} jobId={results.job_id} />
           <button className="button button-primary" onClick={onBack}>Create another set</button>
         </section>
       </div>
@@ -197,6 +250,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
           )
         })}
       </div>
+      <OtherMoments moments={borderline} jobId={results.job_id} />
 
       {pair.out && pair.clip && (
         <div className="bay">
@@ -266,6 +320,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
                 <span className="mono export-path">{exported[pair.out.clip]}</span>
               )}
             </div>
+            {exportError && <p className="inline-message" role="alert">{exportError}</p>}
           </div>
 
           <aside className="audit">
@@ -273,7 +328,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
             <div className="audit-score-row">
               <div>
                 <span className="audit-big mono">{Math.round(pair.clip.recommendation_score ?? pair.clip.score)}</span>
-                <span className="audit-score-caption">recommendation</span>
+                <span className="audit-score-caption">Recommendation score</span>
               </div>
               <div className="audit-platforms">
                 {Object.entries(pair.clip.platform_scores).map(([platform, value]) => (
@@ -287,6 +342,8 @@ export default function Review({ results, onBack, onRestyle }: Props) {
                 ))}
               </div>
             </div>
+            <div className="audit-tier"><span>Quality tier</span><strong>{qualityTier(Number(pair.clip.recommendation_score ?? pair.clip.score))}</strong><span>Recommendation confidence</span><strong>{confidenceLabel(pair.clip.confidence)}</strong><span>Platform fit</span><strong>{Math.round(pair.clip.platform_score ?? pair.clip.score)}/100</strong></div>
+            <p className="audit-score-note">This is a 0–100 ranking signal, not a probability.</p>
             <p className="audit-summary">{pair.clip.summary}</p>
 
             <p className="audit-label">SIGNAL BREAKDOWN</p>

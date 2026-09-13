@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from clipgauge_pipeline.candidates.story_units import (
     BOUNDARY_SCHEMA,
     BoundaryProposal,
+    _candidate_end_indices,
+    _candidate_start_indices,
     _contains_payoff,
+    _has_explicit_outcome,
     _story_candidate,
     build_sentence_units,
     cheap_filter_and_dedupe,
@@ -99,6 +104,42 @@ def test_fixture_f_payoff_extension_reaches_later_sentence():
     ], seconds=5.0))
     result = synthesize(units, anchor_limit=8, shortlist_limit=20)
     assert any(item["end"] >= units[-1].end for item in result["candidates"])
+    audit = result["candidate_audit"]
+    assert audit["raw_proposals"] == audit["story_unit_proposals"]
+    assert audit["deduped_proposals"] >= audit["shortlisted_proposals"]
+    assert audit["rejection_reasons"]
+
+
+def test_anchor_generation_preserves_distinct_story_topics():
+    units = build_sentence_units(_segments([
+        "The first story reveals a hidden bunker.",
+        "The second story reveals a secret elevator.",
+        "The third story reveals an underground pool.",
+    ], seconds=10.0))
+    labeled = [replace(unit, topic_id=index) for index, unit in enumerate(units)]
+
+    anchors = generate_anchors(labeled, limit=3)
+
+    assert {anchor.topic_id for anchor in anchors} == {0, 1, 2}
+
+
+def test_anchor_generation_respects_zero_limit():
+    units = build_sentence_units(_segments(["A complete story starts here.", "The story ends clearly."], seconds=5.0))
+
+    assert generate_anchors(units, limit=0) == []
+
+
+def test_anchor_generation_reserves_explicit_payoff_anchor():
+    units = build_sentence_units(_segments([
+        *(f"Topic {index} introduces a distinct challenge." for index in range(16)),
+        "The team completed the challenge and let me lead them out.",
+        *(f"Topic {index} continues with a distinct detail." for index in range(17, 20)),
+    ], seconds=4.0))
+    labeled = [replace(unit, topic_id=index) for index, unit in enumerate(units)]
+
+    anchors = generate_anchors(labeled, limit=5)
+
+    assert any(anchor.text.startswith("The team completed") for anchor in anchors)
 
 
 def test_fixture_g_quiet_video_can_have_no_survivors():
@@ -108,6 +149,1133 @@ def test_fixture_g_quiet_video_can_have_no_survivors():
     assert cheap_filter_and_dedupe([]) == []
     result = synthesize(units, anchor_limit=3, shortlist_limit=10)
     assert result["candidates"] == []
+
+
+def test_candidate_filter_reports_every_discard_reason():
+    def candidate(candidate_id: str, topic: str, *, complete: bool = True) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": "S1",
+            "start": 0.0 if topic == "alpha" else 60.0,
+            "end": 20.0 if topic == "alpha" else 80.0,
+            "syntactic_complete": complete,
+            "central_premise": topic,
+            "sentence_ids": ["S1", "S2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": 1.0,
+            "information_density": 1.0,
+            "curve_score": 1.0,
+            "hook_strength": 1.0,
+            "payoff_candidate": True,
+            "topic_coherence": 100.0,
+            "topic_key": [topic],
+            "payoff_sentence": f"{topic} payoff",
+        }
+
+    audit: list[dict] = []
+    result = cheap_filter_and_dedupe(
+        [
+            candidate("incomplete", "alpha", complete=False),
+            candidate("kept", "alpha"),
+            candidate("duplicate", "alpha"),
+            candidate("over_limit", "beta"),
+            candidate("over_limit_two", "gamma"),
+        ],
+        limit=2,
+        audit=audit,
+    )
+
+    assert [item["candidate_id"] for item in result] == ["kept", "over_limit"]
+    reasons = {reason for item in audit for reason in item.get("rejection_reasons", [])}
+    assert {"INCOMPLETE_ENDING", "DUPLICATE_STORY", "SHORTLIST_LIMIT"} <= reasons
+
+
+def test_candidate_filter_keeps_distant_story_units_with_shared_terms():
+    def candidate(candidate_id: str, start: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "start": start,
+            "end": start + 20.0,
+            "syntactic_complete": True,
+            "central_premise": "A surprising result",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": 1.0,
+            "information_density": 1.0,
+            "curve_score": 1.0,
+            "hook_strength": 1.0,
+            "payoff_candidate": True,
+            "topic_coherence": 100.0,
+            "topic_key": ["challenge", "result"],
+            "payoff_sentence": "The result changes everything.",
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("early-story", 0.0),
+        candidate("late-story", 180.0),
+    ], limit=10)
+
+    assert [item["candidate_id"] for item in result] == ["early-story", "late-story"]
+
+
+def test_shortlist_preserves_uncovered_leading_story_coverage():
+    def candidate(candidate_id: str, start: float, quality: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "start": start,
+            "end": start + 20.0,
+            "syntactic_complete": True,
+            "central_premise": f"A distinct premise for {candidate_id}.",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "topic_coherence": quality * 100.0,
+            "topic_key": [candidate_id],
+            "payoff_sentence": f"The {candidate_id} payoff is clear.",
+        }
+
+    candidates = [
+        candidate("early-story", 0.0, 0.1),
+        candidate("later-story-same-bucket", 30.0, 1.0),
+    ]
+    candidates.extend(
+        candidate(f"story-{index}", 60.0 + bucket * 60.0, 1.0)
+        for bucket in range(6)
+        for index in range(bucket * 4, bucket * 4 + 4)
+    )
+
+    result = cheap_filter_and_dedupe(candidates, limit=7)
+
+    result_ids = {item["candidate_id"] for item in result}
+    assert "early-story" in result_ids
+
+
+def test_shortlist_preserves_an_unrepresented_middle_time_bucket():
+    def candidate(candidate_id: str, start: float, quality: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "start": start,
+            "end": start + 20.0,
+            "syntactic_complete": True,
+            "central_premise": f"A distinct premise for {candidate_id}.",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": start + 18.0,
+            "topic_coherence": quality * 100.0,
+            "topic_key": [candidate_id],
+            "payoff_sentence": f"The {candidate_id} payoff is clear.",
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("early", 0.0, 1.0),
+        candidate("middle", 60.0, 0.1),
+        candidate("later", 120.0, 1.0),
+        candidate("latest", 180.0, 1.0),
+    ], limit=3)
+
+    assert "middle" in {item["candidate_id"] for item in result}
+
+
+def test_shortlist_prefers_full_span_for_the_same_payoff():
+    def candidate(candidate_id: str, end: float, quality: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": "shared-anchor",
+            "start": 0.0,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": f"A {candidate_id} result follows the setup.",
+            "sentence_ids": ["S1", "S2", "S3"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": 28.0,
+            "topic_coherence": quality * 100.0,
+            "topic_key": [candidate_id],
+            "payoff_sentence": f"The {candidate_id} result is revealed.",
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("compact", 30.0, 1.0),
+        candidate("full-span", 50.0, 0.7),
+    ], limit=1)
+
+    assert [item["candidate_id"] for item in result] == ["full-span"]
+
+
+def test_shortlist_preserves_later_payoff_boundary_variant():
+    def candidate(candidate_id: str, start: float, end: float, payoff_time: float, quality: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": candidate_id,
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A distinct result is revealed.",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": payoff_time,
+            "topic_coherence": quality * 100.0,
+            "topic_key": ["distinct", "result"],
+            "payoff_sentence": "The result is revealed.",
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("early", 0.0, 30.0, 28.0, 1.0),
+        candidate("late", 20.0, 60.0, 58.0, 0.9),
+    ], limit=1)
+
+    assert [item["candidate_id"] for item in result] == ["late"]
+
+
+def test_shortlist_preserves_later_explicit_payoff_anchor_across_wide_gap():
+    def candidate(candidate_id: str, start: float, end: float, payoff_time: float, quality: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": candidate_id,
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A shared topic reaches a distinct result.",
+            "sentence_ids": ["shared-1", "shared-2", candidate_id],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": payoff_time,
+            "payoff_boundary_explicit": candidate_id == "late",
+            "topic_coherence": quality * 100.0,
+            "topic_key": ["shared", "result"],
+            "payoff_sentence": "The result is revealed.",
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("early", 485.0, 535.0, 534.0, 1.0),
+        candidate("late", 525.0, 558.0, 557.0, 0.9),
+    ], limit=1)
+
+    assert [item["candidate_id"] for item in result] == ["late"]
+
+
+def test_time_bucket_keeps_later_explicit_payoff_anchor():
+    def candidate(candidate_id: str, start: float, quality: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": candidate_id,
+            "start": start,
+            "end": start + 38.0,
+            "syntactic_complete": True,
+            "central_premise": f"The {candidate_id} story reaches a result.",
+            "sentence_ids": [candidate_id, f"{candidate_id}-end"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": start + 35.0,
+            "payoff_boundary_explicit": True,
+            "topic_coherence": quality * 100.0,
+            "topic_key": [candidate_id],
+            "payoff_sentence": f"The {candidate_id} result is revealed.",
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("first", 480.0, 1.0),
+        candidate("second", 485.0, 0.95),
+        candidate("third", 490.0, 0.9),
+        candidate("fourth", 495.0, 0.85),
+        candidate("late", 500.0, 0.8),
+    ], limit=10)
+
+    assert "late" in {item["candidate_id"] for item in result}
+
+
+def test_time_bucket_keeps_explicit_source_final_payoff():
+    def candidate(candidate_id: str, start: float, end: float, quality: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": candidate_id,
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "The game day story reaches its final result.",
+            "sentence_ids": [candidate_id, f"{candidate_id}-end"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": 770.0,
+            "payoff_boundary_explicit": True,
+            "source_final_boundary": candidate_id == "final",
+            "topic_coherence": quality * 100.0,
+            "topic_key": ["game", "result"],
+            "payoff_sentence": "The team let me lead them out.",
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("first", 720.0, 750.0, 1.0),
+        candidate("second", 725.0, 755.0, 0.95),
+        candidate("third", 730.0, 760.0, 0.9),
+        candidate("fourth", 735.0, 765.0, 0.85),
+        candidate("final", 742.0, 815.0, 0.8),
+    ], limit=10)
+
+    assert "final" in {item["candidate_id"] for item in result}
+
+
+def test_dedupe_preserves_source_final_payoff_over_shorter_opening_variant():
+    def candidate(candidate_id: str, start: float, end: float, source_final: bool) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": "game-anchor",
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "The game day story reaches its final result.",
+            "sentence_ids": ["game-start", "game-payoff"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": 0.9,
+            "information_density": 1.0,
+            "curve_score": 0.5,
+            "hook_strength": 0.7,
+            "payoff_candidate": True,
+            "payoff_time": 770.0,
+            "payoff_sentence_id": "game-payoff",
+            "payoff_boundary_explicit": True,
+            "source_final_boundary": source_final,
+            "topic_coherence": 90.0,
+            "topic_key": ["game", "result"],
+            "payoff_sentence": "The team let me lead them out.",
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("final", 770.0, 815.0, True),
+        candidate("shorter", 742.0, 775.0, False),
+    ], limit=2)
+
+    assert [item["candidate_id"] for item in result] == ["final"]
+
+
+def test_dedupe_keeps_later_explicit_payoff_same_anchor():
+    def candidate(candidate_id: str, end: float, payoff: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": "contract-anchor",
+            "start": 525.0,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "The contract story reaches its official result.",
+            "sentence_ids": ["contract-start", "contract-end"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": 0.9,
+            "information_density": 1.0,
+            "curve_score": 0.5,
+            "hook_strength": 0.7,
+            "payoff_candidate": True,
+            "payoff_time": payoff,
+            "payoff_boundary_explicit": True,
+            "topic_coherence": 90.0,
+            "topic_key": ["contract", "result"],
+            "payoff_sentence": "And now it is official.",
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("short", 556.0, 555.0),
+        candidate("complete", 558.0, 557.0),
+    ], limit=2)
+
+    assert [item["candidate_id"] for item in result] == ["complete"]
+
+
+def test_explicit_payoff_recovery_prefers_opening_before_payoff():
+    def candidate(candidate_id: str, start: float, boundary: float, hook: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": candidate_id,
+            "start": start,
+            "end": 426.334,
+            "syntactic_complete": True,
+            "central_premise": "The landing story reaches its result.",
+            "sentence_ids": [candidate_id, "payoff"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": 1.0,
+            "information_density": 1.0,
+            "curve_score": 0.5,
+            "hook_strength": hook,
+            "payoff_candidate": True,
+            "payoff_time": 425.371,
+            "payoff_boundary_explicit": True,
+            "topic_coherence": 90.0,
+            "topic_key": ["landing", "result"],
+            "payoff_sentence": "I landed a plane!",
+            "start_topic_boundary": boundary,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("late-opening", 408.333, 0.695, 0.4),
+        candidate("hook-opening", 403.991, 0.207, 0.83),
+    ], limit=1)
+
+    assert [item["candidate_id"] for item in result] == ["hook-opening"]
+
+
+def test_shortlist_does_not_replace_later_payoff_with_leading_duplicate():
+    def candidate(candidate_id: str, anchor: str, start: float, end: float, payoff_time: float, quality: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": anchor,
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A plane landing result.",
+            "sentence_ids": [f"{anchor}-1", f"{anchor}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": payoff_time,
+            "payoff_boundary_explicit": True,
+            "topic_coherence": 90.0,
+            "topic_key": ["plane", "landing"],
+            "payoff_sentence": "I landed a plane!",
+            "start_topic_boundary": 0.8,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("early", "S1", 349.6, 383.1, 379.4, 0.9),
+        candidate("late", "S2", 380.9, 426.3, 425.4, 1.0),
+    ], limit=1)
+
+    assert [item["candidate_id"] for item in result] == ["late"]
+
+
+def test_dedupe_prefers_earlier_opening_from_compatible_duplicate_group():
+    def candidate(
+        candidate_id: str,
+        anchor: str,
+        start: float,
+        end: float,
+        quality: float,
+    ) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": anchor,
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A surprising result is revealed.",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": 105.0,
+            "payoff_boundary_explicit": True,
+            "topic_coherence": quality * 100.0,
+            "topic_key": ["surprising", "result"],
+            "payoff_sentence": "The result is revealed.",
+            "start_topic_boundary": 0.0,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("unrelated-anchor", "S0", 30.0, 120.0, 1.0),
+        candidate("later-opening", "S1", 90.0, 140.0, 0.9),
+        candidate("earlier-opening", "S1", 50.0, 110.0, 0.8),
+    ], limit=10)
+
+    assert [item["candidate_id"] for item in result] == [
+        "unrelated-anchor",
+        "earlier-opening",
+    ]
+
+
+def test_dedupe_preserves_earlier_opening_when_only_payoff_identity_matches():
+    def candidate(
+        candidate_id: str,
+        anchor: str,
+        start: float,
+        end: float,
+        quality: float,
+    ) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": anchor,
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A surprising result is revealed.",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": 105.0,
+            "payoff_sentence_id": "P1",
+            "payoff_boundary_explicit": True,
+            "topic_coherence": quality * 100.0,
+            "topic_key": ["surprising", "result"],
+            "payoff_sentence": "The result is revealed.",
+            "start_topic_boundary": 0.0,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("later-opening", "S0", 85.0, 140.0, 1.0),
+        candidate("earlier-opening", "S1", 60.0, 120.0, 0.8),
+    ], limit=10)
+
+    assert [item["candidate_id"] for item in result] == ["earlier-opening"]
+
+
+def test_dedupe_keeps_earlier_full_opening_for_same_explicit_payoff():
+    def candidate(candidate_id: str, start: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": "S1",
+            "start": start,
+            "end": 45.0,
+            "syntactic_complete": True,
+            "central_premise": "A surprising result is revealed.",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": 1.0,
+            "information_density": 1.0,
+            "curve_score": 1.0,
+            "hook_strength": 0.8,
+            "payoff_candidate": True,
+            "payoff_time": 40.0,
+            "payoff_sentence_id": "P1",
+            "payoff_boundary_explicit": True,
+            "topic_coherence": 80.0,
+            "topic_key": ["surprising", "result"],
+            "payoff_sentence": "The result is revealed.",
+            "start_topic_boundary": 0.0,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("later-opening", 30.0),
+        candidate("earlier-opening", 20.0),
+    ], limit=10)
+
+    assert [item["candidate_id"] for item in result] == ["earlier-opening"]
+
+
+def test_dedupe_keeps_distinct_earlier_payoff_under_overlap():
+    def candidate(candidate_id: str, start: float, end: float, payoff: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": candidate_id,
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A surprising result is revealed.",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": 1.0,
+            "information_density": 1.0,
+            "curve_score": 1.0,
+            "hook_strength": 0.8,
+            "payoff_candidate": True,
+            "payoff_time": payoff,
+            "payoff_sentence_id": f"P{payoff}",
+            "payoff_boundary_explicit": True,
+            "topic_coherence": 80.0,
+            "topic_key": ["surprising", "result"],
+            "payoff_sentence": "The result is revealed.",
+            "start_topic_boundary": 0.0,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("later-payoff", 20.0, 55.0, 50.0),
+        candidate("earlier-payoff", 25.0, 45.0, 40.0),
+    ], limit=10)
+
+    assert {item["candidate_id"] for item in result} == {"later-payoff", "earlier-payoff"}
+
+
+def test_dedupe_keeps_earlier_opening_with_bounded_extended_payoff_tail():
+    def candidate(candidate_id: str, anchor: str, start: float, end: float, quality: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": anchor,
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A surprising result is revealed.",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": 110.702,
+            "payoff_sentence_id": "P1",
+            "payoff_boundary_explicit": False,
+            "topic_coherence": quality * 100.0,
+            "topic_key": ["surprising", "result"],
+            "payoff_sentence": "The result is revealed.",
+            "start_topic_boundary": 0.0,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("later-opening", "S0", 79.334, 151.095, 1.0),
+        candidate("earlier-opening", "S1", 66.226, 141.206, 0.8),
+    ], limit=10)
+
+    assert [item["candidate_id"] for item in result] == ["earlier-opening"]
+
+
+def test_shortlist_preserves_explicit_payoff_when_topic_terms_change():
+    def candidate(
+        candidate_id: str,
+        start: float,
+        end: float,
+        payoff_time: float,
+        topic: str,
+        quality: float,
+    ) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": candidate_id,
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": f"A distinct {topic} result is revealed.",
+            "sentence_ids": ["S1", "S2", "S3"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": payoff_time,
+            "payoff_boundary_explicit": topic == "landing",
+            "topic_coherence": quality * 100.0,
+            "topic_key": [topic],
+            "payoff_sentence": f"The {topic} result is revealed.",
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("fragment", 0.0, 30.0, 28.0, "setup", 1.0),
+        candidate("complete", 18.0, 48.0, 46.0, "landing", 0.9),
+    ], limit=1)
+
+    assert [item["candidate_id"] for item in result] == ["complete"]
+
+
+def test_shortlist_keeps_explicit_payoff_against_unrelated_leading_coverage():
+    def candidate(candidate_id: str, start: float, quality: float, explicit: bool = False) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "start": start,
+            "end": start + 20.0,
+            "syntactic_complete": True,
+            "central_premise": f"A distinct premise for {candidate_id}.",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "hook_strength": quality,
+            "payoff_candidate": True,
+            "payoff_time": start + 18.0,
+            "payoff_boundary_explicit": explicit,
+            "topic_coherence": quality * 100.0,
+            "topic_key": [candidate_id],
+            "payoff_sentence": f"The {candidate_id} payoff is clear.",
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("leading", 0.0, 0.1),
+        candidate("filler", 200.0, 1.0),
+        candidate("explicit-payoff", 400.0, 0.2, explicit=True),
+    ], limit=2)
+
+    assert "explicit-payoff" in {item["candidate_id"] for item in result}
+
+
+def test_dedupe_keeps_overlapping_later_payoff_variant():
+    def candidate(candidate_id: str, anchor: str, start: float, end: float, payoff_time: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": anchor,
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A plane landing result.",
+            "sentence_ids": [f"{anchor}-1", f"{anchor}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": 1.0,
+            "information_density": 1.0,
+            "curve_score": 1.0,
+            "hook_strength": 0.8,
+            "payoff_candidate": True,
+            "payoff_time": payoff_time,
+            "payoff_boundary_explicit": True,
+            "topic_coherence": 90.0,
+            "topic_key": ["plane", "landing"],
+            "payoff_sentence": "I landed a plane!",
+            "start_topic_boundary": 0.8,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("early", "S1", 0.0, 50.0, 30.0),
+        candidate("late", "S2", 10.0, 60.0, 55.0),
+    ], limit=10)
+
+    assert [item["candidate_id"] for item in result] == ["early", "late"]
+
+
+def test_dedupe_preserves_later_payoff_boundary_variant():
+    def candidate(candidate_id: str, end: float, payoff: bool, quality: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": "S1",
+            "start": 0.0,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A distinct result is revealed.",
+            "sentence_ids": ["S1", "S2", "S3"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": 0.5,
+            "hook_strength": 0.7,
+            "payoff_candidate": payoff,
+            "payoff_time": end - 2.0 if payoff else None,
+            "topic_coherence": 90.0,
+            "topic_key": ["distinct", "result"],
+            "payoff_sentence": "The result is revealed.",
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("short-boundary", 20.0, False, 1.0),
+        candidate("payoff-boundary", 35.0, True, 0.9),
+    ], limit=10)
+
+    assert [item["candidate_id"] for item in result] == ["payoff-boundary"]
+
+
+def test_dedupe_keeps_a_strong_new_topic_separate():
+    def candidate(candidate_id: str, start: float, boundary: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": candidate_id,
+            "start": start,
+            "end": start + 30.0,
+            "syntactic_complete": True,
+            "central_premise": "The tournament game begins.",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": 1.0,
+            "information_density": 1.0,
+            "curve_score": 0.5,
+            "hook_strength": 0.7,
+            "payoff_candidate": True,
+            "payoff_time": start + 28.0,
+            "topic_coherence": 90.0,
+            "topic_key": ["tournament", "game"],
+            "payoff_sentence": "The tournament game begins.",
+            "start_topic_boundary": boundary,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("setup", 720.0, 0.0),
+        candidate("game", 742.0, 0.8),
+    ], limit=2)
+
+    assert [item["candidate_id"] for item in result] == ["setup", "game"]
+
+
+def test_dedupe_keeps_overlapping_story_at_strong_topic_boundary():
+    def candidate(candidate_id: str, start: float, end: float, boundary: float, fit: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": candidate_id,
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A distinct story follows the introduction.",
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": fit,
+            "information_density": 1.0,
+            "curve_score": 0.5,
+            "hook_strength": 0.7,
+            "payoff_candidate": True,
+            "payoff_time": end - 3.0,
+            "topic_coherence": 90.0,
+            "topic_key": ["distinct", "story"],
+            "payoff_sentence": "The story result is revealed.",
+            "start_topic_boundary": boundary,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("introduction", 0.0, 42.0, 0.0, 0.95),
+        candidate("new-story", 17.0, 52.0, 0.8, 0.9),
+    ], limit=2)
+
+    assert [item["candidate_id"] for item in result] == ["introduction", "new-story"]
+
+
+def test_dedupe_prefers_distinct_later_explicit_payoff_anchor():
+    def candidate(candidate_id: str, start: float, end: float, payoff: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": candidate_id,
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A distinct story follows the introduction.",
+            "sentence_ids": ["shared-1", "shared-2", candidate_id],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": 0.9,
+            "information_density": 1.0,
+            "curve_score": 0.5,
+            "hook_strength": 0.7,
+            "payoff_candidate": True,
+            "payoff_time": payoff,
+            "payoff_boundary_explicit": True,
+            "topic_coherence": 90.0,
+            "topic_key": ["distinct", "story"],
+            "payoff_sentence": "The story result is revealed.",
+            "start_topic_boundary": 0.0,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("setup", 520.0, 550.0, 534.0),
+        candidate("contract", 525.0, 557.0, 557.0),
+    ], limit=2)
+
+    assert [item["candidate_id"] for item in result] == ["contract"]
+
+
+def test_dedupe_preserves_earlier_payoff_aligned_opening():
+    def candidate(candidate_id: str, start: float, end: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": "shared-anchor",
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A result is revealed after setup.",
+            "sentence_ids": ["S1", "S2", "S3"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": 0.9 if start > 20 else 0.8,
+            "information_density": 1.0,
+            "curve_score": 0.5,
+            "hook_strength": 0.7,
+            "payoff_candidate": True,
+            "payoff_boundary_explicit": True,
+            "payoff_time": 39.0,
+            "topic_coherence": 90.0,
+            "topic_key": ["result", "setup"],
+            "payoff_sentence": "The result is revealed.",
+            "start_topic_boundary": 0.8,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("late-opening", 38.0, 66.0),
+        candidate("setup-opening", 15.0, 62.0),
+    ], limit=10)
+
+    assert [item["candidate_id"] for item in result] == ["setup-opening"]
+
+
+def test_dedupe_preserves_earlier_opening_for_same_nonexplicit_payoff():
+    def candidate(candidate_id: str, start: float, end: float, quality: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "anchor_sentence_id": "shared-anchor",
+            "start": start,
+            "end": end,
+            "syntactic_complete": True,
+            "central_premise": "A result is revealed after setup.",
+            "sentence_ids": ["S1", "S2", "S3", "S4"],
+            "editorial_signal": True,
+            "story_variant": "det",
+            "duration_fit": quality,
+            "information_density": 1.0,
+            "curve_score": 0.5,
+            "hook_strength": 0.7,
+            "payoff_candidate": True,
+            "payoff_boundary_explicit": False,
+            "payoff_time": 39.0,
+            "topic_coherence": 90.0,
+            "topic_key": ["result", "setup"],
+            "payoff_sentence": "The result is revealed.",
+            "start_topic_boundary": 0.8,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("late-opening", 38.0, 66.0, 0.9),
+        candidate("setup-opening", 15.0, 62.0, 0.8),
+    ], limit=10)
+
+    assert [item["candidate_id"] for item in result] == ["setup-opening"]
+
+
+def test_candidate_start_lookback_reaches_bounded_story_setup():
+    units = build_sentence_units(_segments([
+        "Earlier context explains the $10 result.",
+        "The setup continues with useful background.",
+        "The story adds another detail here.",
+        "The story adds another detail there.",
+        "The anchor reveals the final result.",
+    ], seconds=8.0))
+
+    indexes = _candidate_start_indices(units, anchor_index=4)
+
+    assert 0 in indexes
+    assert all(units[index].start >= units[4].start - 35.0 for index in indexes)
+
+
+def test_candidate_start_lookback_keeps_unmarked_early_setup():
+    units = build_sentence_units(_segments([
+        "The opening establishes the situation.",
+        "Context continues through another detail.",
+        "The story adds a second detail here.",
+        "The story adds a third detail here.",
+        "The story adds a fourth detail here.",
+        "The story adds a fifth detail here.",
+        "The anchor reveals the final result.",
+    ], seconds=4.0))
+
+    indexes = _candidate_start_indices(units, anchor_index=6, payoff_context=True)
+
+    assert 1 in indexes
+
+
+def test_candidate_end_lookahead_reaches_late_story_payoff():
+    units = build_sentence_units(_segments([
+        "The setup establishes a difficult challenge.",
+        "The anchor introduces the attempt.",
+        "The tension continues through the demonstration.",
+        "The audience waits for the result.",
+        "We finally completed the challenge.",
+    ], seconds=12.0))
+
+    indexes = _candidate_end_indices(units, anchor_index=1)
+
+    assert 4 in indexes
+    assert units[4].start <= units[1].start + 60.0
+
+
+def test_candidate_end_lookahead_matches_max_story_duration():
+    units = build_sentence_units(_segments([
+        "The opening establishes the stakes.",
+        "The anchor introduces the attempt.",
+        "The story continues through several steps.",
+        "The tension rises before the result.",
+        "The audience waits for the outcome.",
+        "The final reaction lands here.",
+        "The result is finally completed.",
+        "The closing sentence completes the story.",
+    ], seconds=12.0))
+
+    indexes = _candidate_end_indices(units, anchor_index=1)
+
+    assert 7 in indexes
+    assert units[7].start <= units[1].start + 75.0
+
+
+def test_anchor_selection_spreads_across_long_sources():
+    segments = [
+        {
+            "start": index * 5.0,
+            "end": index * 5.0 + 4.8,
+            "speaker": 0,
+            "text": f"Alpha{index} beta{index} gamma{index} delta{index} epsilon{index}.",
+            "words": [],
+        }
+        for index in range(120)
+    ]
+
+    anchors = generate_anchors(
+        build_sentence_units(segments, scene_times=[index * 5.0 for index in range(1, 120)]),
+        limit=12,
+    )
+
+    assert len(anchors) == 12
+    assert anchors[-1].start >= 500.0
+    assert len({int(anchor.start // 60) for anchor in anchors}) >= 8
+
+
+def test_anchor_selection_keeps_dense_topics_over_anchor_limit():
+    segments = [
+        {
+            "start": index * 8.0,
+            "end": index * 8.0 + 7.5,
+            "speaker": 0,
+            "text": f"Topic {index} reveals a distinct result.",
+            "words": [],
+        }
+        for index in range(21)
+    ]
+    units = build_sentence_units(segments)
+    labeled = [replace(unit, topic_id=index) for index, unit in enumerate(units)]
+
+    anchors = generate_anchors(labeled, limit=20)
+
+    assert len(anchors) == 20
+    assert len({anchor.topic_id for anchor in anchors}) == 20
+    assert anchors[-1].start >= 152.0
+
+
+def test_anchor_selection_ignores_sparse_tail_for_dense_topic_capacity():
+    segments = [
+        {
+            "start": index * 8.0,
+            "end": index * 8.0 + 7.5,
+            "speaker": 0,
+            "text": f"Topic {index} reveals a distinct result.",
+            "words": [],
+        }
+        for index in range(21)
+    ]
+    segments.append({
+        "start": 1000.0,
+        "end": 1007.5,
+        "speaker": 0,
+        "text": "The epilogue reveals a distant result.",
+        "words": [],
+    })
+    units = build_sentence_units(segments)
+    labeled = [replace(unit, topic_id=index) for index, unit in enumerate(units)]
+
+    anchors = generate_anchors(labeled, limit=20)
+
+    assert len(anchors) == 20
+    assert sum(anchor.start < 200.0 for anchor in anchors) >= 19
+
+
+def test_anchor_selection_keeps_uneven_dense_topics_over_anchor_limit():
+    starts = [0.0]
+    for index in range(1, 21):
+        starts.append(starts[-1] + (1.0 if index % 2 else 9.0))
+    segments = [
+        {
+            "start": start,
+            "end": start + 0.8,
+            "speaker": 0,
+            "text": f"Topic {index} reveals a distinct result.",
+            "words": [],
+        }
+        for index, start in enumerate(starts)
+    ]
+    units = build_sentence_units(segments)
+    labeled = [replace(unit, topic_id=index) for index, unit in enumerate(units)]
+
+    anchors = generate_anchors(labeled, limit=20)
+
+    assert len(anchors) == 20
+
+
+def test_candidate_audit_distinguishes_deduped_from_shortlisted():
+    units = build_sentence_units(_segments([
+        "The first room hides a bunker.",
+        "A secret elevator opens below.",
+        "The underground pool is worth millions.",
+        "The second room grows food indoors.",
+        "Hydroponics feeds seventy five people.",
+        "That keeps the entire shelter alive.",
+    ], seconds=5.0))
+
+    result = synthesize(units, anchor_limit=8, shortlist_limit=1)
+
+    assert len(result["candidates"]) == 1
+    audit = result["candidate_audit"]
+    assert audit["deduped_proposals"] > audit["shortlisted_proposals"]
+    assert any("SHORTLIST_LIMIT" in item["rejection_reasons"] for item in audit["rejection_reasons"])
+
+
+def test_candidate_audit_separates_deterministic_and_llm_proposals():
+    units = build_sentence_units(_segments([
+        "Why is this bunker hidden?", "Because it is underground.",
+        "The secret elevator opens below.", "Whoa, there is a pool underground.",
+    ], seconds=5.0))
+
+    def proposer(neighborhood, _anchor):
+        return [BoundaryProposal(
+            neighborhood[0].sentence_id,
+            neighborhood[1].sentence_id,
+            "A hidden bunker is underground.",
+            neighborhood[0].sentence_id,
+            neighborhood[1].sentence_id,
+            "question_answer",
+            "question",
+            "answer",
+        )]
+
+    result = synthesize(
+        units,
+        boundary_proposer=proposer,
+        anchor_limit=2,
+        boundary_limit=1,
+        shortlist_limit=20,
+    )
+
+    audit = result["candidate_audit"]
+    assert audit["deterministic_proposals"] > 0
+    assert audit["llm_proposals"] > 0
+    assert audit["raw_proposals"] == (
+        audit["deterministic_proposals"] + audit["llm_proposals"]
+    )
+    assert audit["story_unit_proposals"] == audit["deterministic_proposals"]
 
 
 def test_boundary_schema_and_ids_are_strict():
@@ -203,6 +1371,38 @@ def test_minute_bucket_keeps_semantically_distinct_stories():
     assert len(result) == 3
 
 
+def test_minute_bucket_replaces_weak_story_for_new_topic():
+    def candidate(candidate_id: str, start: float, quality: float, boundary: float) -> dict:
+        return {
+            "candidate_id": candidate_id,
+            "start": start,
+            "end": start + 10.0,
+            "sentence_ids": [f"{candidate_id}-1", f"{candidate_id}-2"],
+            "central_premise": f"A story about {candidate_id}.",
+            "payoff_sentence": f"The {candidate_id} result is surprising.",
+            "topic_key": [candidate_id],
+            "story_variant": f"det-{candidate_id}",
+            "syntactic_complete": True,
+            "editorial_signal": True,
+            "hook_strength": quality,
+            "duration_fit": quality,
+            "information_density": quality,
+            "curve_score": quality,
+            "topic_coherence": quality * 100.0,
+            "start_topic_boundary": boundary,
+        }
+
+    result = cheap_filter_and_dedupe([
+        candidate("ordinary-1", 0.0, 1.0, 0.0),
+        candidate("ordinary-2", 10.0, 0.9, 0.0),
+        candidate("ordinary-3", 20.0, 0.8, 0.0),
+        candidate("ordinary-4", 30.0, 0.7, 0.0),
+        candidate("new-topic", 40.0, 0.1, 0.8),
+    ], limit=5)
+
+    assert "new-topic" in {item["candidate_id"] for item in result}
+
+
 def test_duplicate_with_unknown_payoff_time_does_not_crash():
     base = {
         "start": 0.0,
@@ -236,6 +1436,85 @@ def test_positive_story_has_cheap_payoff_evidence():
     assert candidate["payoff_confidence"] > 0.0
 
 
+def test_common_outcome_phrases_have_cheap_payoff_evidence():
+    units = build_sentence_units(_segments([
+        "The pilot is too close to the runway.",
+        "I won the final round!",
+    ], seconds=5.0))
+
+    candidate = _story_candidate(units, units[0], "outcome")
+
+    assert candidate is not None
+    assert candidate["payoff_candidate"] is True
+
+
+def test_domain_agnostic_outcome_verbs_have_cheap_payoff_evidence():
+    units = build_sentence_units(_segments([
+        "Can I finish the final round?",
+        "I won the final round!",
+    ], seconds=5.0))
+
+    candidate = _story_candidate(units, units[0], "generic-outcome")
+
+    assert candidate is not None
+    assert candidate["payoff_candidate"] is True
+
+
+def test_editorial_signal_accepts_generic_outcome_language():
+    units = build_sentence_units(_segments([
+        "The team won the final match.",
+        "The result surprised everyone.",
+    ], seconds=5.0))
+
+    candidate = _story_candidate(units, units[0], "generic-signal")
+
+    assert candidate is not None
+    assert candidate["editorial_signal"] is True
+
+
+def test_explicit_outcome_detection_accepts_common_completion_modifiers():
+    assert _has_explicit_outcome(
+        "We still got them on billboards all across the country."
+    ) is True
+    assert _has_explicit_outcome(
+        "And now it's official."
+    ) is True
+
+
+def test_explicit_outcome_detection_accepts_delegated_completion():
+    assert _has_explicit_outcome(
+        "The team let me lead them out for the final event."
+    ) is True
+    assert _has_explicit_outcome("This is the first time we carried it.") is True
+    assert _has_explicit_outcome("You're actually touching the moon right now.") is True
+
+
+def test_explicit_payoff_counts_as_editorial_signal():
+    units = build_sentence_units(_segments([
+        "The challenge starts with a difficult setup.",
+        "I found gold!",
+    ], seconds=5.0))
+
+    candidate = _story_candidate(units, units[0], "det")
+
+    assert candidate is not None
+    assert candidate["payoff_boundary_explicit"] is True
+    assert candidate["editorial_signal"] is True
+
+
+def test_explicit_payoff_can_close_a_contextual_opening():
+    units = build_sentence_units(_segments([
+        "Can I compete in the final round?",
+        "I finally won the final round and led the team out.",
+    ], seconds=5.0))
+
+    candidate = _story_candidate(units, units[0], "contextual-outcome")
+
+    assert candidate is not None
+    assert candidate["payoff_candidate"] is True
+    assert candidate["context_dependency"] is False
+
+
 def test_plain_story_has_no_cheap_payoff_evidence():
     units = build_sentence_units(_segments([
         "This bunker is underground.",
@@ -244,6 +1523,14 @@ def test_plain_story_has_no_cheap_payoff_evidence():
     candidate = _story_candidate(units, units[0], "negative")
     assert candidate is not None
     assert candidate["payoff_candidate"] is False
+
+
+def test_negated_outcome_word_is_not_payoff_evidence():
+    units = build_sentence_units(_segments([
+        "I won't let the team down.",
+    ], seconds=8.5))
+
+    assert _contains_payoff(units[0]) is False
 
 
 def test_premise_fact_is_not_mistaken_for_payoff():

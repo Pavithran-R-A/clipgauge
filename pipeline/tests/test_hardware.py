@@ -79,3 +79,57 @@ def test_transcription_and_alignment_devices_are_selected_independently():
         "transcription_compute_type": "int8_float16",
         "alignment_device": "cpu",
     }
+
+
+def test_cpu_probe_records_supported_compute_types(monkeypatch):
+    class CTranslate2:
+        __version__ = "4.6.0"
+
+        @staticmethod
+        def get_supported_compute_types(_device):
+            return {"float32", "int8"}
+
+    monkeypatch.setitem(__import__("sys").modules, "ctranslate2", CTranslate2)
+
+    result = hardware._cpu()
+
+    assert result == {
+        "available": True,
+        "verified": True,
+        "compute_types": ["float32", "int8"],
+        "version": "4.6.0",
+    }
+
+
+def test_cpu_asr_policy_uses_conservative_batches_by_ram():
+    assert hardware.cpu_asr_policy({"ram_bytes": 8 * 1024**3, "cpu_ctranslate2": {"compute_types": ["int8"]}}) == {
+        "device": "cpu",
+        "compute_type": "int8",
+        "batch_size": 1,
+        "mode": "low-memory",
+    }
+    assert hardware.cpu_asr_policy({"ram_bytes": 16 * 1024**3, "cpu_ctranslate2": {"compute_types": ["int8"]}})["batch_size"] == 2
+    assert hardware.cpu_asr_policy({"ram_bytes": 32 * 1024**3, "cpu_ctranslate2": {"compute_types": ["int8"]}})["batch_size"] == 4
+    assert hardware.cpu_asr_policy({"ram_bytes": 64 * 1024**3, "cpu_ctranslate2": {"compute_types": ["int8"]}})["batch_size"] == 8
+
+
+def test_cpu_asr_policy_downgrades_when_available_memory_is_low():
+    policy = hardware.cpu_asr_policy({
+        "ram_bytes": 16 * 1024**3,
+        "available_ram_bytes": 1 * 1024**3,
+        "cpu_ctranslate2": {"compute_types": ["int8"]},
+    })
+
+    assert policy["batch_size"] == 1
+    assert policy["mode"] == "low-memory"
+
+
+def test_cpu_selection_does_not_attempt_unsupported_int8():
+    devices = hardware.select_asr_devices({
+        "ram_bytes": 8 * 1024**3,
+        "cpu_ctranslate2": {"verified": True, "compute_types": ["float32"]},
+    })
+
+    assert devices["transcription_device"] == "cpu"
+    assert devices["transcription_compute_type"] == "float32"
+    assert devices["transcription_batch_size"] == 1

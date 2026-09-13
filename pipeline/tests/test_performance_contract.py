@@ -52,6 +52,342 @@ def test_local_prerank_recognizes_question_openings_without_punctuation():
     assert scoring_stage._local_prerank(question)[2] > scoring_stage._local_prerank(ordinary)[2]
 
 
+def test_local_prerank_prefers_payoff_reaction_tail():
+    early = ({"start": 0.0, "end": 20.0, "curve_score": 0.5, "channel_scores": {}, "payoff_candidate": True, "payoff_time": 12.0}, "", "The result is shown clearly and completely.")
+    late = ({"start": 0.0, "end": 28.0, "curve_score": 0.5, "channel_scores": {}, "payoff_candidate": True, "payoff_time": 12.0}, "", "The result is shown clearly and completely.")
+
+    assert scoring_stage._local_prerank(late) > scoring_stage._local_prerank(early)
+
+
+def test_local_scoring_batch_drops_shorter_same_payoff_variant():
+    short = ({"start": 10.0, "end": 20.0, "anchor_sentence_id": "a", "payoff_candidate": True, "payoff_time": 15.0}, "", "A complete result is shown.")
+    long = ({"start": 10.0, "end": 28.0, "anchor_sentence_id": "a", "payoff_candidate": True, "payoff_time": 15.0}, "", "A complete result is shown with reaction.")
+
+    selected = scoring_stage.select_diverse_scoring_batch([short, long], 1)
+
+    assert selected[0][0]["end"] == 28.0
+
+
+def test_local_scoring_batch_keeps_later_payoff_story_span():
+    compact = (
+        {
+            "start": 10.0,
+            "end": 40.0,
+            "anchor_sentence_id": "a",
+            "sentence_ids": ["S1", "S2", "S3"],
+            "payoff_candidate": True,
+            "payoff_time": 20.0,
+        },
+        "",
+        "A complete result is shown with reaction.",
+    )
+    complete = (
+        {
+            "start": 24.0,
+            "end": 70.0,
+            "anchor_sentence_id": "b",
+            "sentence_ids": ["S2", "S3", "S4", "S5"],
+            "payoff_candidate": True,
+            "payoff_time": 65.0,
+        },
+        "",
+        "A complete result is shown after the full setup and final reaction.",
+    )
+
+    selected = scoring_stage.select_diverse_scoring_batch([compact, complete], 1)
+
+    assert selected[0][0]["anchor_sentence_id"] == "b"
+
+
+def test_local_scoring_batch_keeps_materially_earlier_story_opening():
+    early = (
+        {
+            "start": 10.0,
+            "end": 52.0,
+            "anchor_sentence_id": "a",
+            "sentence_ids": ["S1", "S2", "S3", "S4"],
+            "payoff_candidate": True,
+            "payoff_time": 48.0,
+            "payoff_boundary_explicit": True,
+        },
+        "",
+        "Why would anyone attempt this difficult challenge before the final result.",
+    )
+    later = (
+        {
+            "start": 34.0,
+            "end": 82.0,
+            "anchor_sentence_id": "b",
+            "sentence_ids": ["S3", "S4", "S5", "S6"],
+            "payoff_candidate": True,
+            "payoff_time": 76.0,
+        },
+        "",
+        "The full setup continues until the final result is shown with reaction.",
+    )
+
+    selected = scoring_stage.select_diverse_scoring_batch([early, later], 2)
+
+    assert {item[0]["anchor_sentence_id"] for item in selected} == {"a", "b"}
+
+
+def test_local_scoring_batch_keeps_story_after_strong_topic_boundary():
+    early = (
+        {
+            "start": 0.0,
+            "end": 40.0,
+            "anchor_sentence_id": "early",
+            "sentence_ids": ["S1", "S2", "S3", "S4"],
+            "payoff_candidate": True,
+            "payoff_time": 30.0,
+            "payoff_boundary_explicit": False,
+        },
+        "",
+        "The first story builds toward a complete result with context.",
+    )
+    later = (
+        {
+            "start": 17.0,
+            "end": 60.0,
+            "anchor_sentence_id": "later",
+            "sentence_ids": ["S3", "S4", "S5", "S6"],
+            "payoff_candidate": True,
+            "payoff_time": 55.0,
+            "payoff_boundary_explicit": False,
+            "start_topic_boundary": 0.9,
+        },
+        "",
+        "A new story follows the boundary and reaches its final result.",
+    )
+
+    selected = scoring_stage.select_diverse_scoring_batch([early, later], 2)
+
+    assert {item[0]["anchor_sentence_id"] for item in selected} == {"early", "later"}
+
+
+def test_local_scoring_batch_covers_evidenced_time_regions_before_decoys():
+    def item(start, end, *, explicit=False, final=False, boundary=0.0):
+        candidate = {
+            "start": start,
+            "end": end,
+            "anchor_sentence_id": f"S{int(start):04d}",
+            "payoff_candidate": True,
+            "payoff_time": end - 4.0,
+            "payoff_boundary_explicit": explicit,
+            "source_final_boundary": final,
+            "start_topic_boundary": boundary,
+        }
+        return candidate, "", "A complete result is shown with useful context and reaction."
+
+    prepared = [
+        item(10.0, 28.0, explicit=True, boundary=0.9),
+        item(100.0, 128.0, explicit=True, boundary=0.9),
+        item(190.0, 218.0, explicit=True, boundary=0.9),
+        item(280.0, 308.0, explicit=True, boundary=0.9),
+        item(370.0, 398.0, explicit=True, boundary=0.9),
+        item(460.0, 488.0, explicit=True, boundary=0.9),
+        item(730.0, 815.0, explicit=True, final=True, boundary=0.9),
+        item(40.0, 68.0),
+        item(130.0, 158.0),
+        item(220.0, 248.0),
+    ]
+
+    selected = scoring_stage.select_diverse_scoring_batch(prepared, 7)
+    regions = {int((entry[0]["start"] + entry[0]["end"]) / 2.0 // 90.0) for entry in selected}
+
+    assert regions == {0, 1, 2, 3, 4, 5, 8}
+    assert all(entry[0]["payoff_boundary_explicit"] for entry in selected)
+
+
+def test_local_shortlist_preserves_late_temporal_coverage(monkeypatch):
+    candidates = [
+        {"start": 0.0, "end": 30.0, "curve_score": 1.0, "channel_scores": {}},
+        {"start": 40.0, "end": 70.0, "curve_score": 1.0, "channel_scores": {}},
+        {"start": 80.0, "end": 110.0, "curve_score": 1.0, "channel_scores": {}},
+        {"start": 300.0, "end": 330.0, "curve_score": 0.1, "channel_scores": {}},
+    ]
+    monkeypatch.setattr(
+        scoring_stage,
+        "_transcript_slice",
+        lambda _segments, start, end, **_kwargs: (
+            "",
+            "A complete result is shown clearly with useful context and enough words "
+            "to represent a realistic transcript candidate for scoring.",
+        ),
+    )
+
+    selected = scoring_stage.shortlist_local_candidates(candidates, [], limit=3)
+
+    assert any(item[0]["start"] == 300.0 for item in selected)
+
+
+def test_local_scoring_batch_prefers_quality_over_farther_distance():
+    high_quality = (
+        {
+            "start": 30.0,
+            "end": 60.0,
+            "curve_score": 0.5,
+            "channel_scores": {},
+            "payoff_candidate": True,
+            "payoff_time": 55.0,
+            "payoff_boundary_explicit": True,
+            "hook_strength": 0.8,
+            "start_topic_boundary": 0.9,
+        },
+        "",
+        "Why would anyone attempt this challenge? The result is shown and everyone laughed!",
+    )
+    far_lower_quality = (
+        {
+            "start": 500.0,
+            "end": 530.0,
+            "curve_score": 0.5,
+            "channel_scores": {},
+        },
+        "",
+        "The room is underground and comfortable with several rooms.",
+    )
+
+    selected = scoring_stage.select_diverse_scoring_batch(
+        [high_quality, far_lower_quality], 1, selected_midpoints=[0.0]
+    )
+
+    assert selected[0][0]["start"] == 30.0
+
+
+def test_candidate_evidence_prior_rewards_verified_story_structure():
+    plain = {"payoff_candidate": False, "hook_strength": 0.2, "start_topic_boundary": 0.0}
+    structured = {
+        "payoff_candidate": True,
+        "payoff_boundary_explicit": True,
+        "source_final_boundary": True,
+        "hook_strength": 0.7,
+        "start_topic_boundary": 0.9,
+    }
+
+    assert scoring_stage._candidate_evidence_bonus(structured) > scoring_stage._candidate_evidence_bonus(plain)
+    assert scoring_stage._candidate_evidence_bonus(structured) <= 8.0
+
+
+def test_candidate_evidence_prior_has_a_recorded_adjustment():
+    adjustment = scoring_stage._candidate_evidence_adjustment({
+        "payoff_candidate": True,
+        "payoff_time": 4.0,
+        "payoff_boundary_explicit": True,
+        "hook_strength": 0.6,
+    })
+
+    assert adjustment is not None
+    assert adjustment["rule"] == "candidate_evidence_prior"
+    assert adjustment["bonus"] > 0
+
+
+def test_candidate_evidence_adjustment_penalizes_unbacked_span():
+    adjustment = scoring_stage._candidate_evidence_adjustment({
+        "payoff_candidate": False,
+        "payoff_boundary_explicit": False,
+        "source_final_boundary": True,
+    })
+
+    assert adjustment is not None
+    assert adjustment["rule"] == "candidate_payoff_evidence_gap"
+    assert adjustment["bonus"] < 0
+
+
+def test_diversity_prefers_clean_story_over_flagged_story():
+    entries = [
+        {
+            "candidate_id": "flagged-fragment",
+            "start": 700.0,
+            "end": 748.0,
+            "recommendation_score": 49.0,
+            "topic_key": ["game-day"],
+            "short_quality": {
+                "quality_tier": "STRUCTURALLY_VALID",
+                "quality_flags": ["TOPIC_DRIFT"],
+            },
+        },
+        {
+            "candidate_id": "clean-full-story",
+            "start": 722.0,
+            "end": 796.0,
+            "recommendation_score": 42.0,
+            "topic_key": ["game-day"],
+            "short_quality": {
+                "quality_tier": "GOOD",
+                "quality_flags": [],
+            },
+        },
+    ]
+
+    selected = scoring_stage.select_diverse_finalists(entries, limit=2)
+
+    assert [item["candidate_id"] for item in selected] == ["clean-full-story"]
+
+
+def test_diversity_prefers_explicit_payoff_boundary():
+    entries = [
+        {
+            "candidate_id": "implicit-payoff",
+            "start": 310.0,
+            "end": 380.0,
+            "recommendation_score": 56.5,
+            "topic_key": ["shared-story"],
+            "payoff_boundary_explicit": False,
+            "short_quality": {"quality_tier": "GOOD", "quality_flags": []},
+        },
+        {
+            "candidate_id": "explicit-payoff",
+            "start": 374.0,
+            "end": 428.0,
+            "recommendation_score": 52.3,
+            "topic_key": ["shared-story"],
+            "payoff_boundary_explicit": True,
+            "short_quality": {"quality_tier": "GOOD", "quality_flags": []},
+        },
+    ]
+
+    selected = scoring_stage.select_diverse_finalists(entries, limit=2)
+
+    assert [item["candidate_id"] for item in selected] == ["explicit-payoff"]
+
+
+def test_near_good_clean_story_can_be_recommended():
+    quality = {
+        "eligible_to_recommend": True,
+        "quality_tier": "STRUCTURALLY_VALID",
+        "quality_flags": [],
+        "complete_ending": True,
+        "story_consistent": True,
+        "effective_hook_0_100": 37.0,
+        "payoff": 55.0,
+        "standalone": 60.0,
+        "semantic_closure_0_100": 65.0,
+        "topic_coherence_0_100": 80.0,
+        "payoff_relevance_to_premise": 60.0,
+    }
+
+    assert scoring_stage.is_good_recommendation(quality) is True
+
+
+def test_evidence_backed_story_can_survive_local_quality_flags():
+    entry = {
+        "payoff_boundary_explicit": True,
+        "short_quality": {
+            "eligible_to_recommend": True,
+            "quality_tier": "STRUCTURALLY_VALID",
+            "quality_flags": ["WEAK_SEMANTIC_CLOSURE", "PAYOFF_NOT_RELEVANT"],
+            "complete_ending": True,
+            "story_consistent": True,
+            "effective_hook_0_100": 30.0,
+            "payoff": 50.0,
+            "standalone": 50.0,
+        },
+    }
+
+    assert scoring_stage.is_evidence_backed_recommendation(entry) is True
+
+
 def test_windows_vulkan_remains_fallback_without_cuda_runtime():
     key = local_runtime.select_runtime_asset_key(
         platform_key="windows-x86_64",
@@ -121,6 +457,50 @@ def test_cloud_scoring_keeps_the_existing_richer_budget():
     assert budget["t1_limit"] == 35
     assert budget["finalist_limit"] == 12
     assert budget["music_llm"] is True
+    assert budget["wall_time_seconds"] == scoring_stage.CLOUD_T1_WALL_BUDGET_SECONDS
+
+
+def test_local_refill_gate_does_not_ignore_weak_semantic_closure():
+    quality = {
+        "eligible_to_recommend": True,
+        "quality_flags": ["WEAK_SEMANTIC_CLOSURE"],
+        "effective_hook_0_100": 80.0,
+        "payoff": 80.0,
+        "standalone": 80.0,
+    }
+
+    assert scoring_stage.is_search_strong(quality) is False
+
+
+def test_other_moment_record_preserves_identity_and_reason():
+    record = scoring_stage.other_moment_record(
+        {
+            "candidate_id": "story-synthetic-1",
+            "start": 10.0,
+            "end": 24.0,
+            "summary": "A useful moment.",
+            "short_quality": {
+                "quality_flags": ["WEAK_SEMANTIC_CLOSURE"],
+                "rejection_reasons": [],
+                "quality_tier": "STRUCTURALLY_VALID",
+            },
+        }
+    )
+
+    assert record["candidate_id"] == "story-synthetic-1"
+    assert record["summary"] == "A useful moment."
+    assert record["reasons"] == ["WEAK_SEMANTIC_CLOSURE"]
+
+
+def test_output_preference_keeps_best_recommended_and_more_distinct():
+    finalists = [{"start": index, "recommendation_score": 100 - index} for index in range(4)]
+    borderline = [{"start": 10, "recommendation_score": 70}]
+
+    assert len(scoring_stage.apply_output_preference(finalists, "best", borderline, limit=6)) == 2
+    assert scoring_stage.apply_output_preference(finalists, "recommended", borderline, limit=6) == finalists
+    more = scoring_stage.apply_output_preference(finalists, "more", borderline, limit=6)
+    assert len(more) == 5
+    assert more[-1] is borderline[0]
 
 
 def test_finalist_selection_spreads_candidates_across_long_source():
@@ -139,6 +519,175 @@ def test_finalist_selection_spreads_candidates_across_long_source():
     assert len(finalists) == 6
     assert max(starts) - min(starts) >= 800.0
     assert sum(1 for start in starts if start < 200.0) <= 3
+
+
+def test_finalist_selection_suppresses_duplicate_story_identity():
+    entries = [
+        {
+            "start": start,
+            "end": start + 30.0,
+            "recommendation_score": score,
+            "anchor_sentence_id": anchor,
+            "sentence_ids": sentence_ids,
+            "topic_key": topic_key,
+        }
+        for start, score, anchor, sentence_ids, topic_key in [
+            (0.0, 100.0, "S0001", ["S0001", "S0002", "S0003"], ["quiet", "reveal"]),
+            (300.0, 99.0, "S0004", ["S0002", "S0003", "S0004"], ["quiet", "reveal"]),
+            (600.0, 98.0, "S0100", ["S0100", "S0101"], ["different", "story"]),
+            (900.0, 97.0, "S0200", ["S0200", "S0201"], ["another", "story"]),
+        ]
+    ]
+
+    finalists = scoring_stage.select_diverse_finalists(entries, limit=4)
+
+    assert [entry["start"] for entry in finalists] == [0.0, 600.0, 900.0]
+
+
+def test_finalist_selection_reserves_evidenced_regions():
+    entries = [
+        {
+            "start": start,
+            "end": start + 35.0,
+            "recommendation_score": score,
+            "payoff_candidate": True,
+            "payoff_boundary_explicit": explicit,
+            "start_topic_boundary": 0.8,
+            "short_quality": {"quality_tier": "GOOD", "quality_flags": []},
+        }
+        for start, score, explicit in [
+            (10.0, 90.0, False),
+            (25.0, 89.0, False),
+            (100.0, 70.0, False),
+            (190.0, 69.0, False),
+            (280.0, 68.0, True),
+        ]
+    ]
+
+    finalists = scoring_stage.select_diverse_finalists(entries, limit=4)
+
+    assert {
+        int(((item["start"] + item["end"]) / 2.0) // 90.0)
+        for item in finalists
+    } == {0, 1, 2, 3}
+
+
+def test_scored_review_ranking_prefers_distinct_regions():
+    entries = [
+        {"start": start, "end": start + 20.0, "recommendation_score": score}
+        for start, score in [
+            (0.0, 100.0), (20.0, 99.0), (400.0, 80.0),
+            (600.0, 79.0), (800.0, 78.0), (1000.0, 77.0),
+        ]
+    ]
+
+    ranked = scoring_stage.rank_scored_candidates(entries)
+
+    assert [entry["start"] for entry in ranked[:5]] == [0.0, 400.0, 600.0, 800.0, 1000.0]
+
+
+def test_ranking_diagnostics_preserve_each_scoring_layer_without_transcript():
+    entries = [
+        {
+            "candidate_id": "candidate-a",
+            "start": 10.0,
+            "end": 25.0,
+            "curve_score": 0.8,
+            "heatmap_pct": 0.2,
+            "t1_raw": {
+                "hook": 8,
+                "funniness": 4,
+                "shock": 2,
+                "curiosity_gap": 7,
+                "value": 6,
+                "summary": "derived summary",
+            },
+            "subscores": {
+                "hook": 8.0,
+                "funniness": 2.2,
+                "shock": 2.0,
+                "curiosity_gap": 7.0,
+                "value": 6.0,
+            },
+            "cross_validation_adjustments": [
+                {"rule": "funny_no_laugh", "factor": 0.55}
+            ],
+            "adjustments": [
+                {"rule": "funny_no_laugh", "factor": 0.55},
+                {"rule": "candidate_evidence_prior", "bonus": 2.0},
+            ],
+            "short_quality": {
+                "score": 71.0,
+                "quality_flags": ["WEAK_COLD_HOOK"],
+                "rejection_reasons": [],
+                "quality_tier": "GOOD",
+                "eligible_to_recommend": True,
+            },
+            "platform_score": 73.0,
+            "recommendation_score": 75.0,
+        },
+        {
+            "candidate_id": "candidate-b",
+            "start": 40.0,
+            "end": 55.0,
+            "curve_score": 0.2,
+            "heatmap_pct": None,
+            "t1_raw": {
+                "hook": 2,
+                "funniness": 1,
+                "shock": 0,
+                "curiosity_gap": 2,
+                "value": 2,
+            },
+            "subscores": {
+                "hook": 2.0,
+                "funniness": 1.0,
+                "shock": 0.0,
+                "curiosity_gap": 2.0,
+                "value": 2.0,
+            },
+            "cross_validation_adjustments": [],
+            "adjustments": [],
+            "short_quality": {
+                "score": 22.0,
+                "quality_flags": [],
+                "rejection_reasons": ["LOW_STANDALONE_CONTEXT"],
+                "quality_tier": "REJECTED",
+                "eligible_to_recommend": False,
+            },
+            "platform_score": 25.0,
+            "recommendation_score": 10.0,
+        },
+    ]
+
+    diagnostics = scoring_stage.ranking_diagnostics(entries)
+
+    assert diagnostics[0]["candidate_id"] == "candidate-a"
+    assert diagnostics[0]["raw_llm"]["judgment"]["hook"] == 8
+    assert diagnostics[0]["after_cross_validation"]["adjustments"][0]["rule"] == "funny_no_laugh"
+    assert diagnostics[0]["adjustments"]["candidate_evidence"][0]["rule"] == "candidate_evidence_prior"
+    assert diagnostics[0]["adjustments"]["bait"] == []
+    assert diagnostics[0]["ranks"]["raw_llm"] == 1
+    assert diagnostics[1]["ranks"]["final"] == 2
+    assert "transcript" not in diagnostics[0]
+
+
+def test_payoff_tail_bonus_is_bounded_and_requires_reaction_window():
+    assert scoring_stage._payoff_tail_bonus({
+        "end": 28.0,
+        "payoff_time": 15.0,
+        "payoff_candidate": True,
+        "payoff_sentence": "The result is complete.",
+    }) == 8.0
+    assert scoring_stage._payoff_tail_bonus({
+        "end": 46.0,
+        "payoff_time": 15.0,
+        "payoff_candidate": True,
+        "payoff_sentence": "The result is complete.",
+    }) == 0.0
+    assert scoring_stage._payoff_tail_bonus({
+        "end": 28.0, "payoff_time": 15.0, "payoff_candidate": False,
+    }) == 0.0
 
 
 def test_nvenc_is_preferred_over_software_encoding_when_functional():
@@ -231,6 +780,8 @@ def test_local_scoring_actual_model_calls_stay_bounded(monkeypatch, tmp_path, ca
     assert result["good_recommendation_count"] >= 1
     assert result["performance"]["finalist_limit"] == scoring_stage.LOCAL_FINALIST_LIMIT
     assert result["performance"]["music_llm_calls"] == 0
+    assert len(result["ranking_diagnostics"]) == result["scored_count"]
+    assert all("transcript" not in item for item in result["ranking_diagnostics"])
     assert selection_inputs
     assert all("recommendation_score" in item for item in selection_inputs[0])
     assert all("boundary_refinement" in item for item in result["clips"])

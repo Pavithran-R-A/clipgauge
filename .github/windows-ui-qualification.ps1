@@ -2,16 +2,34 @@ param(
   [Parameter(Mandatory = $true)] [string] $AppPath,
   [Parameter(Mandatory = $true)] [string] $OutputDir,
   [Parameter(Mandatory = $true)] [string] $Sentinel,
-  [switch] $FreshOnly
+  [switch] $FreshOnly,
+  [switch] $SetupOnly,
+  [switch] $AllowProductionSetupOnly,
+  [switch] $GroqOnly
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $FreshOnly -and -not $SetupOnly -and -not $GroqOnly) {
+  $fixtureEndpoint = $env:CLIPGAUGE_QA_OPENROUTER_ENDPOINT
+  if ($fixtureEndpoint -notmatch '^http://127\.0\.0\.1:\d{1,5}/v1$') {
+    throw 'full Windows qualification requires CLIPGAUGE_QA_OPENROUTER_ENDPOINT to target a loopback /v1 fixture'
+  }
+}
 New-Item -ItemType Directory -Force $OutputDir | Out-Null
+$OutputDir = [IO.Path]::GetFullPath($OutputDir)
 $winapp = (Get-Command winapp -ErrorAction Stop).Source
 $appName = [System.IO.Path]::GetFileNameWithoutExtension($AppPath)
 $proc = $null
 $qualificationRunId = [Guid]::NewGuid().ToString('N')
 $qualificationService = "io.github.pavithranra.clipgauge.qualification.$qualificationRunId"
+$previousClipGaugeHome = $env:CLIPGAUGE_HOME
+$previousQaHome = $env:CLIPGAUGE_QA_HOME
+$useIsolatedHome = [bool]$FreshOnly
+$qualificationHome = if ($useIsolatedHome) {
+  Join-Path $OutputDir "clipgauge-home-$qualificationRunId"
+} else {
+  Join-Path ([Environment]::GetFolderPath('UserProfile')) '.clipgauge'
+}
 $qaPort = 9222
 while (Get-NetTCPConnection -LocalPort $qaPort -State Listen -ErrorAction SilentlyContinue) { $qaPort += 1 }
 
@@ -23,7 +41,7 @@ function Remove-QualificationCredential {
 }
 
 function Seed-HostileSessions {
-  $jobs = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.clipgauge\jobs'
+  $jobs = Join-Path $qualificationHome 'jobs'
   New-Item -ItemType Directory -Force $jobs | Out-Null
   $records = @(
     @{ id = '20990830-120001-a1b2c3'; title = 'How I Tricked The Internet - MrBeast 2' },
@@ -38,7 +56,7 @@ function Seed-HostileSessions {
 }
 
 function Remove-HostileSessions {
-  $jobs = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.clipgauge\jobs'
+  $jobs = Join-Path $qualificationHome 'jobs'
   foreach ($id in @('20990830-120001-a1b2c3', '20990830-120002-d4e5f6', '20260825-120001-a1b2c3', '20260825-120002-d4e5f6')) {
     $path = Join-Path $jobs $id
     if (Test-Path -LiteralPath $path) { [IO.Directory]::Delete($path, $true) }
@@ -236,21 +254,34 @@ function Set-LogicalWindowSize {
 function Invoke-ClientCapture {
   param([Parameter(Mandatory = $true)] [string] $Name)
   Add-Type -AssemblyName System.Drawing
+  [void][ClipGaugeNativeDisplay]::SetForegroundWindow([IntPtr]$proc.MainWindowHandle)
+  Start-Sleep -Milliseconds 150
   $facts = Get-NativeWindowFacts ([IntPtr]$proc.MainWindowHandle)
   $width = $facts.native_client_rect.width
   $height = $facts.native_client_rect.height
   if ($width -le 0 -or $height -le 0) { throw "native client size is invalid: ${width}x${height}" }
   $path = Join-Path $OutputDir "$Name.png"
+  $nativePath = Join-Path $OutputDir "$Name-native.png"
   Remove-Item -Force -ErrorAction SilentlyContinue $path
-  $bitmap = [System.Drawing.Bitmap]::new($width, $height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-  $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+  Remove-Item -Force -ErrorAction SilentlyContinue $nativePath
+  & $winapp ui screenshot -w "$($proc.MainWindowHandle.ToInt64())" --output $nativePath | Out-Host
+  if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $nativePath)) { throw "native client screenshot failed: $Name" }
+  $nativeBitmap = [System.Drawing.Bitmap]::new($nativePath)
   try {
-    $origin = $facts.client_origin_screen
-    $graphics.CopyFromScreen([int]$origin.x, [int]$origin.y, 0, 0, $bitmap.Size, [System.Drawing.CopyPixelOperation]::SourceCopy)
-    $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+    $left = [int](($nativeBitmap.Width - $width) / 2)
+    $top = $nativeBitmap.Height - $height
+    if ($left -lt 0 -or $top -lt 0 -or $left + $width -gt $nativeBitmap.Width -or $top + $height -gt $nativeBitmap.Height) {
+      throw "native client crop is outside HWND capture: capture=$($nativeBitmap.Width)x$($nativeBitmap.Height) client=${width}x${height} offset=${left}x${top}"
+    }
+    $clientBitmap = $nativeBitmap.Clone([System.Drawing.Rectangle]::new($left, $top, $width, $height), [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    try {
+      $clientBitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+    } finally {
+      $clientBitmap.Dispose()
+    }
   } finally {
-    $graphics.Dispose()
-    $bitmap.Dispose()
+    $nativeBitmap.Dispose()
+    Remove-Item -Force -ErrorAction SilentlyContinue $nativePath
   }
   if (-not (Test-Path -LiteralPath $path)) { throw "client screenshot failed: $Name" }
   return $path
@@ -277,7 +308,11 @@ $cdp = Join-Path $OutputDir 'webview2-cdp'
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $cdp
 New-Item -ItemType Directory -Force $cdp | Out-Null
 $env:CLIPGAUGE_QA_WEBVIEW2_CDP = '1'
+$env:CLIPGAUGE_QA_ALLOW_PRODUCTION_SCOPE = if ($AllowProductionSetupOnly -and $SetupOnly) { '1' } else { '0' }
+$env:CLIPGAUGE_QA_ALLOW_PRODUCTION_PROVIDER = if ($GroqOnly) { '1' } else { '0' }
 $env:CLIPGAUGE_QUALIFICATION_VAULT_SERVICE = $qualificationService
+$env:CLIPGAUGE_HOME = $qualificationHome
+if ($useIsolatedHome) { $env:CLIPGAUGE_QA_HOME = $qualificationHome }
 $env:WEBVIEW2_USER_DATA_FOLDER = $cdp
 $env:CLIPGAUGE_QA_WEBVIEW2_PORT = "$qaPort"
 $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$qaPort"
@@ -334,6 +369,17 @@ function Invoke-State {
 try {
   if ($FreshOnly) {
     Invoke-State 'setup-fresh' 1366 768 '1366x768-fresh'
+    return
+  }
+  if ($SetupOnly) {
+    Invoke-State 'setup' 1366 768 '1366x768-setup-only'
+    return
+  }
+  if ($GroqOnly) {
+    Invoke-State 'groq-model-switch' 1366 768 '1366x768'
+    Restart-QualificationApp
+    Invoke-State 'groq-model-switch-restart' 1366 768 '1366x768-restart'
+    Write-Host 'WINDOWS_UI_GROQ_QUALIFICATION=PASS'
     return
   }
   Invoke-State 'setup' 1366 768 '1366x768'
@@ -400,7 +446,11 @@ try {
 } finally {
   if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
   Remove-Item Env:CLIPGAUGE_QA_WEBVIEW2_CDP -ErrorAction SilentlyContinue
+  Remove-Item Env:CLIPGAUGE_QA_ALLOW_PRODUCTION_SCOPE -ErrorAction SilentlyContinue
+  Remove-Item Env:CLIPGAUGE_QA_ALLOW_PRODUCTION_PROVIDER -ErrorAction SilentlyContinue
   Remove-Item Env:CLIPGAUGE_QA_WEBVIEW2_PORT -ErrorAction SilentlyContinue
+  if ($null -eq $previousClipGaugeHome) { Remove-Item Env:CLIPGAUGE_HOME -ErrorAction SilentlyContinue } else { $env:CLIPGAUGE_HOME = $previousClipGaugeHome }
+  if ($null -eq $previousQaHome) { Remove-Item Env:CLIPGAUGE_QA_HOME -ErrorAction SilentlyContinue } else { $env:CLIPGAUGE_QA_HOME = $previousQaHome }
   Remove-QualificationCredential 'provider_auth_preset-openrouter'
   Remove-QualificationCredential 'gemini_api_key'
   Remove-HostileSessions

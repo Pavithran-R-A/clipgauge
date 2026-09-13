@@ -48,6 +48,96 @@ def test_short_quality_prefers_hook_setup_reveal_and_reaction():
     assert strong["payoff"] > weak["payoff"]
 
 
+def test_explicit_candidate_payoff_resists_low_llm_payoff_judgment():
+    quality = short_quality.assess(
+        "The plane landing was risky. The plane landed safely: I landed a plane!",
+        [],
+        12.0,
+        llm={
+            "hook": 5,
+            "hook_strength": 5,
+            "standalone_comprehension": 6,
+            "setup_strength": 5,
+            "escalation_strength": 4,
+            "payoff_strength": 1,
+            "ending_completeness": 4,
+            "story_shape": "reveal",
+            "payoff_location": "none",
+            "payoff_relevance_to_premise": 1,
+            "topic_coherence": 8,
+            "topic_shift_count": 0,
+            "late_new_topic": False,
+            "syntactic_complete": True,
+            "semantic_closure": 1,
+            "open_loop_at_end": True,
+            "quality_tier": "STRUCTURALLY_VALID",
+        },
+        segment_boundary=True,
+        candidate_evidence={
+            "payoff_candidate": True,
+            "payoff_boundary_explicit": True,
+            "payoff_time": 10.0,
+            "payoff_sentence": "I landed a plane!",
+        },
+    )
+
+    assert quality["payoff"] >= 45.0
+    assert quality["semantic_closure_0_100"] >= 60.0
+    assert quality["payoff_relevance_to_premise"] >= 50.0
+    assert quality["story_consistent"] is True
+
+
+def test_candidate_hook_phrase_supports_low_llm_hook_judgment():
+    quality = short_quality.assess(
+        "Why would anyone attempt this dangerous landing? The plane landed safely.",
+        [],
+        12.0,
+        llm={
+            "hook": 1,
+            "hook_strength": 1,
+            "standalone_comprehension": 5,
+            "setup_strength": 5,
+            "escalation_strength": 4,
+            "payoff_strength": 5,
+            "ending_completeness": 5,
+            "story_shape": "hook_setup_payoff",
+            "payoff_location": "late",
+            "payoff_relevance_to_premise": 6,
+            "topic_coherence": 8,
+            "topic_shift_count": 0,
+            "late_new_topic": False,
+            "syntactic_complete": True,
+            "semantic_closure": 7,
+            "open_loop_at_end": False,
+            "quality_tier": "GOOD",
+        },
+        segment_boundary=True,
+        candidate_evidence={
+            "hook_sentence": "Why would anyone attempt this dangerous landing?",
+            "hook_strength": 0.8,
+            "start_topic_boundary": 0.9,
+        },
+    )
+
+    assert quality["candidate_hook_verified"] is True
+    assert quality["effective_hook_0_100"] >= 35.0
+
+
+def test_specific_two_word_candidate_hook_is_verified():
+    quality = short_quality.assess(
+        "Oh God, the runway is right there. I landed a plane!",
+        [],
+        12.0,
+        candidate_evidence={
+            "hook_sentence": "Oh God.",
+            "hook_strength": 0.4,
+            "start_topic_boundary": 0.9,
+        },
+    )
+
+    assert quality["candidate_hook_verified"] is True
+
+
 def test_smart_boundaries_complete_nearby_sentence():
     words = [
         {"word": "Why", "start": 0.0, "end": 0.2},
@@ -62,6 +152,314 @@ def test_smart_boundaries_complete_nearby_sentence():
     start, end = short_quality.smart_boundaries(words, 0.45, 1.5)
 
     assert (start, end) == (0.0, 1.9)
+
+
+def test_refine_boundaries_keeps_high_context_setup_before_payoff():
+    segments = [
+        {
+            "start": 0.0,
+            "end": 12.0,
+            "text": "The landing stakes are higher than they look.",
+            "words": [
+                {"word": word, "start": index * 2.0, "end": index * 2.0 + 1.0}
+                for index, word in enumerate("The landing stakes are higher than they look.".split())
+            ],
+        },
+        {
+            "start": 12.0,
+            "end": 20.0,
+            "text": "We landed safely on the short runway.",
+            "words": [
+                {"word": word, "start": 12.0 + index * 1.5, "end": 12.0 + index * 1.5 + 1.0}
+                for index, word in enumerate("We landed safely on the short runway.".split())
+            ],
+        },
+    ]
+
+    start, end = short_quality.refine_boundaries(
+        segments,
+        0.0,
+        20.0,
+        {"recommended_start_offset": 12.0, "recommended_end_offset": 20.0, "setup_strength": 8, "standalone_comprehension": 8},
+    )
+
+    assert start == 0.0
+    assert end >= 19.0
+
+
+def test_refine_boundaries_recovers_deterministic_landing_setup():
+    segments = [
+        {
+            "start": 396.1,
+            "end": 398.5,
+            "text": "This is the part I crashed in every time in the simulator.",
+            "words": [
+                {"word": word, "start": 396.1 + index * 0.25, "end": 396.1 + index * 0.25 + 0.2}
+                for index, word in enumerate("This is the part I crashed in every time in the simulator.".split())
+            ],
+        },
+        {
+            "start": 400.5,
+            "end": 403.9,
+            "text": "We're gonna land right there on top of that runway.",
+            "words": [
+                {"word": word, "start": 400.5 + index * 0.25, "end": 400.5 + index * 0.25 + 0.2}
+                for index, word in enumerate("We're gonna land right there on top of that runway.".split())
+            ],
+        },
+        {
+            "start": 425.4,
+            "end": 426.3,
+            "text": "I landed a plane!",
+            "words": [
+                {"word": word, "start": 425.4 + index * 0.2, "end": 425.4 + index * 0.2 + 0.15}
+                for index, word in enumerate("I landed a plane!".split())
+            ],
+        },
+    ]
+
+    start, end = short_quality.refine_boundaries(
+        segments,
+        400.51,
+        427.514,
+        {
+            "story_shape": "conflict_reaction",
+            "payoff_strength": 5,
+            "setup_strength": 5,
+            "standalone_comprehension": 5,
+            "recommended_start_offset": 0,
+            "recommended_end_offset": 27,
+        },
+    )
+
+    assert start == 396.1
+    assert end >= 426.0
+
+
+def test_refine_boundaries_preserves_trusted_candidate_edges():
+    segments = [
+        {
+            "start": 10.0,
+            "end": 20.0,
+            "text": "The reveal starts here and ends now.",
+            "words": [
+                {"word": word, "start": 10.0 + index, "end": 10.8 + index}
+                for index, word in enumerate("The reveal starts here and ends now.".split())
+            ],
+        },
+        {
+            "start": 20.0,
+            "end": 30.0,
+            "text": "Everyone reacts to the result!",
+            "words": [
+                {"word": word, "start": 20.0 + index, "end": 20.8 + index}
+                for index, word in enumerate("Everyone reacts to the result!".split())
+            ],
+        },
+    ]
+
+    start, end = short_quality.refine_boundaries(
+        segments,
+        10.0,
+        30.0,
+        {"recommended_start_offset": 6.0, "recommended_end_offset": 8.0},
+        preserve_candidate_opening=True,
+        preserve_candidate_payoff=True,
+    )
+
+    assert start == 10.0
+    assert end >= 24.8
+
+
+def test_refine_boundaries_preserves_explicit_payoff_candidate_opening():
+    segments = [
+        {
+            "start": 396.1,
+            "end": 398.5,
+            "text": "This is the part I crashed in every time in the simulator.",
+            "words": [
+                {"word": word, "start": 396.1 + index * 0.25, "end": 396.1 + index * 0.25 + 0.2}
+                for index, word in enumerate("This is the part I crashed in every time in the simulator.".split())
+            ],
+        },
+        {
+            "start": 400.5,
+            "end": 403.9,
+            "text": "We're gonna land right there on top of that runway.",
+            "words": [
+                {"word": word, "start": 400.5 + index * 0.25, "end": 400.5 + index * 0.25 + 0.2}
+                for index, word in enumerate("We're gonna land right there on top of that runway.".split())
+            ],
+        },
+    ]
+
+    start, _ = short_quality.refine_boundaries(
+        segments,
+        400.51,
+        403.9,
+        {
+            "story_shape": "conflict_reaction",
+            "payoff_strength": 5,
+            "setup_strength": 5,
+            "standalone_comprehension": 5,
+            "recommended_start_offset": 0,
+            "recommended_end_offset": 3,
+        },
+        preserve_candidate_opening=True,
+        preserve_candidate_payoff=True,
+        payoff_time=403.5,
+    )
+
+    assert start >= 400.5
+
+
+def test_refine_boundaries_includes_nearby_explicit_outcome_context():
+    segments = [
+        {
+            "start": 268.8,
+            "end": 271.2,
+            "text": "They were going to let me touch the moon.",
+            "words": [
+                {"word": word, "start": 268.8 + index * 0.25, "end": 268.8 + index * 0.25 + 0.2}
+                for index, word in enumerate("They were going to let me touch the moon.".split())
+            ],
+        },
+        {
+            "start": 277.9,
+            "end": 280.9,
+            "text": "This is the largest selection of moon rocks.",
+            "words": [
+                {"word": word, "start": 277.9 + index * 0.25, "end": 277.9 + index * 0.25 + 0.2}
+                for index, word in enumerate("This is the largest selection of moon rocks.".split())
+            ],
+        },
+    ]
+
+    start, _ = short_quality.refine_boundaries(
+        segments,
+        277.942,
+        313.785,
+        {"recommended_start_offset": 0, "recommended_end_offset": 30},
+        preserve_candidate_opening=True,
+        preserve_candidate_payoff=True,
+        payoff_time=301.156,
+    )
+
+    assert start == 268.8
+
+
+def test_refine_boundaries_keeps_payoff_without_forcing_candidate_tail():
+    segments = [
+        {
+            "start": 10.0,
+            "end": 20.0,
+            "text": "The setup is ready.",
+            "words": [
+                {"word": word, "start": 10.0 + index * 2.0, "end": 10.8 + index * 2.0}
+                for index, word in enumerate("The setup is ready.".split())
+            ],
+        },
+        {
+            "start": 20.0,
+            "end": 40.0,
+            "text": "The result is confirmed.",
+            "words": [
+                {"word": word, "start": 20.0 + index * 2.0, "end": 20.8 + index * 2.0}
+                for index, word in enumerate("The result is confirmed.".split())
+            ],
+        },
+    ]
+
+    start, end = short_quality.refine_boundaries(
+        segments,
+        10.0,
+        40.0,
+        {"recommended_start_offset": 0.0, "recommended_end_offset": 17.0},
+        preserve_candidate_payoff=True,
+        payoff_time=24.0,
+    )
+
+    assert start == 10.0
+    assert 24.0 <= end < 40.0
+
+
+def test_refine_boundaries_includes_segment_containing_payoff_time():
+    segments = [
+        {
+            "start": 10.0,
+            "end": 20.0,
+            "words": [
+                {"word": "The", "start": 10.0, "end": 10.8},
+                {"word": "setup", "start": 12.0, "end": 12.8},
+            ],
+        },
+        {
+            "start": 20.0,
+            "end": 35.0,
+            "words": [
+                {"word": "It", "start": 20.0, "end": 20.8},
+                {"word": "landed!", "start": 31.0, "end": 31.8},
+            ],
+        },
+    ]
+
+    _, end = short_quality.refine_boundaries(
+        segments,
+        10.0,
+        28.0,
+        {"recommended_end_offset": 14.0},
+        preserve_candidate_payoff=True,
+        payoff_time=24.0,
+    )
+
+    assert end >= 31.8
+
+
+def test_refine_boundaries_caps_excessive_payoff_tail():
+    segments = [
+        {
+            "start": 10.0,
+            "end": 60.0,
+            "words": [
+                {"word": word, "start": 10.0 + index * 2.0, "end": 10.8 + index * 2.0}
+                for index, word in enumerate(
+                    "The setup builds toward the result and the reaction continues for a while while everyone explains what happened next.".split()
+                )
+            ],
+        },
+    ]
+
+    _, end = short_quality.refine_boundaries(
+        segments,
+        10.0,
+        55.0,
+        {"recommended_end_offset": 45.0},
+        preserve_candidate_payoff=True,
+        payoff_time=24.0,
+    )
+
+    assert 24.0 <= end <= 36.8
+
+
+def test_verified_payoff_closure_does_not_follow_model_open_loop():
+    quality = short_quality.assess(
+        "The result is confirmed.",
+        [],
+        5.0,
+        llm={
+            "quality_tier": "GOOD",
+            "payoff_strength": 8,
+            "ending_completeness": 4,
+            "semantic_closure": 2,
+            "open_loop_at_end": True,
+        },
+        segment_boundary=True,
+        candidate_evidence={"payoff_candidate": True, "payoff_time": 4.0},
+    )
+
+    assert quality["open_loop_at_end"] is False
+    assert quality["semantic_closure_0_100"] >= 70.0
+    assert "WEAK_SEMANTIC_CLOSURE" not in quality["quality_flags"]
 
 
 def test_quality_ranking_is_deterministic():
@@ -241,6 +639,24 @@ def test_complete_question_can_lack_semantic_closure():
     assert quality["open_loop_at_end"] is True
     assert quality["semantic_closure_0_100"] < 60.0
     assert "WEAK_SEMANTIC_CLOSURE" in quality["quality_flags"]
+
+
+def test_explicit_model_closure_overrides_story_shape_inference():
+    quality = short_quality.assess(
+        "The contract was signed and the team celebrated.",
+        [],
+        8.0,
+        llm={
+            "story_shape": "open_ended",
+            "open_loop_at_end": False,
+            "semantic_closure": 8,
+            "payoff_relevance_to_premise": 8,
+            "quality_tier": "GOOD",
+        },
+    )
+
+    assert quality["open_loop_at_end"] is False
+    assert "WEAK_SEMANTIC_CLOSURE" not in quality["quality_flags"]
 
 
 def test_late_topic_is_not_a_relevant_payoff():

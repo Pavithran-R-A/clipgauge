@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { isInstagramStatus } from '../nativeValidation'
+import { friendlyErrorMessage } from '../errorMessaging'
 
 /**
  * The Instagram loop, guided. Your OWN Meta app — ClipGauge never sees
@@ -27,9 +29,13 @@ export default function IgModal({ onClose }: Props) {
   const [secret, setSecret] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
+  const mountedRef = useRef(true)
 
   useEffect(() => {
-    invoke<{ connected: boolean; username?: string }>('ig_status').then(setStatus)
+    mountedRef.current = true
+    let active = true
+    invoke<{ connected: boolean; username?: string }>('ig_status').then((value) => { if (!isInstagramStatus(value)) throw new Error('Instagram status is malformed.'); if (active) setStatus(value) }).catch(() => { if (active) setMessage('Instagram status is unavailable. Retry the connection check.') })
+    return () => { active = false; mountedRef.current = false }
   }, [])
 
   async function connect() {
@@ -37,13 +43,15 @@ export default function IgModal({ onClose }: Props) {
     setMessage('Finish the approval in your browser…')
     try {
       const result = await invoke<string>('ig_connect', { appId, appSecret: secret })
+      if (!mountedRef.current) return
       setMessage(result)
       const s = await invoke<{ connected: boolean; username?: string }>('ig_status')
-      setStatus(s)
+      if (!isInstagramStatus(s)) throw new Error('Instagram status is malformed.')
+      if (mountedRef.current) setStatus(s)
     } catch (err) {
-      setMessage(String(err))
+      if (mountedRef.current) setMessage(friendlyErrorMessage(err, 'Instagram could not connect. Retry the approval.'))
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
@@ -88,13 +96,17 @@ export default function IgModal({ onClose }: Props) {
               ))}
             </ol>
             <div className="ig-form">
+              <label className="sr-only" htmlFor="instagram-app-id">Instagram App ID</label>
               <input
+                id="instagram-app-id"
                 placeholder="Instagram App ID"
                 value={appId}
                 onChange={(e) => setAppId(e.target.value)}
                 className="mono"
               />
+              <label className="sr-only" htmlFor="instagram-app-secret">App Secret</label>
               <input
+                id="instagram-app-secret"
                 placeholder="App Secret"
                 type="password"
                 value={secret}

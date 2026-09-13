@@ -16,7 +16,7 @@ function errorCode(error: unknown): string {
   if (typeof error === 'object' && error !== null && 'code' in error) {
     return String(error.code)
   }
-  return String(error)
+  return ''
 }
 
 export function loadErrorMessage(error: unknown): string {

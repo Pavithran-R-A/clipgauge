@@ -16,6 +16,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
+from base64 import b64decode
+from binascii import Error as Base64DecodeError
 from pathlib import Path
 from typing import Any
 
@@ -92,6 +95,30 @@ def _overlay_dir(job_dir: Path) -> Path:
     return d
 
 
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        raise
+
+
 def pexels_key() -> str | None:
     key = os.environ.get("CLIPGAUGE_PEXELS_API_KEY")
     return key.strip() if key and key.strip() else None
@@ -112,14 +139,21 @@ def fetch_pexels(query: str, job_dir: Path) -> str | None:
             timeout=20.0,
         )
         res.raise_for_status()
-        photos = res.json().get("photos", [])
-        if not photos:
+        payload = res.json()
+        photos = payload.get("photos", []) if isinstance(payload, dict) else []
+        if not isinstance(photos, list) or not photos or not isinstance(photos[0], dict):
             return None
-        img = httpx.get(photos[0]["src"]["large"], timeout=30.0)
+        source = photos[0].get("src")
+        image_url = source.get("large") if isinstance(source, dict) else None
+        if not isinstance(image_url, str) or not image_url:
+            return None
+        img = httpx.get(image_url, timeout=30.0)
         img.raise_for_status()
-        dest.write_bytes(img.content)
+        if not img.content:
+            return None
+        _atomic_write_bytes(dest, img.content)
         return str(dest)
-    except httpx.HTTPError:
+    except (httpx.HTTPError, ValueError, TypeError, KeyError):
         return None
 
 
@@ -144,14 +178,25 @@ def fetch_gemini(query: str, job_dir: Path) -> str | None:
             timeout=60.0,
         )
         res.raise_for_status()
-        for part in res.json()["candidates"][0]["content"]["parts"]:
+        payload = res.json()
+        candidates = payload.get("candidates") if isinstance(payload, dict) else None
+        first = candidates[0] if isinstance(candidates, list) and candidates else None
+        content = first.get("content") if isinstance(first, dict) else None
+        parts = content.get("parts") if isinstance(content, dict) else None
+        if not isinstance(parts, list):
+            return None
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
             data = part.get("inlineData") or part.get("inline_data")
-            if data and data.get("data"):
-                import base64
-
-                dest.write_bytes(base64.b64decode(data["data"]))
+            encoded = data.get("data") if isinstance(data, dict) else None
+            if isinstance(encoded, str) and encoded:
+                image = b64decode(encoded, validate=True)
+                if not image:
+                    continue
+                _atomic_write_bytes(dest, image)
                 return str(dest)
-    except (httpx.HTTPError, KeyError, IndexError):
+    except (httpx.HTTPError, ValueError, TypeError, KeyError, IndexError, Base64DecodeError):
         return None
     return None
 

@@ -2,6 +2,19 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.16] - 2026-09-09
+
+ClipGauge v0.5.16 adds product-intelligence controls and qualification safeguards.
+
+- Added verified candidate, bait, boundary, and recommendation telemetry.
+- Added dynamic provider model discovery with requested and actual model snapshots.
+- Added private, balanced, and best-quality scoring modes.
+- Added review breadth controls for best, recommended, and borderline review.
+- Added cached setup, GPU, YouTube, and storage state with hard low-disk gates.
+- Added bounded retries for transient managed-asset HTTP failures.
+- Added cached onboarding state for immediate warm shell startup.
+- Preserved v0.5.15 as the immutable prior release.
+
 ## [0.5.15] - 2026-09-08
 
 ClipGauge v0.5.15 hardens local scoring recovery, YouTube fallback, and Windows qualification.

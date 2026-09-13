@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { waitFor } from '@testing-library/react'
 import Review from './Review'
@@ -62,6 +62,15 @@ function results(output: Partial<RenderOutput>): JobResults {
 describe('Review media trust states', () => {
   beforeEach(() => vi.clearAllMocks())
 
+  it('separates score, confidence, quality tier, and platform fit', () => {
+    render(<Review results={results({})} onBack={vi.fn()} onRestyle={vi.fn()} />)
+    expect(screen.getByText('Recommendation score')).toBeInTheDocument()
+    expect(screen.getByText('Recommendation confidence')).toBeInTheDocument()
+    expect(screen.getByText('Quality tier')).toBeInTheDocument()
+    expect(screen.getByText('Platform fit')).toBeInTheDocument()
+    expect(screen.getByText(/0–100 ranking signal, not a probability/)).toBeInTheDocument()
+  })
+
   it('shows an explicit artifact diagnostic instead of a blank monitor', () => {
     render(<Review results={results({})} onBack={vi.fn()} onRestyle={vi.fn()} />)
     expect(screen.getByTestId('artifact-error')).toHaveTextContent('RENDER ARTIFACT UNAVAILABLE')
@@ -80,6 +89,19 @@ describe('Review media trust states', () => {
     fireEvent.loadedMetadata(video)
     expect(screen.queryByText('loading clip…')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'EXPORT MP4' })).toBeEnabled()
+  })
+
+  it('shows recovery when the playback bridge returns a malformed URL', async () => {
+    vi.mocked(api.requestPlaybackUrl).mockResolvedValueOnce(null as never)
+    render(
+      <Review
+        results={results({ path: '/managed/jobs/20260818-155237-c6b118/clips/clip_00.mp4', artifact_status: 'available' })}
+        onBack={vi.fn()}
+        onRestyle={vi.fn()}
+      />
+    )
+
+    expect(await screen.findByTestId('video-error')).toHaveTextContent('This clip could not be loaded')
   })
 
   it('shows decode failure diagnostics and supports retry', async () => {
@@ -129,12 +151,25 @@ describe('Review media trust states', () => {
     expect(api.exportClip).not.toHaveBeenCalled()
   })
 
+  it('surfaces export failures without an unhandled rejection', async () => {
+    chooseExportDestinationMock.mockRejectedValue(new Error('export unavailable'))
+    render(
+      <Review
+        results={results({ path: '/managed/jobs/20260818-155237-c6b118/clips/clip_00.mp4', artifact_status: 'available' })}
+        onBack={vi.fn()}
+        onRestyle={vi.fn()}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'EXPORT MP4' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Export could not be completed. Retry the export.')
+  })
+
   it('shows a successful no-recommendations result without export controls', () => {
     const noRecommendations: JobResults = {
       job_id: 'job-no-recommendations',
       outcome: 'SUCCESS_NO_RECOMMENDATIONS',
       ingest: { title: 'fixture', heatmap: null, probe: { duration_sec: 10, width: 1920, height: 1080 } },
-      score: { clips: [], llm_mode: 'ollama', model: 'fixture', scored_count: 5, counts: { scored_count: 5 } },
+      score: { clips: [], llm_mode: 'ollama', model: 'fixture', scored_count: 5, counts: { scored_count: 5 }, borderline_candidates: [{ start: 2, end: 8, recommendation_score: 58, reasons: ['STRONG_RECOMMENDATION_REQUIRED'] }] },
       render: null,
       events: { counts: {}, timeline: [], arousal_source: 'dsp-proxy' },
       candidates: { count: 5, effective_weights: {}, heatmap_present: false },
@@ -142,6 +177,77 @@ describe('Review media trust states', () => {
     render(<Review results={noRecommendations} onBack={vi.fn()} onRestyle={vi.fn()} />)
     expect(screen.getByTestId('no-recommendations')).toHaveTextContent('No recommended clips')
     expect(screen.getByTestId('no-recommendations')).toHaveTextContent('5 moments were evaluated')
+    expect(screen.getByText(/Other moments/)).toBeInTheDocument()
+    expect(screen.getByText(/Score 58/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'EXPORT MP4' })).not.toBeInTheDocument()
+  })
+
+  it('keeps Review open when an other-moment preview fails', async () => {
+    const onBack = vi.fn()
+    vi.mocked(api.requestPlaybackUrl).mockRejectedValueOnce(new Error('playback unavailable'))
+    const noRecommendations: JobResults = {
+      job_id: 'job-preview-failure',
+      outcome: 'SUCCESS_NO_RECOMMENDATIONS',
+      ingest: { title: 'fixture', heatmap: null, probe: { duration_sec: 10, width: 1920, height: 1080 } },
+      score: { clips: [], llm_mode: 'ollama', model: 'fixture', scored_count: 1, borderline_candidates: [{ start: 2, end: 8, recommendation_score: 58, reasons: ['Below the recommendation bar'] }] },
+      render: null,
+      events: { counts: {}, timeline: [], arousal_source: 'dsp-proxy' },
+      candidates: { count: 1, effective_weights: {}, heatmap_present: false }
+    }
+    render(<Review results={noRecommendations} onBack={onBack} onRestyle={vi.fn()} />)
+
+    fireEvent.click(screen.getByText(/Other moments/))
+    fireEvent.click(screen.getByRole('button', { name: 'Preview source' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Preview unavailable. Retry the preview.')
+    expect(onBack).not.toHaveBeenCalled()
+  })
+
+  it('rejects a malformed URL for an other-moment preview', async () => {
+    vi.mocked(api.requestPlaybackUrl).mockResolvedValueOnce(null as never)
+    const noRecommendations: JobResults = {
+      job_id: 'job-preview-malformed',
+      outcome: 'SUCCESS_NO_RECOMMENDATIONS',
+      ingest: { title: 'fixture', heatmap: null, probe: { duration_sec: 10, width: 1920, height: 1080 } },
+      score: { clips: [], llm_mode: 'ollama', model: 'fixture', scored_count: 1, borderline_candidates: [{ start: 2, end: 8, recommendation_score: 58, reasons: ['Below the recommendation bar'] }] },
+      render: null,
+      events: { counts: {}, timeline: [], arousal_source: 'dsp-proxy' },
+      candidates: { count: 1, effective_weights: {}, heatmap_present: false }
+    }
+    render(<Review results={noRecommendations} onBack={vi.fn()} onRestyle={vi.fn()} />)
+
+    fireEvent.click(screen.getByText(/Other moments/))
+    fireEvent.click(screen.getByRole('button', { name: 'Preview source' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Preview unavailable. Retry the preview.')
+  })
+
+  it('does not open a stale other-moment preview after unmount', async () => {
+    let resolvePlayback: ((value: string) => void) | undefined
+    vi.mocked(api.requestPlaybackUrl).mockImplementationOnce(() => new Promise((resolve) => { resolvePlayback = resolve }))
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
+    const noRecommendations: JobResults = {
+      job_id: 'job-preview-unmount',
+      outcome: 'SUCCESS_NO_RECOMMENDATIONS',
+      ingest: { title: 'fixture', heatmap: null, probe: { duration_sec: 10, width: 1920, height: 1080 } },
+      score: { clips: [], llm_mode: 'ollama', model: 'fixture', scored_count: 1, borderline_candidates: [{ start: 2, end: 8, recommendation_score: 58, reasons: ['Below the recommendation bar'] }] },
+      render: null,
+      events: { counts: {}, timeline: [], arousal_source: 'dsp-proxy' },
+      candidates: { count: 1, effective_weights: {}, heatmap_present: false }
+    }
+    const view = render(<Review results={noRecommendations} onBack={vi.fn()} onRestyle={vi.fn()} />)
+
+    fireEvent.click(screen.getByText(/Other moments/))
+    fireEvent.click(screen.getByRole('button', { name: 'Preview source' }))
+    expect(resolvePlayback).toBeDefined()
+    view.unmount()
+
+    await act(async () => {
+      resolvePlayback?.('http://127.0.0.1:49152/media/test-token')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+
+    expect(openSpy).not.toHaveBeenCalled()
+    openSpy.mockRestore()
   })
 })

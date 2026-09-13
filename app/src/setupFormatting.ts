@@ -3,6 +3,18 @@ import type { ManagedAssetRow, SetupProgressEvent } from './types'
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB']
 const MIN_MEANINGFUL_ETA_BYTES = 128 * 1024
 const MIN_MEANINGFUL_ETA_SECONDS = 2
+const LOW_DISK_BYTES = 4 * 1024 ** 3
+const CRITICAL_DISK_BYTES = 1 * 1024 ** 3
+
+export type DiskState = 'HEALTHY' | 'LOW' | 'CRITICAL' | 'UNKNOWN'
+
+export function diskState(available: number | null | undefined, required = 0): { state: DiskState; message: string } {
+  if (available == null || !Number.isFinite(available) || available < 0) return { state: 'UNKNOWN', message: 'Available disk space is unavailable.' }
+  const requiredBytes = Math.max(0, required)
+  if (available < Math.max(CRITICAL_DISK_BYTES, requiredBytes)) return { state: 'CRITICAL', message: 'Free space is too low for a long analysis.' }
+  if (available < LOW_DISK_BYTES) return { state: 'LOW', message: 'Free space is getting low.' }
+  return { state: 'HEALTHY', message: 'Free space is healthy.' }
+}
 
 export function formatBytes(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value) || value < 0) return '—'

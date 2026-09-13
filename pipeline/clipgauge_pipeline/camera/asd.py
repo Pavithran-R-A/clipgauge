@@ -66,22 +66,30 @@ def _stream_frames(video_path: str, start: float, duration: float, vf: str, pix_
     """Yield raw frames from an ffmpeg decode."""
     proc = subprocess.Popen(
         [
-            ffmpeg_bin.ffmpeg(), "-v", "error",
+            ffmpeg_bin.ffmpeg(), "-nostdin", "-v", "error",
             "-ss", f"{start:.3f}", "-t", f"{duration:.3f}",
             "-i", video_path,
             "-vf", vf, "-f", "rawvideo", "-pix_fmt", pix_fmt, "-",
         ],
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
     )
+    completed = False
     try:
         while True:
             buf = proc.stdout.read(frame_bytes)
             if len(buf) < frame_bytes:
                 break
             yield np.frombuffer(buf, dtype=np.uint8)
+        completed = True
     finally:
-        proc.stdout.close()
-        proc.wait()
+        if proc.stdout is not None:
+            proc.stdout.close()
+        if not completed and proc.poll() is None:
+            proc.kill()
+        returncode = proc.wait()
+        if completed and returncode != 0:
+            raise RuntimeError(f"FFmpeg frame decode failed (exit code {returncode}).")
 
 
 def detection_pass(

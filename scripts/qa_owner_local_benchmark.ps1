@@ -1,0 +1,190 @@
+param(
+    [string]$Model = 'clipgauge-local/qwen3-4b-q4_k_m',
+    [string]$ExpectedCandidateFingerprint = ''
+)
+
+$ErrorActionPreference = 'Stop'
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$clipgaugeRoot = Join-Path $env:USERPROFILE '.clipgauge'
+$ownerId = '20260909-125228-3c050e'
+$ownerJob = Join-Path $clipgaugeRoot "jobs\$ownerId"
+$python = Join-Path $clipgaugeRoot 'runtimes\pipeline\Scripts\python.exe'
+$metricsScript = Join-Path $repoRoot 'scripts\qa_owner_metrics.py'
+
+function Get-OwnerCandidateFingerprint {
+    param([string]$Path)
+    $lines = @(& $python $metricsScript --candidate-fingerprint --candidates $Path 2>&1 | ForEach-Object { $_.ToString() })
+    if ($LASTEXITCODE -ne 0) { throw 'Could not fingerprint owner candidates.' }
+    $fingerprint = ($lines -join '').Trim()
+    if ($fingerprint -notmatch '^[0-9a-f]{64}$') { throw 'Owner candidate fingerprint was malformed.' }
+    return $fingerprint
+}
+
+if (-not (Test-Path -LiteralPath $ownerJob)) { throw "owner benchmark job is missing: $ownerId" }
+if (-not (Test-Path -LiteralPath $python)) { throw 'pipeline environment is missing' }
+
+$ownerJobBytes = [int64]((Get-ChildItem -LiteralPath $ownerJob -Recurse -File -Force | Measure-Object -Property Length -Sum).Sum)
+$databasePath = Join-Path $clipgaugeRoot 'db.sqlite3'
+$databaseBytes = [int64](Get-Item -LiteralPath $databasePath).Length
+$backupSafetyMarginBytes = 64MB
+$requiredBackupBytes = $ownerJobBytes + $databaseBytes + $backupSafetyMarginBytes
+$storageDrive = (Get-Item -LiteralPath $clipgaugeRoot).PSDrive.Name
+$freeBytes = [int64](Get-PSDrive -Name $storageDrive).Free
+if ($freeBytes -lt $requiredBackupBytes) {
+    throw "Insufficient free disk space for the benchmark checkpoint backup. Need at least $requiredBackupBytes bytes; only $freeBytes bytes are available."
+}
+
+$backupRoot = Join-Path ([IO.Path]::GetTempPath()) "clipgauge-local-benchmark-$([Guid]::NewGuid().ToString('N'))"
+$backupJob = Join-Path $backupRoot 'job'
+$previousHome = $env:CLIPGAUGE_HOME
+$previousPath = $env:PYTHONPATH
+$backupReady = $false
+
+try {
+    New-Item -ItemType Directory -Force $backupJob | Out-Null
+    Copy-Item -LiteralPath $databasePath -Destination (Join-Path $backupRoot 'db.sqlite3')
+    Copy-Item -Path (Join-Path $ownerJob '*') -Destination $backupJob -Recurse -Force
+    $backupReady = $true
+
+    $env:CLIPGAUGE_HOME = $clipgaugeRoot
+    $env:PYTHONPATH = Join-Path $repoRoot 'pipeline'
+    $scorePath = Join-Path $ownerJob 'score.json'
+    Remove-Item -LiteralPath $scorePath -Force -ErrorAction SilentlyContinue
+
+    $commandErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $output = @(& $python -m clipgauge_pipeline.cli --jsonl resume $ownerId --provider clipgauge-local --model $Model --quality-mode balanced --stop-after score 2>&1 | ForEach-Object { $_.ToString() })
+    $exitCode = $LASTEXITCODE
+    $ErrorActionPreference = $commandErrorAction
+    if ($exitCode -ne 0) {
+        $candidateFingerprint = $null
+        if (Test-Path -LiteralPath (Join-Path $ownerJob 'candidates.json')) {
+            try { $candidateFingerprint = Get-OwnerCandidateFingerprint (Join-Path $ownerJob 'candidates.json') } catch { }
+        }
+        [pscustomobject]@{ exit = $exitCode; score_present = (Test-Path -LiteralPath $scorePath); candidate_fingerprint = $candidateFingerprint; output_tail = @($output | Select-Object -Last 12) } | ConvertTo-Json -Compress
+        exit $exitCode
+    }
+    if (-not (Test-Path -LiteralPath $scorePath)) {
+        [pscustomobject]@{ exit = $exitCode; score_present = $false; candidate_fingerprint = $null; output_tail = @($output | Select-Object -Last 8) } | ConvertTo-Json -Compress
+        exit $exitCode
+    }
+    $score = (Get-Content -LiteralPath $scorePath -Raw | ConvertFrom-Json).data
+    $settings = Get-Content -LiteralPath (Join-Path $ownerJob 'settings.json') -Raw | ConvertFrom-Json
+    $candidatePayload = Get-Content -LiteralPath (Join-Path $ownerJob 'candidates.json') -Raw | ConvertFrom-Json
+    $candidateFingerprint = Get-OwnerCandidateFingerprint (Join-Path $ownerJob 'candidates.json')
+    if ($ExpectedCandidateFingerprint -and -not [String]::Equals($ExpectedCandidateFingerprint, $candidateFingerprint, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Owner candidate fingerprint mismatch. Expected $ExpectedCandidateFingerprint; received $candidateFingerprint."
+    }
+    $candidateCount = $candidatePayload.data.count
+    $candidateIntervals = @($candidatePayload.data.candidates | ForEach-Object {
+        @{ candidate_id = $_.candidate_id; start = $_.start; end = $_.end }
+    })
+    $diarizePayload = Get-Content -LiteralPath (Join-Path $ownerJob 'diarize.json') -Raw | ConvertFrom-Json
+    $candidateWordCounts = @($candidatePayload.data.candidates | ForEach-Object {
+        $candidate = $_
+        $wordCount = @($diarizePayload.data.segments | ForEach-Object {
+            if ($_.end -lt $candidate.start -or $_.start -gt $candidate.end) { return }
+            @($_.words | Where-Object { $_.start -ge $candidate.start -and $_.start -lt $candidate.end })
+        }).Count
+        @{ candidate_id = $candidate.candidate_id; words = $wordCount }
+    })
+    $candidateAudit = $candidatePayload.data.candidate_audit
+    $candidateRejections = @($candidateAudit.rejection_reasons | Where-Object {
+        $_.anchor_sentence_id -in @('S0212', 'S0229', 'S0243', 'S0322', 'S0342')
+    } | ForEach-Object {
+        @{
+            candidate_id = $_.candidate_id
+            start = $_.start
+            end = $_.end
+            anchor_sentence_id = $_.anchor_sentence_id
+            payoff_time = $_.payoff_time
+            payoff_candidate = $_.payoff_candidate
+            payoff_boundary_explicit = $_.payoff_boundary_explicit
+            source_final_boundary = $_.source_final_boundary
+            status = $_.status
+            rejection_reasons = @($_.rejection_reasons)
+        }
+    })
+    $metrics = $null
+    try {
+        $metricsOutput = @(& $python $metricsScript --score $scorePath --candidates (Join-Path $ownerJob 'candidates.json') --benchmark (Join-Path $repoRoot 'docs\qa\v0.5.16-owner-benchmark.json') 2>&1 | ForEach-Object { $_.ToString() })
+        $metrics = ($metricsOutput -join "`n") | ConvertFrom-Json
+    } catch {
+        $metrics = @{ error = 'Aggregate benchmark metrics could not be calculated.' }
+    }
+    $allEntries = @($score.clips) + @($score.borderline_candidates) + @($score.rejected_candidates)
+    $qualityTiers = @($allEntries | ForEach-Object { $_.quality.quality_tier } | Group-Object | ForEach-Object { @{ name = $_.Name; count = $_.Count } })
+    $rejectionReasons = @($score.rejected_candidates | ForEach-Object { $_.rejection_reasons } | Group-Object | ForEach-Object { @{ name = $_.Name; count = $_.Count } })
+    $baitClassifications = @($allEntries | ForEach-Object {
+        $verification = @($_.adjustments | Where-Object { $_.rule -eq 'bait_verification' }) | Select-Object -First 1
+        if ($null -ne $verification) {
+            @{
+                candidate_id = $_.candidate_id
+                model_reported_bait = @($verification.model_reported_bait)
+                verified_bait = @($verification.verified_bait)
+                rejected_bait = @($verification.rejected_bait)
+            }
+        }
+    })
+    $scoredAudit = @($allEntries | ForEach-Object {
+        @{
+            candidate_id = $_.candidate_id
+            start = $_.start
+            end = $_.end
+            status = $_.status
+            recommendation_score = $_.recommendation_score
+            quality_tier = $_.quality.quality_tier
+            quality_flags = @($_.quality.quality_flags)
+            strong_recommendation = $_.quality.strong_recommendation
+            eligible_to_recommend = $_.quality.eligible_to_recommend
+        }
+    })
+    [pscustomobject]@{
+        exit = $exitCode
+        outcome = $score.outcome
+        code = $score.code
+        provider = $score.provider_kind
+        requested_model = $settings.provider_model
+        quality_mode = $settings.quality_mode
+        candidate_count = $candidateCount
+        candidate_intervals = $candidateIntervals
+        candidate_word_counts = $candidateWordCounts
+        candidate_audit = @{
+            raw_proposals = $candidateAudit.raw_proposals
+            deduped_proposals = $candidateAudit.deduped_proposals
+            shortlisted_proposals = $candidateAudit.shortlisted_proposals
+        }
+        candidate_fingerprint = $candidateFingerprint
+        candidate_rejections = $candidateRejections
+        scored_count = $score.scored_count
+        recommended_count = $score.strong_recommendation_count
+        good_count = $score.good_recommendation_count
+        other_count = @($score.borderline_candidates).Count
+        quality_tiers = $qualityTiers
+        rejection_reasons = $rejectionReasons
+        bait_classifications = $baitClassifications
+        scored_audit = $scoredAudit
+        scoring_failures = $score.scoring_failures
+        performance = $score.performance
+        metrics = $metrics
+        output_tail = @($output | Select-Object -Last 12)
+    } | ConvertTo-Json -Depth 16 -Compress
+    exit $exitCode
+}
+finally {
+    if ($backupReady) {
+        if (Test-Path -LiteralPath $ownerJob) {
+            Remove-Item -LiteralPath $ownerJob -Recurse -Force
+        }
+        New-Item -ItemType Directory -Force (Split-Path -Parent $ownerJob) | Out-Null
+        foreach ($item in Get-ChildItem -LiteralPath $backupJob -Force) {
+            Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $ownerJob $item.Name) -Recurse -Force
+        }
+        Copy-Item -LiteralPath (Join-Path $backupRoot 'db.sqlite3') -Destination (Join-Path $clipgaugeRoot 'db.sqlite3') -Force
+    }
+    if ($null -eq $previousHome) { Remove-Item Env:CLIPGAUGE_HOME -ErrorAction SilentlyContinue } else { $env:CLIPGAUGE_HOME = $previousHome }
+    if ($null -eq $previousPath) { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue } else { $env:PYTHONPATH = $previousPath }
+    if (Test-Path -LiteralPath $backupRoot) {
+        Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}

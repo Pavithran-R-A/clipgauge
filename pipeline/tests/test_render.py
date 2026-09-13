@@ -205,6 +205,32 @@ def test_render_retries_hardware_initialization_with_software(monkeypatch, tmp_p
     assert used == "libx264"
 
 
+def test_render_removes_sendcmd_file_when_ffmpeg_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(renderer, "nvenc_available", lambda: False)
+    monkeypatch.setattr(renderer, "videotoolbox_available", lambda: False)
+
+    def fail_render(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("ffmpeg", 1)
+
+    monkeypatch.setattr(renderer, "run_ffmpeg_with_encoder_fallback", fail_render)
+    output = tmp_path / "out.mp4"
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        renderer.render_clip(
+            "source.mp4",
+            output,
+            0.0,
+            1.0,
+            {"fps": 25, "frames": [[100.0, 0.0, 404.0, 720.0]]},
+            None,
+            None,
+            src_w=1280,
+            src_h=720,
+        )
+
+    assert not output.with_suffix(".cmd").exists()
+
+
 @pytest.mark.slow
 def test_render_smoke(tmp_path):
     """Full path: synthetic source → sendcmd crop with a mid-clip cut →

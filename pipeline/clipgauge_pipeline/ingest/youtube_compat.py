@@ -14,6 +14,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -36,6 +37,28 @@ PUBLIC_COMPATIBILITY_FILENAME = "youtube-public-compatibility.json"
 WPC_VERSION = "1.1.2"
 WPC_SOURCE = "https://github.com/coletdjnz/yt-dlp-getpot-wpc/tree/v1.1.2"
 WPC_LICENSE = "MIT"
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".part",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -239,10 +262,8 @@ def invalidate_public_compatibility() -> None:
     if not isinstance(payload, dict):
         return
     payload["verified"] = False
-    temporary = path.with_name(f".{path.name}.part")
     try:
-        temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-        temporary.replace(path)
+        _atomic_write_text(path, json.dumps(payload, sort_keys=True))
     except OSError:
         pass
 
@@ -258,9 +279,7 @@ def record_public_compatibility_success(*, method: str, ytdlp_version: str, prov
         "method": str(method)[:64],
     }
     path = _public_compatibility_path()
-    temporary = path.with_name(f".{path.name}.part")
-    temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    temporary.replace(path)
+    _atomic_write_text(path, json.dumps(payload, sort_keys=True))
 
 
 def _find_browser() -> str | None:

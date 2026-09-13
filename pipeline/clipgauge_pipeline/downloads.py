@@ -8,15 +8,41 @@ capability check has passed.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shutil
+import sys
+import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from . import config, runtime
+from . import __version__, config, runtime
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".part",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -53,12 +79,136 @@ class ConsentRequiredError(RuntimeError):
     """The requested asset group has not been explicitly approved."""
 
 
+class VersionedInventoryCache:
+    """Metadata-backed integrity cache for managed asset inventory."""
+
+    SCHEMA_VERSION = 1
+
+    def __init__(self, path: Path, *, app_version: str = "unknown", platform: str | None = None) -> None:
+        self.path = path
+        self.app_version = app_version
+        self.platform = platform or sys.platform
+        self.payload = self._load()
+
+    def _load(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+            if (
+                isinstance(value, dict)
+                and value.get("schema_version") == self.SCHEMA_VERSION
+                and value.get("app_version") == self.app_version
+            ):
+                return value
+        except (OSError, ValueError):
+            pass
+        return {
+            "schema_version": self.SCHEMA_VERSION,
+            "app_version": self.app_version,
+            "platform": self.platform,
+            "runtime_manifest_digest": "",
+            "last_verified_at": None,
+            "entries": {},
+        }
+
+    def set_context(self, manifest_digest: str) -> None:
+        self.payload["platform"] = self.platform
+        self.payload["runtime_manifest_digest"] = manifest_digest
+
+    @staticmethod
+    def key(asset: ManagedAsset) -> str:
+        return f"{asset.asset_id}|{asset.destination}"
+
+    @staticmethod
+    def asset_manifest_digest(asset: ManagedAsset) -> str:
+        manifest_record = {
+            "asset_id": asset.asset_id,
+            "destination": asset.destination,
+            "sha256": asset.sha256,
+            "size_bytes": asset.size_bytes,
+            "platform": asset.platform,
+            "source_revision": asset.source_revision,
+        }
+        return hashlib.sha256(json.dumps(manifest_record, sort_keys=True).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def file_identity(stat: os.stat_result) -> list[int] | None:
+        device = getattr(stat, "st_dev", None)
+        inode = getattr(stat, "st_ino", None)
+        if not isinstance(device, int) or not isinstance(inode, int) or device <= 0 or inode <= 0:
+            return None
+        return [device, inode]
+
+    def lookup(self, asset: ManagedAsset, destination: Path) -> dict[str, Any] | None:
+        try:
+            stat = destination.stat()
+        except OSError:
+            return None
+        identity = self.file_identity(stat)
+        if identity is None:
+            return None
+        entry = self.payload.get("entries", {}).get(self.key(asset))
+        if not isinstance(entry, dict):
+            return None
+        if (
+            entry.get("canonical_path") == str(destination.resolve())
+            and entry.get("expected_hash", "").lower() == asset.sha256.lower()
+            and entry.get("size") == stat.st_size
+            and entry.get("mtime_ns") == stat.st_mtime_ns
+            and entry.get("file_identity") == identity
+            and entry.get("verified_hash", "").lower() == asset.sha256.lower()
+            and entry.get("asset_manifest_digest") == self.asset_manifest_digest(asset)
+            and entry.get("platform") == self.platform
+        ):
+            return entry
+        return None
+
+    def record(self, asset: ManagedAsset, destination: Path, verified_hash: str) -> None:
+        try:
+            stat = destination.stat()
+        except OSError:
+            return
+        entries = self.payload.setdefault("entries", {})
+        entries[self.key(asset)] = {
+            "canonical_path": str(destination.resolve()),
+            "expected_hash": asset.sha256,
+            "verified_hash": verified_hash,
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "file_identity": self.file_identity(stat),
+            "verified_at": time.time(),
+            "runtime_manifest_digest": self.payload.get("runtime_manifest_digest", ""),
+            "asset_manifest_digest": self.asset_manifest_digest(asset),
+            "platform": self.platform,
+        }
+
+    def save(self) -> None:
+        self.payload["app_version"] = self.app_version
+        self.payload["platform"] = self.platform
+        verified_times = [
+            entry.get("verified_at", 0)
+            for entry in self.payload.get("entries", {}).values()
+            if isinstance(entry, dict)
+        ]
+        if verified_times:
+            self.payload["last_verified_at"] = max(verified_times)
+        self.payload["updated_at"] = time.time()
+        _write_json_atomic(self.path, self.payload)
+
+
 class DownloadManager:
+    # Tauri owns inventory-cache.json with a different multi-file schema.
+    # Keep sidecar verification state separate to prevent cache thrashing.
+    SIDECAR_INVENTORY_CACHE_FILENAME = "pipeline-inventory-cache.json"
+
     def __init__(self, root: Path | None = None, event: EventFn | None = None) -> None:
         self.root = (root or config.home_dir()).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.state_path = self.root / "downloads.json"
         self.consent_path = self.root / "download-consent.json"
+        self.inventory_cache = VersionedInventoryCache(
+            self.root / self.SIDECAR_INVENTORY_CACHE_FILENAME,
+            app_version=__version__,
+        )
         self.event = event
         self.state = self._load_json(self.state_path)
         self.consents = self._load_json(self.consent_path)
@@ -75,9 +225,7 @@ class DownloadManager:
 
     @staticmethod
     def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
-        temporary = path.with_name(f".{path.name}.part")
-        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        temporary.replace(path)
+        _write_json_atomic(path, payload)
 
     def _save(self) -> None:
         with self._lock:
@@ -158,8 +306,56 @@ class DownloadManager:
             )
         return rows
 
+    def inventory_cached(self, assets: Iterable[ManagedAsset], *, verify: bool = True) -> list[dict[str, Any]]:
+        """Inventory assets while reusing unchanged verified file metadata."""
+        asset_list = list(assets)
+        manifest_path = Path(__file__).resolve().parents[1] / "runtime-manifest.json"
+        try:
+            manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        except OSError:
+            manifest_digest = hashlib.sha256(
+                json.dumps([self.inventory_cache.asset_manifest_digest(asset) for asset in asset_list], sort_keys=True).encode("utf-8")
+            ).hexdigest()
+        self.inventory_cache.set_context(manifest_digest)
+        rows: list[dict[str, Any]] = []
+        for asset in asset_list:
+            destination = self._destination(asset)
+            state = self.state.get(asset.asset_id, {})
+            cached_entry = self.inventory_cache.lookup(asset, destination) if verify else None
+            if cached_entry is not None:
+                installed = True
+                digest = str(cached_entry["verified_hash"])
+                verification = "cached-hash"
+            elif verify:
+                installed, digest = self._asset_ready(asset, destination)
+                verification = "fresh-hash"
+                if installed and digest:
+                    self.inventory_cache.record(asset, destination, digest)
+            else:
+                persisted_status = str(state.get("status", "")).lower()
+                installed = destination.is_file() and persisted_status in {"installed", "reused", "ready"}
+                digest = asset.sha256 if installed and asset.sha256 else None
+                verification = "persisted-state" if installed else "not-verified"
+            status = "ready" if installed else state.get("status", "not-installed")
+            if destination.is_file() and not installed and digest:
+                status = "needs-repair"
+            rows.append({
+                **asset.to_json(),
+                "installed": installed,
+                "cached": installed or status in {"ready", "reused", "installed"},
+                "installed_sha256": digest,
+                "verification": verification,
+                "status": status,
+                "state": status.upper().replace("-", "_"),
+                "managed_path": str(destination),
+                "consent_granted": self.has_consent(asset.consent_group, [asset], verified_asset_ids={asset.asset_id} if installed else set()),
+            })
+        if verify:
+            self.inventory_cache.save()
+        return rows
+
     def estimate(self, assets: Iterable[ManagedAsset], *, verify: bool = True) -> dict[str, Any]:
-        rows = self.inventory(assets, verify=verify)
+        rows = self.inventory_cached(assets, verify=verify)
         required = sum(int(row["size_bytes"]) for row in rows if row["required"] and not row["installed"])
         optional = sum(int(row["size_bytes"]) for row in rows if not row["required"] and not row["installed"])
         installed = sum(
@@ -212,7 +408,13 @@ class DownloadManager:
         self.consents.pop(group_id, None)
         self._save_consents()
 
-    def has_consent(self, group_id: str, assets: Iterable[ManagedAsset]) -> bool:
+    def has_consent(
+        self,
+        group_id: str,
+        assets: Iterable[ManagedAsset],
+        *,
+        verified_asset_ids: set[str] | None = None,
+    ) -> bool:
         record = self.consents.get(group_id)
         if not isinstance(record, dict):
             return False
@@ -224,7 +426,7 @@ class DownloadManager:
         requested_bytes = sum(
             asset.size_bytes
             for asset in requested
-            if not self._asset_ready(asset, self._destination(asset))[0]
+            if asset.asset_id not in (verified_asset_ids or set()) and not self._asset_ready(asset, self._destination(asset))[0]
         )
         return requested_bytes <= int(record.get("budget_bytes", -1))
 
@@ -242,12 +444,23 @@ class DownloadManager:
                 if runtime.sha256_file(candidate).lower() != asset.sha256.lower():
                     continue
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                staged = destination.with_name(f".{destination.name}.migration")
-                shutil.copy2(candidate, staged)
-                if runtime.sha256_file(staged).lower() != asset.sha256.lower():
-                    staged.unlink(missing_ok=True)
-                    continue
-                staged.replace(destination)
+                staged: Path | None = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        dir=destination.parent,
+                        prefix=f".{destination.name}.",
+                        suffix=".migration",
+                        delete=False,
+                    ) as handle:
+                        staged = Path(handle.name)
+                    shutil.copy2(candidate, staged)
+                    if runtime.sha256_file(staged).lower() != asset.sha256.lower():
+                        continue
+                    os.replace(staged, destination)
+                    staged = None
+                finally:
+                    if staged is not None:
+                        staged.unlink(missing_ok=True)
                 self.state[asset.asset_id] = {
                     "status": "reused",
                     "destination": str(destination),

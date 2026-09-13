@@ -429,12 +429,17 @@ def _safe_extract_punkt(archive: Path) -> None:
     staging = target_root / f".punkt_tab.{time.time_ns()}.staging"
     staging.mkdir(parents=True, exist_ok=False)
     try:
+        seen: set[str] = set()
         with zipfile.ZipFile(archive) as handle:
             for info in handle.infolist():
                 name = info.filename.replace("\\", "/")
                 path = Path(name)
                 if not name or path.is_absolute() or ".." in path.parts:
                     raise runtime.RuntimeIntegrityError("punkt archive contains an unsafe path")
+                key = path.as_posix().casefold() if os.name == "nt" else path.as_posix()
+                if key in seen:
+                    raise runtime.RuntimeIntegrityError(f"duplicate archive member: {path}")
+                seen.add(key)
                 mode = (info.external_attr >> 16) & 0o170000
                 if mode == 0o120000:
                     raise runtime.RuntimeIntegrityError("punkt archive contains a symlink")
@@ -449,12 +454,21 @@ def _safe_extract_punkt(archive: Path) -> None:
         if not extracted.is_dir():
             raise runtime.RuntimeIntegrityError("punkt archive did not contain punkt_tab data")
         destination = target_root / "tokenizers" / "punkt_tab"
-        backup = target_root / f".punkt_tab.{time.time_ns()}.previous"
+        backup: Path | None = None
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
+            backup = target_root / f".punkt_tab.{time.time_ns()}.previous"
             os.replace(destination, backup)
-        os.replace(extracted, destination)
-        if backup.exists():
+        try:
+            os.replace(extracted, destination)
+        except OSError:
+            if backup is not None and backup.exists() and not destination.exists():
+                try:
+                    os.replace(backup, destination)
+                except OSError:
+                    pass
+            raise
+        if backup is not None and backup.exists():
             shutil.rmtree(backup, ignore_errors=True)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -467,12 +481,17 @@ def _safe_extract_silero(archive: Path) -> None:
     staging.mkdir(parents=True, exist_ok=False)
     try:
         root_name: str | None = None
+        seen: set[str] = set()
         with zipfile.ZipFile(archive) as handle:
             for info in handle.infolist():
                 name = info.filename.replace("\\", "/")
                 path = Path(name)
                 if not name or path.is_absolute() or ".." in path.parts:
                     raise runtime.RuntimeIntegrityError("Silero archive contains an unsafe path")
+                key = path.as_posix().casefold() if os.name == "nt" else path.as_posix()
+                if key in seen:
+                    raise runtime.RuntimeIntegrityError(f"duplicate archive member: {path}")
+                seen.add(key)
                 if root_name is None:
                     root_name = path.parts[0]
                 if not path.parts or path.parts[0] != root_name:
@@ -493,11 +512,20 @@ def _safe_extract_silero(archive: Path) -> None:
         required = [staging / item for item in silero_asset().expected_paths]
         if not all(path.is_file() for path in required):
             raise runtime.RuntimeIntegrityError("Silero archive is missing the torch.hub entrypoint or model")
-        backup = target_root.parent / f".{target_root.name}.{time.time_ns()}.previous"
+        backup: Path | None = None
         if target_root.exists():
+            backup = target_root.parent / f".{target_root.name}.{time.time_ns()}.previous"
             os.replace(target_root, backup)
-        os.replace(staging, target_root)
-        if backup.exists():
+        try:
+            os.replace(staging, target_root)
+        except OSError:
+            if backup is not None and backup.exists() and not target_root.exists():
+                try:
+                    os.replace(backup, target_root)
+                except OSError:
+                    pass
+            raise
+        if backup is not None and backup.exists():
             shutil.rmtree(backup, ignore_errors=True)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
