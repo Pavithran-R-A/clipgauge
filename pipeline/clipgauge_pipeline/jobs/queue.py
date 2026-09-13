@@ -334,12 +334,14 @@ class StageError(Exception):
         retryable: bool = True,
         stage: str | None = None,
         diagnostic_id: str | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
         self.stage = stage
         self.diagnostic_id = diagnostic_id
+        self.details = dict(details) if details else None
 
 
 class StageExecutionError(Exception):
@@ -475,6 +477,37 @@ def _dependency_fingerprint(stage: Stage, ctx: StageContext, prior: dict[str, di
             "upstream": upstream,
         }
     )
+
+
+def cached_prefix_ready(job: Job, stages: Iterable[Stage], *, through: str) -> bool:
+    """Return true only when every prefix checkpoint is reusable."""
+    stage_list = list(stages)
+    stop_index = next((index for index, stage in enumerate(stage_list) if stage.name == through), None)
+    if stop_index is None:
+        return False
+    try:
+        settings = config.Settings.from_json(json.loads(job.settings_json))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    ctx = StageContext(job=job, settings=settings, progress=lambda *_: None)
+    prior: dict[str, dict] = {}
+    for stage in stage_list[: stop_index + 1]:
+        dependency_fingerprint = _dependency_fingerprint(stage, ctx, prior)
+        cached, _ = read_checkpoint_detailed(
+            job,
+            stage.name,
+            stage.schema_version,
+            dependency_fingerprint,
+        )
+        if cached is None:
+            return False
+        try:
+            if not stage.artifacts_ok(ctx, cached):
+                return False
+        except (OSError, KeyError, TypeError, ValueError):
+            return False
+        prior[stage.name] = cached
+    return True
 
 
 def _with_checkpoint_metadata(data: dict, dependency_fingerprint: str) -> dict:

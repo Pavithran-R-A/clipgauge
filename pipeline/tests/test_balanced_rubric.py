@@ -43,6 +43,15 @@ def test_balanced_output_normalizes_no_payoff_sentinel():
     assert normalized["payoff_sentence_id"] is None
 
 
+def test_balanced_output_drops_unknown_payoff_identity_for_scoring():
+    payload = {field: None for field in rubric.BALANCED_REQUIRED_FIELDS}
+    payload.update({"payoff_sentence_id": "S9999", "quality_tier": "GOOD"})
+
+    normalized = rubric.normalize_balanced_output(payload, {"S0001"})
+
+    assert normalized["payoff_sentence_id"] is None
+
+
 def test_sentence_ids_are_opt_in_for_balanced_prompts():
     segments = [{"start": 0.0, "end": 2.0, "speaker": 0, "words": [
         {"start": 0.0, "end": 0.5, "word": "Hello"},

@@ -182,7 +182,7 @@ class LocalRuntime:
 
                 cuda_available = managed.cuda_runtime_ready() and nvidia_available
             except Exception:  # noqa: BLE001 - capability probing must never remove CPU fallback
-                pass
+                cuda_available = False
         selected = select_runtime_asset_key(
             platform_key=platform_key,
             nvidia_available=nvidia_available,
@@ -324,7 +324,13 @@ class LocalRuntime:
         if endpoint:
             port = urlsplit(endpoint).port
             if port:
-                return port
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                        sock.bind(("127.0.0.1", port))
+                except OSError:
+                    pass
+                else:
+                    return port
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(("127.0.0.1", 0))
             return int(sock.getsockname()[1])
@@ -347,6 +353,8 @@ class LocalRuntime:
             str(binary),
             "--model",
             str(model),
+            "--alias",
+            model_id,
             "--host",
             "127.0.0.1",
             "--port",
@@ -539,5 +547,5 @@ class LocalRuntime:
     def __del__(self) -> None:
         try:
             self.stop()
-        except Exception:
-            pass
+        except Exception as error:  # noqa: BLE001 - destructors must never escape
+            _qa_trace(self.root, "runtime_cleanup_failed", error=type(error).__name__)

@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $setup = Join-Path $PSScriptRoot '..\app\src-tauri\target\release\bundle\nsis\ClipGauge_0.5.16_x64-setup.exe' | Resolve-Path
 $profileRoot = Join-Path $env:USERPROFILE '.clipgauge'
-$marker = Join-Path $profileRoot 'release-qualification-marker.txt'
+$marker = Join-Path $profileRoot ("release-qualification-marker-{0}.txt" -f [Guid]::NewGuid().ToString('N'))
 
 if (-not (Test-Path -LiteralPath $setup)) { throw 'rebuilt installer is missing' }
 New-Item -ItemType Directory -Force $profileRoot | Out-Null

@@ -449,13 +449,15 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
     setMessage('Repairing verified GPU speech components…')
     try {
       await api.repairGpu()
+      if (!mountedRef.current) return
       setMessage('GPU speech acceleration is repaired. Retry the failed job.')
       await refreshGpu(true)
+      if (!mountedRef.current) return
       await refresh()
     } catch (error) {
-      setMessage(`GPU repair could not complete: ${loadErrorMessage(error)}`)
+      if (mountedRef.current) setMessage(`GPU repair could not complete: ${loadErrorMessage(error)}`)
     } finally {
-      setGpuBusy(false)
+      if (mountedRef.current) setGpuBusy(false)
     }
   }
 
@@ -476,9 +478,11 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
     setProgress({ event: 'progress', operation: 'Preparing download…', message: 'Checking the approved components…', state: 'STARTING', elapsed_seconds: 0, one_time_download: true })
     try {
       const operationId = await api.startSetup(args)
+      if (!mountedRef.current) return
       if (typeof operationId !== 'string' || !operationId.trim()) throw new Error('Setup returned an invalid operation id.')
       setOperationId(operationId)
     } catch (error) {
+      if (!mountedRef.current) return
       setBusy(false)
       setOperationId(null)
       setStartedAt(null)
@@ -517,9 +521,9 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
     queueRef.current = []
     try {
       await api.cancelSetup(operationId)
-      setMessage('Cancelling. Completed files remain available for reuse.')
+      if (mountedRef.current) setMessage('Cancelling. Completed files remain available for reuse.')
     } catch (error) {
-      setMessage(friendlyErrorMessage(error, 'Could not cancel setup. Retry the action.'))
+      if (mountedRef.current) setMessage(friendlyErrorMessage(error, 'Could not cancel setup. Retry the action.'))
     }
   }
 
@@ -563,22 +567,26 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
     setCleanupBusy(target)
     try {
       const preview = await api.storagePreview(target, jobId)
+      if (!mountedRef.current) return
       if (!isStorageCleanupPreview(preview)) throw new Error('Cleanup preview data is malformed.')
       if (!preview.paths.length) {
         setMessage('Nothing matched that cleanup request.')
         return
       }
       const scope = target === 'session' ? `session ${jobId}` : target === 'failed-session' ? `failed session ${jobId}` : target === 'safe-cache' ? 'safe temporary cache' : 'obsolete runtime archives'
+      if (!mountedRef.current) return
       if (!window.confirm(`Delete ${formatBytes(preview.bytes)} from ${scope}? User sessions and source media remain untouched.`)) return
+      if (!mountedRef.current) return
       const result = await api.storageCleanup(target, jobId)
+      if (!mountedRef.current) return
       if (!isStorageCleanupResult(result)) throw new Error('Cleanup result data is malformed.')
       setMessage(`Removed ${formatBytes(result.bytes)}. Verified components remain available.`)
       if (target === 'session' || target === 'failed-session') setSessionId('')
       await refresh()
     } catch (error) {
-      setMessage(`Cleanup could not run: ${loadErrorMessage(error)}`)
+      if (mountedRef.current) setMessage(`Cleanup could not run: ${loadErrorMessage(error)}`)
     } finally {
-      setCleanupBusy(null)
+      if (mountedRef.current) setCleanupBusy(null)
     }
   }
 

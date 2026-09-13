@@ -271,6 +271,83 @@ def test_refine_boundaries_preserves_trusted_candidate_edges():
     assert end >= 24.8
 
 
+def test_refine_boundaries_preserves_explicit_payoff_candidate_opening():
+    segments = [
+        {
+            "start": 396.1,
+            "end": 398.5,
+            "text": "This is the part I crashed in every time in the simulator.",
+            "words": [
+                {"word": word, "start": 396.1 + index * 0.25, "end": 396.1 + index * 0.25 + 0.2}
+                for index, word in enumerate("This is the part I crashed in every time in the simulator.".split())
+            ],
+        },
+        {
+            "start": 400.5,
+            "end": 403.9,
+            "text": "We're gonna land right there on top of that runway.",
+            "words": [
+                {"word": word, "start": 400.5 + index * 0.25, "end": 400.5 + index * 0.25 + 0.2}
+                for index, word in enumerate("We're gonna land right there on top of that runway.".split())
+            ],
+        },
+    ]
+
+    start, _ = short_quality.refine_boundaries(
+        segments,
+        400.51,
+        403.9,
+        {
+            "story_shape": "conflict_reaction",
+            "payoff_strength": 5,
+            "setup_strength": 5,
+            "standalone_comprehension": 5,
+            "recommended_start_offset": 0,
+            "recommended_end_offset": 3,
+        },
+        preserve_candidate_opening=True,
+        preserve_candidate_payoff=True,
+        payoff_time=403.5,
+    )
+
+    assert start >= 400.5
+
+
+def test_refine_boundaries_includes_nearby_explicit_outcome_context():
+    segments = [
+        {
+            "start": 268.8,
+            "end": 271.2,
+            "text": "They were going to let me touch the moon.",
+            "words": [
+                {"word": word, "start": 268.8 + index * 0.25, "end": 268.8 + index * 0.25 + 0.2}
+                for index, word in enumerate("They were going to let me touch the moon.".split())
+            ],
+        },
+        {
+            "start": 277.9,
+            "end": 280.9,
+            "text": "This is the largest selection of moon rocks.",
+            "words": [
+                {"word": word, "start": 277.9 + index * 0.25, "end": 277.9 + index * 0.25 + 0.2}
+                for index, word in enumerate("This is the largest selection of moon rocks.".split())
+            ],
+        },
+    ]
+
+    start, _ = short_quality.refine_boundaries(
+        segments,
+        277.942,
+        313.785,
+        {"recommended_start_offset": 0, "recommended_end_offset": 30},
+        preserve_candidate_opening=True,
+        preserve_candidate_payoff=True,
+        payoff_time=301.156,
+    )
+
+    assert start == 268.8
+
+
 def test_refine_boundaries_keeps_payoff_without_forcing_candidate_tail():
     segments = [
         {

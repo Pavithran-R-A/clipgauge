@@ -185,6 +185,114 @@ def test_groq_qwen_scoring_caps_output_budget_for_provider_limits(monkeypatch):
     assert seen["json"]["max_tokens"] == providers.GROQ_QWEN_SCORING_MAX_OUTPUT_TOKENS
 
 
+def test_openrouter_scoring_caps_output_budget_for_free_model_latency(monkeypatch):
+    seen: dict[str, object] = {}
+
+    def fake_post(url, *, headers, json, timeout, follow_redirects):
+        seen["json"] = json
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"ok": true}'}}]},
+        )
+
+    monkeypatch.setattr(providers.httpx, "post", fake_post)
+    adapter = providers.OpenAICompatibleAdapter(
+        profile(kind="openrouter", model="nex-agi/nex-n2.5-mini:free"),
+        "secret-value",
+    )
+
+    adapter.infer(
+        providers.InferenceRequest(
+            prompt="return ok",
+            schema={"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
+            purpose="scoring",
+        )
+    )
+
+    assert seen["json"]["max_tokens"] == providers.OPENROUTER_SCORING_MAX_OUTPUT_TOKENS
+
+
+def test_openrouter_selected_model_refreshes_capabilities_before_scoring(monkeypatch):
+    seen: dict[str, object] = {}
+
+    def fake_get(url, *, headers, timeout, follow_redirects):
+        return httpx.Response(
+            200,
+            json={
+                "data": [{
+                    "id": "nex-agi/nex-n2.5-mini:free",
+                    "architecture": {"input_modalities": ["text"]},
+                    "supported_parameters": ["reasoning_effort", "response_format", "structured_outputs"],
+                    "reasoning": {"mandatory": False, "supported_efforts": ["high", "medium", "none"]},
+                }],
+            },
+        )
+
+    def fake_post(url, *, headers, json, timeout, follow_redirects):
+        seen["json"] = json
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": '{"ok": true}'}}]},
+        )
+
+    monkeypatch.setattr(providers.httpx, "get", fake_get)
+    monkeypatch.setattr(providers.httpx, "post", fake_post)
+    adapter = providers.OpenAICompatibleAdapter(
+        profile(kind="openrouter", model="nex-agi/nex-n2.5-mini:free", capabilities=providers.CapabilitySet()),
+        "secret-value",
+    )
+
+    adapter.infer(
+        providers.InferenceRequest(
+            prompt="return ok",
+            schema={"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
+            purpose="scoring",
+        )
+    )
+
+    assert seen["json"]["response_format"]["type"] == "json_schema"
+    assert seen["json"]["max_tokens"] == providers.OPENROUTER_SCORING_MAX_OUTPUT_TOKENS
+    assert seen["json"]["reasoning_effort"] == "none"
+    assert adapter.profile.capabilities.structured_json is True
+
+
+def test_openrouter_auto_free_unknown_capabilities_use_safe_json_mode(monkeypatch):
+    seen: dict[str, object] = {}
+
+    def fake_get(*_args, **_kwargs):
+        raise AssertionError("Auto Free must not require a fixed model lookup")
+
+    def fake_post(url, *, headers, json, timeout, follow_redirects):
+        seen["json"] = json
+        return httpx.Response(
+            200,
+            json={
+                "model": "provider/free-model-a",
+                "choices": [{"message": {"content": '{"ok": true}'}}],
+            },
+        )
+
+    monkeypatch.setattr(providers.httpx, "get", fake_get)
+    monkeypatch.setattr(providers.httpx, "post", fake_post)
+    adapter = providers.OpenAICompatibleAdapter(
+        profile(kind="openrouter", model="openrouter/free", capabilities=providers.CapabilitySet()),
+        "secret-value",
+    )
+
+    result = adapter.infer(
+        providers.InferenceRequest(
+            prompt="return ok",
+            schema={"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
+            purpose="scoring",
+        )
+    )
+
+    assert result.structured_level == "native_schema"
+    assert seen["json"]["response_format"]["type"] == "json_schema"
+    assert seen["json"]["reasoning"] == {"effort": "none"}
+    assert result.model == "provider/free-model-a"
+
+
 def test_scoring_deadline_caps_provider_request_timeout(monkeypatch):
     seen: dict[str, object] = {}
 
@@ -790,6 +898,49 @@ def test_clipgauge_local_adapter_uses_existing_loopback_server(monkeypatch):
     assert result.data == {"ok": True}
     assert seen["url"] == "http://127.0.0.1:8080/v1/chat/completions"
     assert seen["follow_redirects"] is False
+
+
+def test_clipgauge_local_managed_endpoint_requires_its_model(monkeypatch):
+    calls = []
+    started = []
+
+    def fake_get(url, **_kwargs):
+        calls.append(url)
+        if url.endswith("/health"):
+            return httpx.Response(200)
+        return httpx.Response(200, json={"data": [{"id": "unrelated-model"}]})
+
+    monkeypatch.setattr(providers.httpx, "get", fake_get)
+    adapter = providers.make_adapter("clipgauge-local")
+    monkeypatch.setattr(
+        adapter._runtime,
+        "start",
+        lambda model: started.append(model) or "http://127.0.0.1:19001/v1",
+    )
+
+    adapter._ensure_runtime()
+
+    assert calls == [
+        "http://127.0.0.1:8080/health",
+        "http://127.0.0.1:8080/v1/models",
+    ]
+    assert started == [adapter.model]
+
+
+def test_clipgauge_local_managed_endpoint_accepts_matching_model(monkeypatch):
+    def fake_get(url, **_kwargs):
+        if url.endswith("/health"):
+            return httpx.Response(200)
+        return httpx.Response(200, json={"data": [{"id": "clipgauge-local/qwen3-4b-q4_k_m"}]})
+
+    monkeypatch.setattr(providers.httpx, "get", fake_get)
+    adapter = providers.make_adapter("clipgauge-local")
+    started = []
+    monkeypatch.setattr(adapter._runtime, "start", lambda model: started.append(model))
+
+    adapter._ensure_runtime()
+
+    assert started == []
 
 
 def test_clipgauge_local_timeout_is_single_attempt(monkeypatch):

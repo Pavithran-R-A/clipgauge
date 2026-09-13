@@ -1,8 +1,4 @@
-"""Candidates stage: signals to story-unit variants.
-
-The stage keeps scene cuts as supporting evidence, then constructs variable
-story spans before bounded local editorial boundary selection.
-"""
+"""Candidates stage: signals to deterministic story-unit variants."""
 
 from __future__ import annotations
 
@@ -30,7 +26,7 @@ def detect_scenes(media_path: str, progress=None) -> list[float]:
 
 class CandidatesStage(Stage):
     name = "candidates"
-    schema_version = 23  # v23: preserve compatible earlier openings
+    schema_version = 42  # v42: preserve earlier explicit-payoff openings
 
     def run(self, ctx: StageContext) -> dict:
         import numpy as np
@@ -90,39 +86,10 @@ class CandidatesStage(Stage):
             interest_curve=curve.tolist(),
         )
 
-        boundary_client = None
-        boundary_attempts = 0
-        try:
-            from ..scoring import providers as providers_mod
-
-            profile = providers_mod.profile_from_snapshot(ctx.settings.provider_snapshot())
-            if profile.capabilities.local:
-                client = providers_mod.make_adapter(profile)
-
-                def propose(neighborhood, _anchor):
-                    nonlocal boundary_attempts
-                    boundary_attempts += 1
-                    try:
-                        payload = client.generate_json(
-                            story_units.boundary_prompt(neighborhood),
-                            story_units.BOUNDARY_SCHEMA,
-                            purpose="boundary",
-                            job_id=ctx.job_dir.name,
-                        )
-                    except Exception as err:  # noqa: BLE001 — deterministic fallback remains valid
-                        ctx.emit(-1, f"Boundary proposal unavailable: {err}")
-                        return []
-                    proposal = story_units.parse_boundary_proposal(payload, neighborhood)
-                    return [proposal] if proposal else []
-
-                boundary_client = propose
-        except Exception:  # noqa: BLE001 — scoring may still use a cloud provider
-            boundary_client = None
-
         synthesis = story_units.synthesize(
             units,
             channels={name: values.tolist() for name, values in channels.items()},
-            boundary_proposer=boundary_client,
+            boundary_proposer=None,
             anchor_limit=story_units.ANCHOR_LIMIT,
             boundary_limit=story_units.MAX_BOUNDARY_CALLS,
             shortlist_limit=story_units.SHORTLIST_LIMIT,
@@ -145,7 +112,7 @@ class CandidatesStage(Stage):
             "raw_span_variants": synthesis["raw_span_variants"],
             "cheap_survivors": synthesis["cheap_survivors"],
             "candidate_audit": synthesis["candidate_audit"],
-            "boundary_calls": boundary_attempts,
+            "boundary_calls": 0,
             "effective_weights": effective_weights,
             "scene_count": len(scene_times),
             "heatmap_present": bool(ingest.get("heatmap")),

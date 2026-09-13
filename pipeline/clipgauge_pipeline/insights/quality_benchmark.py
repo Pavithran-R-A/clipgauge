@@ -7,8 +7,9 @@ the repository.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from statistics import median
-from typing import Any, Iterable
+from typing import Any
 
 
 def _interval(item: dict[str, Any]) -> tuple[float, float]:
@@ -229,7 +230,7 @@ def false_bait_counts(recommendations: list[dict[str, Any]]) -> tuple[int, int]:
             verified = record.get("verified_bait") if isinstance(record.get("verified_bait"), list) else []
             rejected = record.get("rejected_bait") if isinstance(record.get("rejected_bait"), list) else []
             total_reported += len(reported)
-            total_rejected += len(rejected) if rejected else max(0, len(reported) - len(verified))
+            total_rejected += min(len(rejected), len(reported)) if rejected else max(0, len(reported) - len(verified))
         elif isinstance(item.get("bait_reported"), list):
             reported = item["bait_reported"]
             verified = item.get("bait_verified")

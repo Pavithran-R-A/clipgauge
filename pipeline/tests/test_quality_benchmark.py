@@ -75,6 +75,24 @@ def test_false_bait_rate_reads_scoring_adjustment_records():
     assert benchmark_metrics(recommendations, recommendations, [], duration=100)["false_bait_rate"] == 0.5
 
 
+def test_false_bait_rate_ignores_rejected_non_model_reports():
+    recommendations = [{
+        "start": 10,
+        "end": 20,
+        "bait_verification": {
+            "model_reported_bait": [],
+            "verified_bait": [],
+            "rejected_bait": [{"phrase": "normal dialogue", "reason": "not_viewer_directed"}],
+        },
+    }]
+
+    metrics = benchmark_metrics(recommendations, recommendations, [], duration=100)
+
+    assert metrics["false_bait_rate"] == 0.0
+    assert metrics["false_bait_reported_count"] == 0
+    assert metrics["false_bait_false_positives"] == 0
+
+
 def test_false_bait_rate_counts_legacy_bait_lists_by_phrase():
     recommendations = [{
         "start": 10,

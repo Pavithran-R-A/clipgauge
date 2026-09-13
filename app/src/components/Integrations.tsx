@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Check, ExternalLink, Instagram, Link2, PictureInPicture2, ShieldCheck, Unplug } from 'lucide-react'
 import { api } from '../api'
 import type { SetupState } from '../types'
@@ -14,25 +14,28 @@ export default function Integrations({ onBack, onOpenLoop }: Props) {
   const [instagramConnected, setInstagramConnected] = useState(false)
   const [instagramUser, setInstagramUser] = useState<string | undefined>()
   const [message, setMessage] = useState<string | null>(null)
+  const mountedRef = useRef(true)
 
   useEffect(() => {
+    mountedRef.current = true
     let active = true
     api.setupState().then((value) => { if (active && isSetupState(value)) setSetup(value); else if (active) setMessage('Integration status is unavailable. Restart ClipGauge and retry.') }).catch(() => { if (active) setMessage('Integration status is unavailable. Restart ClipGauge and retry.') })
     api.igStatus().then((status) => { if (!isInstagramStatus(status)) throw new Error('Instagram status is malformed.'); if (active) { setInstagramConnected(status.connected); setInstagramUser(status.username) } }).catch(() => { if (active) setMessage('Instagram status is unavailable. Retry the connection check.') })
-    return () => { active = false }
+    return () => { active = false; mountedRef.current = false }
   }, [])
 
   async function savePexels() {
     if (!pexelsKey.trim()) return
     try {
       const stored = await api.savePexelsKey(pexelsKey.trim())
+      if (!mountedRef.current) return
       if (stored !== true) throw new Error('The Pexels key was not saved. Retry and check the operating-system vault.')
       setPexelsKey('')
       setSaved(true)
       setSetup((current) => current ? { ...current, provider_keys: { ...(current.provider_keys ?? {}), pexels: true } } : current)
       setMessage('Pexels is connected. The key stays in your operating-system vault.')
     } catch (error) {
-      setMessage(friendlyErrorMessage(error, 'Pexels could not be connected. Retry the action.'))
+      if (mountedRef.current) setMessage(friendlyErrorMessage(error, 'Pexels could not be connected. Retry the action.'))
     }
   }
 

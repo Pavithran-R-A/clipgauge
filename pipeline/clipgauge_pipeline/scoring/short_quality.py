@@ -26,6 +26,10 @@ _TOPIC_STOPWORDS = {
     "really", "very", "way", "people", "look", "looks", "looking",
 }
 _PUNCTUATION = (".", "!", "?")
+_EXPLICIT_OUTCOME_CONTEXT = re.compile(
+    r"\b(?:let me|allowed me|managed to|ended up|turned out|touch(?:ed|ing)?|landed)\b",
+    re.IGNORECASE,
+)
 _FRAGMENT_FUNCTION_WORDS = {"and", "because", "but", "here", "or", "so", "these", "then", "to", "with"}
 _GRAMMATICAL_TERMINAL_MARKERS = {"my", "our", "his", "her", "its", "their", "your", "than"}
 _SETUP_CONTEXT_MARKERS = {
@@ -598,6 +602,10 @@ def _is_context_setup_segment(segment: dict[str, Any]) -> bool:
     return bool(tokens & _SETUP_CONTEXT_MARKERS)
 
 
+def _is_explicit_outcome_context(segment: dict[str, Any]) -> bool:
+    return bool(_EXPLICIT_OUTCOME_CONTEXT.search(str(segment.get("text", ""))))
+
+
 def refine_boundaries(
     segments: list[dict[str, Any]],
     start: float,
@@ -633,6 +641,22 @@ def refine_boundaries(
             requested_start, requested_end = start, end
     if preserve_candidate_opening:
         requested_start = min(requested_start, start)
+        if preserve_candidate_payoff and payoff_time is not None:
+            outcome_context = next(
+                (
+                    segment
+                    for segment in reversed(segments)
+                    if float(segment.get("end", 0.0)) <= start
+                    and start - float(segment.get("end", 0.0)) <= 15.0
+                    and _is_explicit_outcome_context(segment)
+                ),
+                None,
+            )
+            if outcome_context is not None:
+                requested_start = min(
+                    requested_start,
+                    float(outcome_context.get("start", requested_start)),
+                )
     if preserve_candidate_end:
         requested_end = max(requested_end, end)
     elif preserve_candidate_payoff and payoff_time is not None:
@@ -683,6 +707,7 @@ def refine_boundaries(
     standalone = float(fields.get("standalone_comprehension", 0.0) or 0.0) if fields else 0.0
     if (
         fields
+        and not preserve_candidate_opening
         and requested_start <= start
         and story_shape in {"conflict_reaction", "question_answer", "hook_setup_payoff"}
         and payoff_strength >= 5.0

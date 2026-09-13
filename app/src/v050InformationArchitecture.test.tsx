@@ -720,6 +720,43 @@ describe('v0.5 information architecture', () => {
     expect(screen.getByText('clipgauge-local/light', { selector: 'code' })).toBeInTheDocument()
   })
 
+  it('does not notify the parent after local model save unmounts', async () => {
+    mocks.setupInventory.mockResolvedValue({
+      state: 'ready',
+      local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/balanced', required_bytes: 0, action: 'Ready' },
+      models: [
+        { asset_id: 'clipgauge-local/light', display_name: 'Lightweight', size_bytes: 1 },
+        { asset_id: 'clipgauge-local/balanced', display_name: 'Balanced', size_bytes: 2 }
+      ],
+      runtime: {},
+      core_assets: [],
+      storage: {},
+      catalog: []
+    })
+    mocks.listProviderModels.mockResolvedValue({
+      state: 'PASS',
+      provider: 'clipgauge-local',
+      models: [
+        { id: 'clipgauge-local/light', compatibility: 'FULL' },
+        { id: 'clipgauge-local/balanced', compatibility: 'FULL' }
+      ]
+    })
+    let resolveSave: (() => void) | undefined
+    mocks.saveLocalModel.mockImplementation(() => new Promise<void>((resolve) => { resolveSave = resolve }))
+    const onSelectLocalModel = vi.fn()
+    const view = render(<ProviderCenter selectedProvider="clipgauge-local" onSelectProvider={vi.fn()} onSelectLocalModel={onSelectLocalModel} onBack={vi.fn()} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Refresh models' }))
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Model' }), 'clipgauge-local/light')
+    view.unmount()
+
+    await act(async () => {
+      resolveSave?.()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(onSelectLocalModel).not.toHaveBeenCalled()
+  })
+
   it('serializes rapid local model changes in selection order', async () => {
     mocks.setupInventory.mockResolvedValue({
       state: 'ready',

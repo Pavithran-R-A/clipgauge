@@ -10,6 +10,7 @@ CHECKPOINT_BYTES = 256 * 1024**2
 MIN_RENDER_BYTES = 256 * 1024**2
 SAFETY_FRACTION = 0.20
 MIN_SAFETY_BYTES = 512 * 1024**2
+CACHED_SCORE_MIN_SAFE_BYTES = 256 * 1024**2
 
 
 def for_source(
@@ -33,6 +34,22 @@ def for_source(
         "temporary_audio_bytes": audio_bytes,
         "checkpoint_bytes": CHECKPOINT_BYTES,
         "render_bytes": render_bytes,
+        "safety_margin_bytes": safety_bytes,
+        "required_bytes": working_bytes + safety_bytes,
+    }
+
+
+def for_cached_score() -> dict[str, int | float | None]:
+    """Estimate transient space for a cached score-only replay."""
+    working_bytes = CACHED_SCORE_MIN_SAFE_BYTES // 2
+    safety_bytes = CACHED_SCORE_MIN_SAFE_BYTES - working_bytes
+    return {
+        "source_bytes": 0,
+        "source_copy_bytes": 0,
+        "duration_seconds": None,
+        "temporary_audio_bytes": 0,
+        "checkpoint_bytes": working_bytes,
+        "render_bytes": 0,
         "safety_margin_bytes": safety_bytes,
         "required_bytes": working_bytes + safety_bytes,
     }

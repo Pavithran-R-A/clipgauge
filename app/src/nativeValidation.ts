@@ -120,8 +120,8 @@ export function isPrivacySummary(value: unknown): value is PrivacySummary {
     && Array.isArray(value.llm.device) && value.llm.device.every((item) => typeof item === 'string')
     && Array.isArray(value.llm.network) && value.llm.network.every((item) => typeof item === 'string')
     && typeof value.llm.provider === 'string'
-    && (value.llm.model === undefined || typeof value.llm.model === 'string')
-    && (value.llm.endpoint === undefined || typeof value.llm.endpoint === 'string')
+    && (value.llm.model === undefined || value.llm.model === null || typeof value.llm.model === 'string')
+    && (value.llm.endpoint === undefined || value.llm.endpoint === null || typeof value.llm.endpoint === 'string')
 }
 
 export function isStorageCleanupPreview(value: unknown): value is StorageCleanupPreview {

@@ -128,7 +128,7 @@ def _disk_warning(source: str | None = None) -> str | None:
     return None
 
 
-def _disk_block(source: str | None = None) -> str | None:
+def _disk_block(source: str | None = None, *, score_only: bool = False) -> str | None:
     """Stop a run before job work when storage is unsafe."""
     try:
         free_bytes = shutil.disk_usage(config.home_dir().parent).free
@@ -140,8 +140,17 @@ def _disk_block(source: str | None = None) -> str | None:
             source_bytes = max(0, Path(source).stat().st_size)
         except OSError:
             source_bytes = 0
-    estimate = storage_estimate.for_source(source_bytes)
-    required_threshold = max(storage_estimate.MIN_SAFE_BYTES, int(estimate["required_bytes"]))
+    estimate = (
+        storage_estimate.for_cached_score()
+        if score_only
+        else storage_estimate.for_source(source_bytes)
+    )
+    minimum_safe = (
+        storage_estimate.CACHED_SCORE_MIN_SAFE_BYTES
+        if score_only
+        else storage_estimate.MIN_SAFE_BYTES
+    )
+    required_threshold = max(minimum_safe, int(estimate["required_bytes"]))
     if free_bytes >= required_threshold:
         return None
     estimate = f" Source estimate is {required_threshold / 1024**3:.1f} GiB." if source_bytes else ""
@@ -763,7 +772,13 @@ def cmd_resume(args: argparse.Namespace) -> int:
     job = queue.get_job(args.job_id)
     if job is None:
         return _preflight_terminal(args.jsonl, args.job_id, "JOB_NOT_FOUND", "The requested job could not be found in the managed job store.")
-    disk_block = _disk_block(job.source)
+    stages = _stages() if args.stop_after == "score" else []
+    cached_replay = False
+    if stages and not args.allow_cpu_asr_fallback:
+        cached_replay = queue.cached_prefix_ready(job, stages, through="candidates")
+        if not cached_replay:
+            cached_replay = queue.cached_prefix_ready(job, stages, through="events")
+    disk_block = _disk_block(job.source, score_only=cached_replay)
     if disk_block:
         return _preflight_terminal(args.jsonl, args.job_id, "DISK_SPACE_LOW", disk_block, True)
     if args.llm or args.provider or args.model or args.endpoint or args.captions or args.camera or args.quality_mode or args.output_preference or args.allow_cpu_asr_fallback:
@@ -812,6 +827,12 @@ def _execute(job: queue.Job, jsonl: bool, *, stop_after: str | None = None) -> i
         results = queue.run_stages(job, _stages(), emit, stop_after=stop_after)
     except queue.StageError as err:
         diagnostic = err.diagnostic_id
+        if diagnostic is None and err.details is not None:
+            diagnostic = protocol.write_json_diagnostic(
+                job.dir,
+                err.stage or "pipeline",
+                err.details,
+            )
         if diagnostic is None and err.__cause__ is not None:
             diagnostic = protocol.write_diagnostic(job.dir, err.stage or "pipeline", err.__cause__)
         if jsonl:

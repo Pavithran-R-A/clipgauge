@@ -93,6 +93,16 @@ const FRIENDLY_FAILURES: Record<string, string> = {
   PROVIDER_UNAVAILABLE: 'The selected AI is unavailable. Open AI Providers or choose another provider.',
   YTDLP_ATTESTATION_REQUIRED: 'YouTube rejected this download during playback verification. ClipGauge itself is ready; retry later or import the video file directly.',
   YTDLP_LOGIN_REQUIRED: 'This video requires a signed-in YouTube session. Use a browser session only if you explicitly consent.',
+  ASR_RUNTIME_MISSING: 'Speech recognition runtime files are missing. Open Setup & Storage and repair speech recognition.',
+  ASR_CPU_COMPUTE_UNSUPPORTED: 'This computer cannot use the selected CPU speech mode. Repair speech recognition, then retry.',
+  ASR_MODEL_LOAD_RESOURCE_EXHAUSTED: 'Speech recognition needs more working memory. Close other applications and retry in Low-memory mode.',
+  ASR_TRANSCRIPTION_RESOURCE_EXHAUSTED: 'Speech recognition needs more working memory. Close other applications and retry in Low-memory mode.',
+  ASR_MODEL_LOAD_FAILED: 'Speech recognition could not load its model. Repair speech recognition, then retry.',
+  ASR_AUDIO_LOAD_FAILED: 'Speech recognition could not read this video audio. Retry the job or choose another video.',
+  ASR_TRANSCRIPTION_FAILED: 'Speech recognition could not complete. Retry the job or repair speech recognition.',
+  ASR_VAD_FAILED: 'Speech activity detection could not start. Repair speech recognition, then retry.',
+  ASR_ALIGNMENT_FAILED: 'Word timing could not complete. Retry the job or repair speech recognition.',
+  ASR_CHECKPOINT_WRITE: 'Speech recognition finished, but its checkpoint could not be saved. Retry the job.',
   ASR_GPU_FALLBACK_REQUIRES_APPROVAL: 'GPU speech acceleration failed. Repair GPU acceleration, or explicitly continue in slower CPU mode.'
 }
 
@@ -277,6 +287,7 @@ export default function App() {
       const resolvedLocalModel = async () => {
         if (selectedLocalModelRef.current) return selectedLocalModelRef.current
         const inventory = await api.setupInventory()
+        if (!mountedRef.current) return undefined
         if (!isLocalSetupInventory(inventory)) return undefined
         writeCachedSetupInventory(inventory)
         const discovered = resolveSelectedLocalModel(inventory)
@@ -287,10 +298,12 @@ export default function App() {
         return discovered
       }
       const resolvedModel = model ?? savedModel ?? (provider === 'clipgauge-local' ? await resolvedLocalModel() : undefined)
+      if (!mountedRef.current) return
       const endpointConfigured = provider === 'custom' || provider === 'cloudflare'
       const resolvedEndpoint = endpoint ?? (endpointConfigured ? readSavedProviderEndpoint(provider) : undefined)
       const resolvedAuth = auth ?? (endpointConfigured ? 'bearer' : undefined)
       const preflight = await api.preflight(provider, resolvedModel, resolvedEndpoint, resolvedAuth, secretHeader, source, qualityMode)
+      if (!mountedRef.current) return
       if (!isPreflightResult(preflight)) throw new Error('Preflight response is malformed. Open Setup and retry.')
       const blocked = preflight.checks.filter((check) => check.state === 'blocked')
       const warnings = preflight.checks.filter((check) => check.state === 'warning')
@@ -303,11 +316,13 @@ export default function App() {
         return
       }
       if (warnings.length) setRunNotice(`Before you start: ${warnings.slice(0, 2).map((check) => check.message).join(' ')}`)
+      if (!mountedRef.current) return
       setRunning(true)
       setRunState('RUNNING')
       setRunStartedAt(Date.now())
       await api.runJob(source, provider, captions, resolvedModel, resolvedEndpoint, resolvedAuth, secretHeader, browserSession, qualityMode, outputPreference)
     } catch (error) {
+      if (!mountedRef.current) return
       setRunning(false)
       setRunState('FAILED')
       setRunError(friendlyErrorMessage(error, 'The video could not be processed. Retry the job.'))
@@ -318,11 +333,13 @@ export default function App() {
   const openJob = useCallback(async (jobId: string) => {
     try {
       const result = requireValidJobResults(await api.jobResults(jobId))
+      if (!mountedRef.current) return
       setActiveJob(jobId)
       setActiveDiagnosticId(result.score?.diagnostic_id ?? null)
       setResults(result)
       if (result.render?.outputs?.length || result.outcome === 'SUCCESS_NO_RECOMMENDATIONS') setView('review')
     } catch (error) {
+      if (!mountedRef.current) return
       setSection('create')
       setRunError(friendlyErrorMessage(error, 'This session could not be opened. Retry from Sessions.'))
     }
@@ -341,6 +358,7 @@ export default function App() {
     try {
       await api.resumeJob(jobId, provider, captions, camera, model, endpoint, auth, secretHeader, allowCpuAsrFallback, qualityMode, outputPreference)
     } catch (error) {
+      if (!mountedRef.current) return
       setRunning(false)
       setRunState('FAILED')
       setRunNotice(null)
@@ -360,11 +378,11 @@ export default function App() {
     setRunError(null)
     try {
       await api.repairGpu()
-      setRunNotice('GPU speech acceleration repair completed. Retry the job.')
+      if (mountedRef.current) setRunNotice('GPU speech acceleration repair completed. Retry the job.')
     } catch (error) {
-      setRunError(friendlyErrorMessage(error, 'GPU repair could not start. Retry from Setup & Storage.'))
+      if (mountedRef.current) setRunError(friendlyErrorMessage(error, 'GPU repair could not start. Retry from Setup & Storage.'))
     } finally {
-      setGpuRepairing(false)
+      if (mountedRef.current) setGpuRepairing(false)
     }
   }, [])
 
@@ -394,7 +412,7 @@ export default function App() {
   }
 
   let content
-  if (section === 'create') content = <Studio jobs={jobs} running={running} runState={runState} cancelling={cancelling} startedAt={runStartedAt} stages={stages} error={runError} errorCode={runErrorCode} notice={runNotice} onRun={startRun} localModelId={selectedLocalModelId ?? undefined} onContinueCpu={continueCpu} onRepairGpu={repairGpu} gpuRepairing={gpuRepairing} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { setCancelling(false); setRunError(friendlyErrorMessage(error, 'The job could not be cancelled. Retry the action.')) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onOpenJob={openJob} onResume={(id) => { void resumeJobAction(id) }} />
+  if (section === 'create') content = <Studio jobs={jobs} running={running} runState={runState} cancelling={cancelling} startedAt={runStartedAt} stages={stages} error={runError} errorCode={runErrorCode} notice={runNotice} onRun={startRun} localModelId={selectedLocalModelId ?? undefined} onContinueCpu={continueCpu} onRepairGpu={repairGpu} gpuRepairing={gpuRepairing} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { if (!mountedRef.current) return; setCancelling(false); setRunError(friendlyErrorMessage(error, 'The job could not be cancelled. Retry the action.')) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onOpenJob={openJob} onResume={(id) => { void resumeJobAction(id) }} />
   else if (section === 'sessions') content = <Sessions jobs={jobs} onBack={() => setSection('create')} onOpenJob={openJob} onResume={resumeFromSessions} />
   else if (section === 'setup') content = <SetupCenter jobs={jobs} onBack={() => setSection('create')} onUseLocal={(modelId) => { if (modelId) setSelectedLocalModelId(modelId); setSelectedProvider('clipgauge-local'); setSection('create') }} />
   else if (section === 'providers') content = <ProviderCenter selectedProvider={selectedProvider} onSelectProvider={setSelectedProvider} onSelectLocalModel={setSelectedLocalModelId} onBack={() => setSection('create')} onOpenSetup={() => setSection('setup')} />

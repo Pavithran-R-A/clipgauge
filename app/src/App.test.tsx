@@ -1,5 +1,6 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { StrictMode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 
@@ -321,6 +322,22 @@ describe('structured pipeline terminal events', () => {
     releasePreflight({ state: 'blocked', selected_llm: 'local', checks: [] })
   })
 
+  it('does not launch a job after preflight resolves post-unmount', async () => {
+    let releasePreflight: (value: { state: string; selected_llm: string; checks: never[] }) => void = () => undefined
+    mocks.api.preflight.mockImplementation(() => new Promise((resolve) => { releasePreflight = resolve }))
+    const { unmount } = render(<App />)
+
+    await userEvent.click(await screen.findByTestId('create-job'))
+    unmount()
+
+    await act(async () => {
+      releasePreflight({ state: 'ready', selected_llm: 'local', checks: [] })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+
+    expect(mocks.api.runJob).not.toHaveBeenCalled()
+  })
+
   it('forwards persisted custom model and endpoint settings', async () => {
     const values = new Map<string, string>()
     Object.defineProperty(window, 'localStorage', { configurable: true, value: {
@@ -397,6 +414,24 @@ describe('structured pipeline terminal events', () => {
     expect(screen.getByTestId('studio-error')).toHaveTextContent('diag-test-123')
   })
 
+  it('explains CPU speech memory failures with an actionable retry', async () => {
+    render(<App />)
+    await waitFor(() => expect(mocks.pipelineHandler).toBeDefined())
+    mocks.pipelineHandler?.({
+      payload: {
+        event: 'terminal',
+        ok: false,
+        code: 'ASR_TRANSCRIPTION_RESOURCE_EXHAUSTED',
+        message: 'Speech recognition needs more working memory.',
+        retryable: true,
+        diagnostic_id: 'diag-asr-memory',
+      },
+    })
+
+    await waitFor(() => expect(screen.getByTestId('studio-error')).toHaveTextContent('Close other applications'))
+    expect(screen.getByTestId('studio-error')).toHaveTextContent('diag-asr-memory')
+  })
+
   it('sends the active job ID through the cancellation command', async () => {
     render(<App />)
     await waitFor(() => expect(mocks.pipelineHandler).toBeDefined())
@@ -405,10 +440,39 @@ describe('structured pipeline terminal events', () => {
     await waitFor(() => expect(mocks.api.cancelJob).toHaveBeenCalledWith('20260818-155237-c6b118'))
   })
 
+  it('ignores cancellation failures after App unmounts', async () => {
+    let rejectCancel: (reason?: unknown) => void = () => undefined
+    mocks.api.cancelJob.mockImplementationOnce(() => new Promise<void>((_, reject) => { rejectCancel = reject }))
+    const { unmount } = render(<App />)
+    await waitFor(() => expect(mocks.pipelineHandler).toBeDefined())
+    mocks.pipelineHandler?.({ payload: { event: 'job', job_id: '20260818-155237-c6b118' } })
+    fireEvent.click(await screen.findByTestId('cancel-job'))
+    unmount()
+
+    await act(async () => {
+      rejectCancel(new Error('cancel bridge unavailable'))
+      await Promise.resolve()
+    })
+    expect(mocks.api.cancelJob).toHaveBeenCalledWith('20260818-155237-c6b118')
+  })
+
   it('runs GPU repair from the recovery surface', async () => {
     render(<App />)
     await userEvent.click(await screen.findByTestId('repair-gpu'))
     await waitFor(() => expect(mocks.api.repairGpu).toHaveBeenCalledTimes(1))
+    expect(screen.getByTestId('studio-notice')).toHaveTextContent('GPU speech acceleration repair completed')
+  })
+
+  it('restores async liveness after StrictMode effect cleanup', async () => {
+    let resolveRepair: (() => void) | undefined
+    mocks.api.repairGpu.mockImplementationOnce(() => new Promise<void>((resolve) => { resolveRepair = resolve }))
+    render(<StrictMode><App /></StrictMode>)
+    await userEvent.click(await screen.findByTestId('repair-gpu'))
+
+    await act(async () => {
+      resolveRepair?.()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
     expect(screen.getByTestId('studio-notice')).toHaveTextContent('GPU speech acceleration repair completed')
   })
 

@@ -240,3 +240,20 @@ def test_run_stages_can_stop_after_named_stage():
 
     assert list(results) == ["ingest", "score"]
     assert runs == ["ingest", "score"]
+
+
+def test_cached_prefix_ready_requires_each_checkpoint_and_artifact():
+    class PrefixStage(queue.Stage):
+        name = "ingest"
+        schema_version = 1
+
+        def run(self, ctx):
+            return {"ready": True}
+
+    stages = [PrefixStage()]
+    job = queue.create_job("file", "/tmp/x.mp4", _settings_json())
+    queue.run_stages(job, stages, _noop_progress)
+
+    assert queue.cached_prefix_ready(job, stages, through="ingest") is True
+    queue.checkpoint_path(job, "ingest").unlink()
+    assert queue.cached_prefix_ready(job, stages, through="ingest") is False

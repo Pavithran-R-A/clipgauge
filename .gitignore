@@ -28,3 +28,13 @@ app/dist/
 
 # Staged at build time by app/scripts/prepare-resources.sh — never committed
 app/src-tauri/resources/
+
+# Local qualification evidence — never commit bundles or screenshots
+.candidate-artifact/
+.public-v0515/
+.qualification-artifact/
+.qualification-artifact-current/
+.qualification-artifact-success/
+.windows-pr40-artifact/
+app/.qa-artifacts/
+app/src-tauri/gen/schemas/windows-schema.json

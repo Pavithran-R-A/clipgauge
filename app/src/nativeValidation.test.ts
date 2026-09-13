@@ -46,6 +46,7 @@ describe('native response validation', () => {
 
   it('rejects malformed privacy summaries', () => {
     expect(isPrivacySummary({ local_first: true, telemetry: 'off', instagram: 'optional', source: 'fixture', llm: { mode: 'local', device: ['disk'], network: [], provider: 'local' } })).toBe(true)
+    expect(isPrivacySummary({ local_first: true, telemetry: 'off', instagram: 'optional', source: 'fixture', llm: { mode: 'openrouter', device: ['disk'], network: ['provider'], provider: 'OpenRouter', model: null, endpoint: null } })).toBe(true)
     expect(isPrivacySummary({ local_first: true, telemetry: 'off', instagram: 'optional', source: 'fixture', llm: null })).toBe(false)
   })
 

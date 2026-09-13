@@ -37,6 +37,7 @@ CANDIDATE_PAYOFF_GAP_PENALTY = -14.0
 MATERIAL_EARLIER_OPENING_LEAD_SECONDS = 20.0
 LOCAL_PRERANK_DIVERSITY_BONUS = 6.0
 LOCAL_PRERANK_DIVERSITY_DISTANCE = 180.0
+LOCAL_SCORING_REGION_SECONDS = 90.0
 LOCAL_RECOVERABLE_PROVIDER_CODES = {
     "PROVIDER_UNAVAILABLE",
     "NETWORK_FAILED",
@@ -231,7 +232,7 @@ def _generate_t1(client, prompt: str, schema: dict, sentence_ids: set[str]) -> d
         try:
             result = client.generate_json(prompt, schema)
             if schema is rubric.BALANCED_T1_SCHEMA:
-                result = rubric.normalize_balanced_output(result)
+                result = rubric.normalize_balanced_output(result, sentence_ids)
                 rubric.validate_balanced_output(result, sentence_ids)
             return result
         except ValueError as error:
@@ -442,6 +443,11 @@ def _has_later_payoff_story_variant(
         overlap_ratio = shared / min(len(candidate_sentences), len(other_sentences)) if candidate_sentences and other_sentences else 0.0
         opening_lead = float(other.get("start", 0.0)) - float(candidate.get("start", 0.0))
         if (
+            opening_lead >= 8.0
+            and float(other.get("start_topic_boundary") or 0.0) >= 0.62
+        ):
+            continue
+        if (
             opening_lead >= MATERIAL_EARLIER_OPENING_LEAD_SECONDS
             and candidate.get("payoff_boundary_explicit")
         ):
@@ -480,6 +486,23 @@ def select_diverse_scoring_batch(
     ]
     selected: list[tuple[dict, str, str]] = []
     used = list(selected_midpoints or [])
+
+    def region(item: tuple[dict, str, str]) -> int:
+        candidate = item[0]
+        midpoint = (float(candidate["start"]) + float(candidate["end"])) / 2.0
+        return int(midpoint // LOCAL_SCORING_REGION_SECONDS)
+
+    def has_evidence(item: tuple[dict, str, str]) -> bool:
+        candidate = item[0]
+        return bool(
+            candidate.get("payoff_candidate")
+            and (
+                candidate.get("payoff_boundary_explicit")
+                or candidate.get("source_final_boundary")
+                or float(candidate.get("start_topic_boundary") or 0.0) >= 0.75
+            )
+        )
+
     while remaining and len(selected) < max(0, int(batch_size)):
         def key(item: tuple[dict, str, str]) -> tuple[float, ...]:
             candidate = item[0]
@@ -498,7 +521,16 @@ def select_diverse_scoring_batch(
                 min(distance, 10_000.0),
             )
 
-        winner = max(remaining, key=key)
+        covered_regions = {
+            region(item)
+            for item in selected
+            if has_evidence(item)
+        }
+        uncovered_evidence = [
+            item for item in remaining
+            if has_evidence(item) and region(item) not in covered_regions
+        ]
+        winner = max(uncovered_evidence or remaining, key=key)
         selected.append(winner)
         used.append((float(winner[0]["start"]) + float(winner[0]["end"])) / 2.0)
         remaining.remove(winner)
@@ -536,6 +568,31 @@ def is_good_recommendation(quality: dict[str, object]) -> bool:
         and float(quality.get("semantic_closure_0_100", 0.0)) >= 60.0
         and float(quality.get("topic_coherence_0_100", 0.0)) >= 65.0
         and float(quality.get("payoff_relevance_to_premise", 0.0)) >= 50.0
+    )
+
+
+def is_evidence_backed_recommendation(entry: dict) -> bool:
+    """Keep explicit deterministic payoffs available for final review."""
+    if not entry.get("payoff_boundary_explicit"):
+        return False
+    quality = entry.get("short_quality") or {}
+    flags = set(quality.get("quality_flags") or [])
+    allowed_flags = {
+        "WEAK_SEMANTIC_CLOSURE",
+        "PAYOFF_NOT_RELEVANT",
+        "TOPIC_DRIFT",
+        "LATE_NEW_TOPIC",
+        "WEAK_COLD_HOOK",
+    }
+    return bool(
+        quality.get("eligible_to_recommend")
+        and quality.get("quality_tier") == "STRUCTURALLY_VALID"
+        and quality.get("complete_ending")
+        and quality.get("story_consistent", True)
+        and flags <= allowed_flags
+        and float(quality.get("effective_hook_0_100", 0.0)) >= 20.0
+        and float(quality.get("payoff", 0.0)) >= 45.0
+        and float(quality.get("standalone", 0.0)) >= 45.0
     )
 
 
@@ -778,6 +835,20 @@ def select_diverse_finalists(entries: list[dict], limit: int = LOCAL_FINALIST_LI
     ]
     selected: list[dict] = []
     separation = 120.0
+    region_seconds = 90.0
+
+    def evidence_region(entry: dict) -> int | None:
+        if not (
+            entry.get("payoff_candidate")
+            and (
+                entry.get("payoff_boundary_explicit")
+                or entry.get("source_final_boundary")
+                or float(entry.get("start_topic_boundary") or 0.0) >= 0.75
+            )
+        ):
+            return None
+        midpoint = (float(entry.get("start", 0.0)) + float(entry.get("end", 0.0))) / 2.0
+        return int(midpoint // region_seconds)
 
     def same_story(left: dict, right: dict) -> bool:
         if left.get("anchor_sentence_id") and left.get("anchor_sentence_id") == right.get("anchor_sentence_id"):
@@ -808,7 +879,18 @@ def select_diverse_finalists(entries: list[dict], limit: int = LOCAL_FINALIST_LI
         ]
         if not distinct_remaining:
             break
-        pool = distinct_remaining
+        covered_regions = {
+            region
+            for region in (evidence_region(entry) for entry in selected)
+            if region is not None
+        }
+        uncovered_evidence = [
+            entry
+            for entry in distinct_remaining
+            if evidence_region(entry) is not None
+            and evidence_region(entry) not in covered_regions
+        ]
+        pool = uncovered_evidence or distinct_remaining
 
         def utility(entry: dict) -> tuple[float, float, float]:
             base = float(entry.get("recommendation_score", entry.get("score", 0.0)))
@@ -849,7 +931,7 @@ def rank_scored_candidates(entries: list[dict]) -> list[dict]:
 
 class ScoreStage(Stage):
     name = "score"
-    schema_version = 32  # v32: retain materially earlier payoff openings
+    schema_version = 38  # v38: preserve explicit outcome setup context
 
     def dependency_settings(self, ctx: StageContext) -> dict:
         settings = super().dependency_settings(ctx)
@@ -1253,7 +1335,10 @@ class ScoreStage(Stage):
                 original_start,
                 original_end,
                 entry.get("t1_raw"),
-                preserve_candidate_opening=float(entry.get("start_topic_boundary") or 0.0) >= 0.62,
+                preserve_candidate_opening=(
+                    float(entry.get("start_topic_boundary") or 0.0) >= 0.62
+                    or bool(entry.get("payoff_boundary_explicit"))
+                ),
                 preserve_candidate_payoff=bool(
                     entry.get("payoff_candidate")
                     or entry.get("payoff_boundary_explicit")
@@ -1330,7 +1415,10 @@ class ScoreStage(Stage):
         strong = [entry for entry in eligible if is_strong_recommendation(entry["short_quality"])]
         good = [
             entry for entry in eligible
-            if entry not in strong and is_good_recommendation(entry["short_quality"])
+            if entry not in strong and (
+                is_good_recommendation(entry["short_quality"])
+                or is_evidence_backed_recommendation(entry)
+            )
         ]
         borderline = [entry for entry in eligible if entry not in strong and entry not in good]
         finalists = select_diverse_finalists(strong + good, int(budget["finalist_limit"]))
@@ -1364,7 +1452,7 @@ class ScoreStage(Stage):
                         visual = None
             entry["t2"] = visual
 
-            platform_scores, comp_adjustments = _apply_platform_scores(entry, visual)
+            _, comp_adjustments = _apply_platform_scores(entry, visual)
             entry["adjustments"].extend(comp_adjustments)
 
             window_events = _events_in(timeline, entry["start"], entry["end"])
@@ -1383,7 +1471,8 @@ class ScoreStage(Stage):
             degraded_signals = list(provider_result.degraded_signals) if provider_result else []
             if not supports_vision and any("visual" in item for item in missing):
                 degraded_signals.append("vision_unavailable")
-            entry["confidence"] = "standard" if structured_level == "native_schema" and not profile.capabilities.local else "local-estimate" if profile.capabilities.local else "degraded"
+            effective_profile = getattr(client, "profile", profile)
+            entry["confidence"] = "standard" if structured_level == "native_schema" and not effective_profile.capabilities.local else "local-estimate" if effective_profile.capabilities.local else "degraded"
             entry["ledger"] = {
                 "score": entry["recommendation_score"],
                 "platform_score": entry["platform_score"],
@@ -1427,13 +1516,13 @@ class ScoreStage(Stage):
                 "signals_missing": missing,
                 "provenance": {
                     "llm_mode": llm_mode,
-                    "provider_profile_id": profile.id,
-                    "provider_kind": profile.kind,
+                    "provider_profile_id": effective_profile.id,
+                    "provider_kind": effective_profile.kind,
                     "model": getattr(client, "actual_model", client.model),
                     "requested_model": requested_model,
                     "actual_model": getattr(client, "actual_model", client.model),
-                    "endpoint_identity": profile.endpoint_identity,
-                    "capabilities": profile.capabilities.to_dict(),
+                    "endpoint_identity": effective_profile.endpoint_identity,
+                    "capabilities": effective_profile.capabilities.to_dict(),
                     "structured_level": structured_level,
                     "degraded_signals": degraded_signals,
                     "scoring_config_version": scoring_config["version"],
@@ -1497,15 +1586,34 @@ class ScoreStage(Stage):
         )
 
         actual_model = getattr(client, "actual_model", client.model)
-        provider_metadata = getattr(ctx.settings, "provider_metadata", None)
-        if isinstance(provider_metadata, dict):
-            provider_metadata.update({
-                "requested_model": requested_model,
-                "actual_model": actual_model,
-                "structured_output_mode": client.structured_level(),
-                "rubric_version": providers_mod.RUBRIC_CACHE_VERSION,
-                "scoring_constants_version": scoring_config["version"],
-            })
+        effective_profile = getattr(client, "profile", profile)
+        effective_capabilities = effective_profile.capabilities.to_dict()
+        structured_level_reader = getattr(client, "structured_level", None)
+        structured_output_mode = (
+            structured_level_reader()
+            if callable(structured_level_reader)
+            else getattr(getattr(client, "last_result", None), "structured_level", None)
+        )
+        provider_metadata = dict(getattr(ctx.settings, "provider_metadata", {}) or {})
+        provider_metadata.update({
+            "requested_model": requested_model,
+            "actual_model": actual_model,
+            "structured_output_mode": structured_output_mode,
+            "rubric_version": providers_mod.RUBRIC_CACHE_VERSION,
+            "scoring_constants_version": scoring_config["version"],
+        })
+        if hasattr(ctx.settings, "provider_profile_id"):
+            ctx.settings.provider_profile_id = effective_profile.id
+        if hasattr(ctx.settings, "provider_kind"):
+            ctx.settings.provider_kind = effective_profile.kind
+        if hasattr(ctx.settings, "provider_model"):
+            ctx.settings.provider_model = requested_model
+        if hasattr(ctx.settings, "provider_endpoint_identity"):
+            ctx.settings.provider_endpoint_identity = effective_profile.endpoint_identity
+        if hasattr(ctx.settings, "provider_capabilities"):
+            ctx.settings.provider_capabilities = effective_capabilities
+        if hasattr(ctx.settings, "provider_metadata"):
+            ctx.settings.provider_metadata = provider_metadata
         settings_snapshot = getattr(ctx.settings, "to_json", None)
         if callable(settings_snapshot):
             _atomic_write_json(ctx.job_dir / "settings.json", settings_snapshot())
@@ -1513,15 +1621,15 @@ class ScoreStage(Stage):
         return {
             **outcome,
             "llm_mode": llm_mode,
-            "provider_profile_id": profile.id,
-            "provider_kind": profile.kind,
+            "provider_profile_id": effective_profile.id,
+            "provider_kind": effective_profile.kind,
             "model": actual_model,
             "requested_model": requested_model,
             "actual_model": actual_model,
             "quality_mode": quality_mode,
             "output_preference": output_preference,
             "rubric_version": providers_mod.RUBRIC_CACHE_VERSION,
-            "capabilities": profile.capabilities.to_dict(),
+            "capabilities": effective_capabilities,
             "clips": finalists,
             "ranking_diagnostics": ranking_layer_diagnostics,
             "rejected_candidates": rejected,

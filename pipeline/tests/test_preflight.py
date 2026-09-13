@@ -23,6 +23,15 @@ def test_source_storage_estimate_accounts_for_working_space_components():
     )
 
 
+def test_cached_score_storage_estimate_excludes_source_and_render_work():
+    estimate = storage_estimate.for_cached_score()
+
+    assert estimate["source_copy_bytes"] == 0
+    assert estimate["temporary_audio_bytes"] == 0
+    assert estimate["render_bytes"] == 0
+    assert estimate["required_bytes"] < storage_estimate.MIN_SAFE_BYTES
+
+
 def test_preflight_aggregates_blocked_state(monkeypatch, tmp_path):
     monkeypatch.setattr(preflight.config, "home_dir", lambda: tmp_path)
     monkeypatch.setattr(preflight.config, "ensure_home", lambda: tmp_path)

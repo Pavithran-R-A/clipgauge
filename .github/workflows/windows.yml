@@ -122,6 +122,14 @@ jobs:
             }
           }
           Install-VerifiedSetupGroup -Group "core:asr" -LogPath "$env:GITHUB_WORKSPACE\setup-asr.jsonl"
+          $cpuAsrOutput = Join-Path $env:GITHUB_WORKSPACE "cpu-asr-qualification.json"
+          & $uv --directory $pipeline run python "$env:GITHUB_WORKSPACE\scripts\qa_cpu_asr.py" --audio "$env:GITHUB_WORKSPACE\pipeline\tests\fixtures\v041-jfk.flac" --output $cpuAsrOutput
+          if ($LASTEXITCODE -ne 0) { throw "real CPU/int8 ASR qualification failed with exit code $LASTEXITCODE" }
+          $cpuAsr = Get-Content -Raw -LiteralPath $cpuAsrOutput | ConvertFrom-Json
+          if (-not $cpuAsr.ok -or $cpuAsr.device -ne "cpu" -or $cpuAsr.compute_type -ne "int8" -or $cpuAsr.batch_size -ne 1 -or $cpuAsr.segment_count -lt 1) {
+            throw "real CPU/int8 ASR qualification returned invalid evidence"
+          }
+          Write-Host "CPU_ASR_QUALIFICATION=PASS device=$($cpuAsr.device) compute_type=$($cpuAsr.compute_type) batch=$($cpuAsr.batch_size) segments=$($cpuAsr.segment_count)"
           Install-VerifiedSetupGroup -Group "core:analysis" -LogPath "$env:GITHUB_WORKSPACE\setup-analysis.jsonl"
           $inventory = (& $uv --directory $pipeline run clipgauge setup inventory --model "clipgauge-local/qwen3-4b-q4_k_m" | Out-String | ConvertFrom-Json)
           if (-not $inventory.video_tools.ready) { throw "packaged Setup inventory did not report FFmpeg ready" }
@@ -186,6 +194,7 @@ jobs:
             windows-screenshots-fresh/*.png
             windows-screenshots-fresh/*.json
             setup-asr.jsonl
+            cpu-asr-qualification.json
             setup-analysis.jsonl
             .github/windows-ui-qualification.ps1
             .github/windows-ui-qualification.mjs

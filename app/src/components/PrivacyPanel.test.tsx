@@ -52,4 +52,12 @@ describe('PrivacyPanel provider races', () => {
     expect(await screen.findByText('Network activity for this mode')).toBeInTheDocument()
     expect(screen.queryByText('Sent to your AI provider')).not.toBeInTheDocument()
   })
+
+  it('uses provider-aware wording when cloud scoring is selected', async () => {
+    privacySummary.mockResolvedValueOnce(summary('openrouter'))
+    render(<PrivacyPanel provider="openrouter" onBack={vi.fn()} />)
+
+    expect(await screen.findByText('Provider-aware mode')).toBeInTheDocument()
+    expect(screen.getByText('Sent to your AI provider')).toBeInTheDocument()
+  })
 })

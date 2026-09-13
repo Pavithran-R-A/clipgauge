@@ -15,11 +15,11 @@ from clipgauge_pipeline.scoring.stage import ScoreStage, recommendation_outcome
 
 
 def test_candidate_stage_schema_invalidates_opening_policy_checkpoints():
-    assert candidates_stage.CandidatesStage.schema_version == 23
+    assert candidates_stage.CandidatesStage.schema_version == 42
 
 
 def test_score_stage_schema_invalidates_opening_selection_checkpoints():
-    assert ScoreStage.schema_version == 32
+    assert ScoreStage.schema_version == 38
 
 
 def test_zero_recommendations_have_successful_terminal_outcome():
@@ -192,6 +192,70 @@ def test_candidates_stage_returns_typed_no_recommendations(monkeypatch, tmp_path
         "render_output_count": 0,
         "rejection_reason_counts": {},
     }
+
+
+def test_candidates_stage_keeps_boundary_discovery_provider_independent(monkeypatch, tmp_path):
+    curves_path = tmp_path / "curves.json"
+    curves_path.write_text(
+        json.dumps({"dynamics": [], "grid_sec": 1.0, "arousal": [], "arousal_grid_sec": 1.0}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(candidates_stage, "detect_scenes", lambda _path: [])
+    monkeypatch.setattr(story_units, "build_sentence_units", lambda *args, **kwargs: [])
+    captured = {}
+
+    def synthesize(*args, **kwargs):
+        captured["boundary_proposer"] = kwargs["boundary_proposer"]
+        return {
+            "units": [],
+            "topic_segment_count": 0,
+            "anchors": [],
+            "raw_span_variants": 0,
+            "cheap_survivors": 0,
+            "boundary_calls": 0,
+            "candidates": [],
+            "candidate_audit": {
+                "raw_proposals": 0,
+                "deterministic_proposals": 0,
+                "llm_proposals": 0,
+                "story_unit_proposals": 0,
+                "deduped_proposals": 0,
+                "shortlisted_proposals": 0,
+                "rejection_reasons": [],
+            },
+        }
+
+    monkeypatch.setattr(story_units, "synthesize", synthesize)
+
+    class Settings:
+        def provider_snapshot(self):
+            return {
+                "schema_version": 1,
+                "id": "local-test",
+                "kind": "ollama",
+                "model": "test-model",
+                "endpoint_identity": "http://127.0.0.1:11434",
+                "capabilities": {"local": True, "cloud": False},
+            }
+
+    class Context:
+        def __init__(self):
+            self.job_dir = tmp_path
+            self.prior = {
+                "ingest": {"probe": {"duration_sec": 10.0}, "media_path": "source.mp4"},
+                "diarize": {"segments": [], "turns": []},
+                "events": {"curves_path": str(curves_path), "timeline": []},
+            }
+            self.settings = Settings()
+
+        @staticmethod
+        def emit(*args, **kwargs):
+            return None
+
+    result = candidates_stage.CandidatesStage().run(Context())
+
+    assert captured["boundary_proposer"] is None
+    assert result["boundary_calls"] == 0
 
 
 def test_cli_uses_candidate_stage_terminal_outcome():

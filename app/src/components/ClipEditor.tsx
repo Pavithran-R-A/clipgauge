@@ -159,12 +159,18 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
   const cutsRef = useRef<Cut[]>([])
   const seekPending = useRef<number | null>(null)
   const contextRequestRef = useRef(0)
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   const reload = useCallback(() => {
     const requestId = ++contextRequestRef.current
     invoke<unknown>('edit_tool', { args: ['context', jobId, String(clipIndex)] })
       .then((c) => {
-        if (requestId !== contextRequestRef.current) return
+        if (!mountedRef.current || requestId !== contextRequestRef.current) return
         if (!isRecord(c) || c.ok !== true) {
           const diagnostic = isRecord(c) && typeof c.diagnostic_id === 'string' ? c.diagnostic_id : undefined
           const message = isRecord(c) && typeof c.error === 'string' ? c.error : 'Editor data is unavailable for this clip.'
@@ -178,7 +184,7 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
         setCtx(c)
         setEdit(c.edit)
       })
-      .catch((e) => { if (requestId === contextRequestRef.current) setError(friendlyErrorMessage(e, 'Editor data is unavailable for this clip. Retry the session.')) })
+      .catch((e) => { if (mountedRef.current && requestId === contextRequestRef.current) setError(friendlyErrorMessage(e, 'Editor data is unavailable for this clip. Retry the session.')) })
     return () => { if (requestId === contextRequestRef.current) contextRequestRef.current += 1 }
   }, [jobId, clipIndex])
 
@@ -436,7 +442,7 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
     try {
       await invoke('save_clip_edits', { jobId, input: { clip: clipIndex, edit: next } })
     } catch (e) {
-      setError(friendlyErrorMessage(e, 'Could not save clip edits. Retry the action.'))
+      if (mountedRef.current) setError(friendlyErrorMessage(e, 'Could not save clip edits. Retry the action.'))
     }
   }
 
@@ -445,13 +451,16 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
     setError(null)
     try {
       await invoke('save_clip_edits', { jobId, input: { clip: clipIndex, edit } })
+      if (!mountedRef.current) return
       setRendering(true)
       setRenderMsg('starting…')
       setError(null)
       await invoke('run_edit_render', { jobId, clip: clipIndex })
     } catch (e) {
-      setRendering(false)
-      setError(friendlyErrorMessage(e, 'Rendering could not be started. Retry the clip.'))
+      if (mountedRef.current) {
+        setRendering(false)
+        setError(friendlyErrorMessage(e, 'Rendering could not be started. Retry the clip.'))
+      }
     }
   }
 
@@ -461,15 +470,17 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
     setError(null)
     try {
       await invoke('save_clip_edits', { jobId, input: { clip: clipIndex, edit } })
+      if (!mountedRef.current) return
       const res = await invoke<{ ok: boolean; edit?: EditState; error?: string }>('edit_tool', {
         args: ['suggest-visuals', jobId, String(clipIndex), '--prefer', prefer]
       })
+      if (!mountedRef.current) return
       if (res.ok && res.edit) setEdit(res.edit)
       else setError(res.error ?? 'no visuals found')
     } catch (e) {
-      setError(friendlyErrorMessage(e, 'Could not suggest visuals. Retry the action.'))
+      if (mountedRef.current) setError(friendlyErrorMessage(e, 'Could not suggest visuals. Retry the action.'))
     } finally {
-      setSuggesting(false)
+      if (mountedRef.current) setSuggesting(false)
     }
   }
 

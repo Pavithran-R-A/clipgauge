@@ -77,6 +77,29 @@ def test_normal_dialogue_returned_as_bait_is_rejected():
     assert adj[-1]["verified_bait"] == []
 
 
+def test_non_bait_model_phrase_is_not_counted_as_bait_report():
+    verification = rubric.verify_bait_phrases(
+        ["I can't believe they're letting us do this."],
+        "I can't believe they're letting us do this.",
+    )
+
+    assert verification["model_reported_bait"] == []
+    assert verification["verified_bait"] == []
+    assert verification["rejected_bait"][0]["reason"] == "not_viewer_directed"
+
+
+def test_ambiguous_story_phrases_are_not_verified_as_engagement_bait():
+    for phrase, transcript in (
+        ("like this", "I like this runway more than the last one."),
+        ("follow me", "Follow me through the hangar to the plane."),
+        ("share this", "We should share this landing story with the team."),
+    ):
+        verification = rubric.verify_bait_phrases([phrase], transcript)
+
+        assert verification["verified_bait"] == []
+        assert verification["rejected_bait"][0]["reason"] == "not_viewer_directed"
+
+
 def test_verified_viewer_directed_bait_is_recorded():
     t1 = _t1(funniness=2, bait_phrases=["subscribe"])
     _, adj = rubric.cross_validate(

@@ -1,7 +1,8 @@
 param(
     [ValidateSet('groq', 'openrouter')]
     [string]$Provider = 'groq',
-    [string]$Model = 'openai/gpt-oss-20b'
+    [string]$Model = 'openai/gpt-oss-20b',
+    [string]$ExpectedCandidateFingerprint = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,6 +11,16 @@ $clipgaugeRoot = Join-Path $env:USERPROFILE '.clipgauge'
 $ownerId = '20260909-125228-3c050e'
 $ownerJob = Join-Path $clipgaugeRoot "jobs\$ownerId"
 $python = Join-Path $clipgaugeRoot 'runtimes\pipeline\Scripts\python.exe'
+$metricsScript = Join-Path $repoRoot 'scripts\qa_owner_metrics.py'
+
+function Get-OwnerCandidateFingerprint {
+    param([string]$Path)
+    $lines = @(& $python $metricsScript --candidate-fingerprint --candidates $Path 2>&1 | ForEach-Object { $_.ToString() })
+    if ($LASTEXITCODE -ne 0) { throw 'Could not fingerprint owner candidates.' }
+    $fingerprint = ($lines -join '').Trim()
+    if ($fingerprint -notmatch '^[0-9a-f]{64}$') { throw 'Owner candidate fingerprint was malformed.' }
+    return $fingerprint
+}
 
 if (-not (Test-Path -LiteralPath $ownerJob)) {
     throw "owner benchmark job is missing: $ownerId"
@@ -114,17 +125,26 @@ try {
     $ErrorActionPreference = $commandErrorAction
     $exitCode = $LASTEXITCODE
     if ($exitCode -ne 0) {
-        [pscustomobject]@{ exit = $exitCode; score_present = $false; output_tail = @($output | Select-Object -Last 12) } | ConvertTo-Json -Compress
+        $candidateFingerprint = $null
+        if (Test-Path -LiteralPath (Join-Path $ownerJob 'candidates.json')) {
+            try { $candidateFingerprint = Get-OwnerCandidateFingerprint (Join-Path $ownerJob 'candidates.json') } catch { }
+        }
+        [pscustomobject]@{ exit = $exitCode; score_present = $false; candidate_fingerprint = $candidateFingerprint; output_tail = @($output | Select-Object -Last 12) } | ConvertTo-Json -Compress
         exit $exitCode
     }
     if (-not (Test-Path -LiteralPath $scorePath)) {
-        [pscustomobject]@{ exit = $exitCode; score_present = $false; output_tail = @($output | Select-Object -Last 5) } | ConvertTo-Json -Compress
+        [pscustomobject]@{ exit = $exitCode; score_present = $false; candidate_fingerprint = $null; output_tail = @($output | Select-Object -Last 5) } | ConvertTo-Json -Compress
         exit $exitCode
     }
 
     $score = (Get-Content -LiteralPath $scorePath -Raw | ConvertFrom-Json).data
     $settings = Get-Content -LiteralPath (Join-Path $ownerJob 'settings.json') -Raw | ConvertFrom-Json
-    $candidateCount = (Get-Content -LiteralPath (Join-Path $ownerJob 'candidates.json') -Raw | ConvertFrom-Json).data.count
+    $candidatePayload = Get-Content -LiteralPath (Join-Path $ownerJob 'candidates.json') -Raw | ConvertFrom-Json
+    $candidateFingerprint = Get-OwnerCandidateFingerprint (Join-Path $ownerJob 'candidates.json')
+    if ($ExpectedCandidateFingerprint -and -not [String]::Equals($ExpectedCandidateFingerprint, $candidateFingerprint, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Owner candidate fingerprint mismatch. Expected $ExpectedCandidateFingerprint; received $candidateFingerprint."
+    }
+    $candidateCount = $candidatePayload.data.count
     $clips = @($score.clips)
     $reported = 0
     $verified = 0
@@ -152,6 +172,7 @@ try {
         requested_model = $settings.provider_model
         actual_model = $actualModel
         candidate_count = $candidateCount
+        candidate_fingerprint = $candidateFingerprint
         scored_count = $score.scored_count
         recommended_count = $score.strong_recommendation_count
         good_count = $score.good_recommendation_count

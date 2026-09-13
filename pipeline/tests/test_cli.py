@@ -67,6 +67,66 @@ def test_disk_block_allows_sufficient_space(monkeypatch):
     assert cli._disk_block('https://www.youtube.com/watch?v=test') is None
 
 
+def test_score_resume_disk_block_uses_cached_score_budget(monkeypatch):
+    monkeypatch.setattr(cli.config, 'home_dir', lambda: cli.Path('C:/managed'))
+    monkeypatch.setattr(cli.shutil, 'disk_usage', lambda _: SimpleNamespace(free=512 * 1024**2))
+
+    assert cli._disk_block('https://www.youtube.com/watch?v=test', score_only=True) is None
+    assert 'Free disk space' in cli._disk_block('https://www.youtube.com/watch?v=test')
+
+
+def test_resume_disk_preflight_precedes_settings_persistence(monkeypatch):
+    job = SimpleNamespace(id='job-1', source='https://example.test/video')
+    args = SimpleNamespace(
+        job_id='job-1',
+        jsonl=False,
+        stop_after=None,
+        allow_cpu_asr_fallback=False,
+    )
+    monkeypatch.setattr(cli.queue, 'get_job', lambda _: job)
+    monkeypatch.setattr(cli, '_disk_block', lambda *_args, **_kwargs: 'blocked')
+    monkeypatch.setattr(cli.queue, '_connect', lambda: pytest.fail('settings must not persist'))
+
+    assert cli.cmd_resume(args) == 2
+
+
+def test_score_resume_allows_cached_candidate_regeneration(monkeypatch):
+    job = SimpleNamespace(id='job-1', source='https://example.test/video')
+    args = SimpleNamespace(
+        job_id='job-1',
+        jsonl=False,
+        stop_after='score',
+        allow_cpu_asr_fallback=False,
+        llm=None,
+        provider=None,
+        model=None,
+        endpoint=None,
+        captions=None,
+        camera=None,
+        quality_mode=None,
+        output_preference=None,
+    )
+    prefix_checks = []
+    disk_checks = []
+    monkeypatch.setattr(cli.queue, 'get_job', lambda _: job)
+    monkeypatch.setattr(cli, '_stages', lambda: ['stages'])
+    monkeypatch.setattr(
+        cli.queue,
+        'cached_prefix_ready',
+        lambda _job, _stages, *, through: prefix_checks.append(through) or through == 'events',
+    )
+    monkeypatch.setattr(
+        cli,
+        '_disk_block',
+        lambda _source, *, score_only: disk_checks.append(score_only) or None,
+    )
+    monkeypatch.setattr(cli, '_execute', lambda *_args, **_kwargs: 0)
+
+    assert cli.cmd_resume(args) == 0
+    assert prefix_checks == ['candidates', 'events']
+    assert disk_checks == [True]
+
+
 def test_private_cli_default_uses_clipgauge_local():
     args = SimpleNamespace(
         provider=None,

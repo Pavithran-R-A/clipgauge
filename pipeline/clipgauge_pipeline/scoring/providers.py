@@ -16,7 +16,7 @@ import shutil
 import tempfile
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Literal
@@ -32,6 +32,7 @@ INFERENCE_CACHE_CONTRACT_VERSION = 2
 RUBRIC_CACHE_VERSION = "balanced-v2"
 SCORING_REQUEST_TIMEOUT_CAP_SECONDS = 30.0
 GROQ_QWEN_SCORING_MAX_OUTPUT_TOKENS = 900
+OPENROUTER_SCORING_MAX_OUTPUT_TOKENS = 900
 
 
 def _proc_rss_kb(pid: int) -> int | None:
@@ -117,7 +118,7 @@ class CapabilitySet:
     max_images: int | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "CapabilitySet":
+    def from_dict(cls, data: dict[str, Any] | None) -> CapabilitySet:
         data = data or {}
         values = {name: data.get(name) for name in cls.__dataclass_fields__}
         values["text"] = data.get("text", True)
@@ -182,7 +183,7 @@ class ProviderProfile:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ProviderProfile":
+    def from_dict(cls, data: dict[str, Any]) -> ProviderProfile:
         return cls(
             schema_version=int(data.get("schema_version", 1)),
             id=str(data["id"]),
@@ -324,6 +325,9 @@ class ProviderAdapter:
         self._scoring_deadline: float | None = None
         self._scoring_request_aborted = False
         self._scoring_worker: threading.Thread | None = None
+        self._selected_model_parameters: set[str] = set()
+        self._selected_model_reasoning: dict[str, Any] = {}
+        self._selected_model_metadata_model: str | None = None
 
     @property
     def backend_name(self) -> str:
@@ -387,7 +391,7 @@ class ProviderAdapter:
         if remaining <= 0:
             raise httpx.TimeoutException("Provider scoring time budget was exhausted.")
         response: list[httpx.Response] = []
-        errors: list[BaseException] = []
+        errors: list[Exception] = []
 
         def send() -> None:
             try:
@@ -400,7 +404,7 @@ class ProviderAdapter:
                         follow_redirects=False,
                     )
                 )
-            except BaseException as error:  # pragma: no cover - thread handoff
+            except Exception as error:  # noqa: BLE001 - preserve worker failure for caller
                 errors.append(error)
 
         worker = threading.Thread(target=send, name="clipgauge-provider-request", daemon=True)
@@ -727,7 +731,7 @@ def parse_json_text(text: str) -> dict[str, Any]:
         else:
             raise
     if not isinstance(parsed, dict):
-        raise ValueError("provider response must be a JSON object")
+        raise TypeError("provider response must be a JSON object")
     return parsed
 
 
@@ -811,7 +815,45 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 raise ProviderError("PROVIDER_UNAVAILABLE", "The local compatible server is stopped or has no models.")
             self.model = _pick_model(models)
             self.actual_model = self.model
+        self._refresh_selected_model_capabilities()
         return super().infer(request, use_cache=use_cache)
+
+    def _refresh_selected_model_capabilities(self) -> None:
+        """Resolve unknown OpenRouter capabilities before structured scoring."""
+        if (
+            self.profile.kind != "openrouter"
+            or self._selected_model_metadata_model == self.model
+            or self.profile.capabilities.structured_json is not None
+        ):
+            return
+        if self.requested_model == "openrouter/free":
+            # The route chooses the concrete model after this request. Use
+            # OpenRouter's route-level schema contract, not a false model lookup.
+            self.profile = replace(
+                self.profile,
+                capabilities=replace(
+                    self.profile.capabilities,
+                    structured_json=True,
+                    json_schema=True,
+                ),
+            )
+            return
+        records = self._model_records(strict=True)
+        selected = next((item for item in records if item.get("id") == self.model), None)
+        if selected is None:
+            raise ProviderError("MODEL_NOT_FOUND", "The selected OpenRouter model is unavailable.")
+        parameters = selected.get("supported_parameters")
+        self._selected_model_parameters = {
+            str(value).casefold() for value in parameters
+        } if isinstance(parameters, list) else set()
+        reasoning = selected.get("reasoning")
+        self._selected_model_reasoning = dict(reasoning) if isinstance(reasoning, dict) else {}
+        self._selected_model_metadata_model = self.model
+        descriptor = describe_model(self.profile, self.model, selected)
+        capabilities = descriptor.get("capabilities")
+        if not isinstance(capabilities, dict):
+            raise ProviderError("PROVIDER_RESPONSE_INVALID", "OpenRouter returned incomplete model capabilities.")
+        self.profile = replace(self.profile, capabilities=CapabilitySet.from_dict(capabilities))
 
     def _headers(self) -> dict[str, str]:
         headers = {"content-type": "application/json"}
@@ -898,6 +940,24 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             body["seed"] = request.seed
         if request.purpose == "scoring" and self.profile.kind == "groq" and self.model.casefold().startswith("qwen/"):
             body["max_tokens"] = GROQ_QWEN_SCORING_MAX_OUTPUT_TOKENS
+        if request.purpose == "scoring" and self.profile.kind == "openrouter":
+            body["max_tokens"] = OPENROUTER_SCORING_MAX_OUTPUT_TOKENS
+            if self.requested_model == "openrouter/free":
+                body["reasoning"] = {"effort": "none"}
+            else:
+                supported_efforts = self._selected_model_reasoning.get("supported_efforts")
+                if (
+                    "reasoning_effort" in self._selected_model_parameters
+                    and self._selected_model_reasoning.get("mandatory") is not True
+                    and isinstance(supported_efforts, list)
+                    and "none" in {str(value).casefold() for value in supported_efforts}
+                ):
+                    body["reasoning_effort"] = "none"
+                elif (
+                    "reasoning" in self._selected_model_parameters
+                    and self._selected_model_reasoning.get("mandatory") is not True
+                ):
+                    body["reasoning"] = {"effort": "none"}
         if content != request.prompt:
             body["messages"][0]["content"][0]["text"] = prompt  # type: ignore[index]
         else:
@@ -1065,16 +1125,36 @@ class ClipGaugeLocalAdapter(OpenAICompatibleAdapter):
     def _url(self, path: str) -> str:
         return self._endpoint.rstrip("/") + "/" + path.lstrip("/")
 
+    def _managed_endpoint_ready(self) -> bool:
+        health_url = self._endpoint.rsplit("/v1", 1)[0] + "/health"
+        try:
+            health = httpx.get(health_url, timeout=0.5, follow_redirects=False)
+            if health.status_code not in {200, 204}:
+                return False
+            models = httpx.get(self._url("models"), timeout=0.5, follow_redirects=False)
+            if models.status_code != 200:
+                return False
+            payload = models.json()
+            records = payload.get("data") if isinstance(payload, dict) else None
+            identifiers = {
+                str(item.get("id")).strip().casefold()
+                for item in records or []
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            }
+            expected = {self.model.casefold(), self.model.rsplit("/", 1)[-1].casefold()}
+            try:
+                expected.add(local_runtime.MODEL_CATALOG[self.model].filename.casefold())
+            except KeyError:
+                pass
+            return bool(identifiers & expected)
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+            return False
+
     def _ensure_runtime(self) -> None:
         if self.profile.metadata.get("managed", True) is False:
             return
-        health_url = self._endpoint.rsplit("/v1", 1)[0] + "/health"
-        try:
-            response = httpx.get(health_url, timeout=0.5, follow_redirects=False)
-            if response.status_code in {200, 204}:
-                return
-        except httpx.HTTPError:
-            pass
+        if self._managed_endpoint_ready():
+            return
         try:
             self._endpoint = self._runtime.start(self.model)
         except local_runtime.LocalRuntimeError as exc:
@@ -1101,13 +1181,8 @@ class ClipGaugeLocalAdapter(OpenAICompatibleAdapter):
     def recover_for_scoring(self) -> dict[str, Any]:
         if self.profile.metadata.get("managed", True) is False:
             return {"recovered": False, "runtime_restarted": False, "runtime_alive": True}
-        health_url = self._endpoint.rsplit("/v1", 1)[0] + "/health"
-        try:
-            response = httpx.get(health_url, timeout=0.5, follow_redirects=False)
-            if response.status_code in {200, 204}:
-                return {"recovered": True, "runtime_restarted": False, "runtime_alive": True}
-        except httpx.HTTPError:
-            pass
+        if self._managed_endpoint_ready():
+            return {"recovered": True, "runtime_restarted": False, "runtime_alive": True}
         self._runtime.stop()
         try:
             self._endpoint = self._runtime.start(self.model)
@@ -1213,11 +1288,11 @@ class GeminiAdapter(ProviderAdapter):
                 return response.json()
             except ProviderError:
                 raise
-            except httpx.TimeoutException as err:
+            except httpx.TimeoutException:
                 last = ProviderError("TIMEOUT", "Gemini request timed out.")
                 if self._scoring_request_aborted:
                     raise last
-            except httpx.HTTPError as err:
+            except httpx.HTTPError:
                 last = ProviderError("NETWORK_FAILED", "Gemini network request failed.")
             except JSONDecodeError as err:
                 raise ProviderError("PROVIDER_RESPONSE_INVALID", "Gemini returned malformed JSON.") from err

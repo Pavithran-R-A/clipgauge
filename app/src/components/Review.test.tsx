@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { waitFor } from '@testing-library/react'
 import Review from './Review'
@@ -220,5 +220,34 @@ describe('Review media trust states', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Preview source' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Preview unavailable. Retry the preview.')
+  })
+
+  it('does not open a stale other-moment preview after unmount', async () => {
+    let resolvePlayback: ((value: string) => void) | undefined
+    vi.mocked(api.requestPlaybackUrl).mockImplementationOnce(() => new Promise((resolve) => { resolvePlayback = resolve }))
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
+    const noRecommendations: JobResults = {
+      job_id: 'job-preview-unmount',
+      outcome: 'SUCCESS_NO_RECOMMENDATIONS',
+      ingest: { title: 'fixture', heatmap: null, probe: { duration_sec: 10, width: 1920, height: 1080 } },
+      score: { clips: [], llm_mode: 'ollama', model: 'fixture', scored_count: 1, borderline_candidates: [{ start: 2, end: 8, recommendation_score: 58, reasons: ['Below the recommendation bar'] }] },
+      render: null,
+      events: { counts: {}, timeline: [], arousal_source: 'dsp-proxy' },
+      candidates: { count: 1, effective_weights: {}, heatmap_present: false }
+    }
+    const view = render(<Review results={noRecommendations} onBack={vi.fn()} onRestyle={vi.fn()} />)
+
+    fireEvent.click(screen.getByText(/Other moments/))
+    fireEvent.click(screen.getByRole('button', { name: 'Preview source' }))
+    expect(resolvePlayback).toBeDefined()
+    view.unmount()
+
+    await act(async () => {
+      resolvePlayback?.('http://127.0.0.1:49152/media/test-token')
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+
+    expect(openSpy).not.toHaveBeenCalled()
+    openSpy.mockRestore()
   })
 })

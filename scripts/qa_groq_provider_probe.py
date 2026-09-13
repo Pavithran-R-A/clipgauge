@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -11,9 +12,20 @@ import httpx
 from clipgauge_pipeline.scoring import providers, rubric
 
 
-def main() -> int:
-    model = sys.argv[1]
-    headers = {"authorization": f"Bearer {os.environ['CLIPGAUGE_GROQ_API_KEY']}"}
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("model", help="Groq model identifier to probe")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    model = args.model
+    api_key = os.environ.get("CLIPGAUGE_GROQ_API_KEY")
+    if not api_key:
+        print(json.dumps({"model": model, "exception_type": "MissingCredential"}, separators=(",", ":")))
+        return 2
+    headers = {"authorization": f"Bearer {api_key}"}
     result: dict[str, object] = {"model": model}
     try:
         response = httpx.get(

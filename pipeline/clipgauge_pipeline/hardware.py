@@ -7,15 +7,43 @@ bounded, optional, and returns ``None`` when the capability cannot be verified.
 
 from __future__ import annotations
 
+import ctypes
 import os
 import platform
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
+GIB = 1024**3
+CPU_LOW_MEMORY_LIMIT = 8 * GIB
+CPU_MODERATE_MEMORY_LIMIT = 16 * GIB
+CPU_HIGH_MEMORY_LIMIT = 32 * GIB
+
 
 def _memory_bytes() -> int | None:
+    if sys.platform == "win32":
+        try:
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [
+                    ("length", ctypes.c_ulong),
+                    ("memory_load", ctypes.c_ulong),
+                    ("total_physical", ctypes.c_ulonglong),
+                    ("available_physical", ctypes.c_ulonglong),
+                    ("total_page_file", ctypes.c_ulonglong),
+                    ("available_page_file", ctypes.c_ulonglong),
+                    ("total_virtual", ctypes.c_ulonglong),
+                    ("available_virtual", ctypes.c_ulonglong),
+                    ("available_extended", ctypes.c_ulonglong),
+                ]
+
+            status = MemoryStatus()
+            status.length = ctypes.sizeof(MemoryStatus)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.total_physical)
+        except (AttributeError, OSError, TypeError):
+            pass
     if hasattr(os, "sysconf"):
         try:
             pages = os.sysconf("SC_PHYS_PAGES")
@@ -25,6 +53,52 @@ def _memory_bytes() -> int | None:
         except (OSError, ValueError, TypeError):
             pass
     return None
+
+
+def _memory_snapshot() -> dict[str, int | None]:
+    """Read physical and commit headroom without requiring psutil."""
+    result: dict[str, int | None] = {
+        "total_bytes": _memory_bytes(),
+        "available_bytes": None,
+        "total_page_file_bytes": None,
+        "available_page_file_bytes": None,
+    }
+    if sys.platform == "win32":
+        try:
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [
+                    ("length", ctypes.c_ulong),
+                    ("memory_load", ctypes.c_ulong),
+                    ("total_physical", ctypes.c_ulonglong),
+                    ("available_physical", ctypes.c_ulonglong),
+                    ("total_page_file", ctypes.c_ulonglong),
+                    ("available_page_file", ctypes.c_ulonglong),
+                    ("total_virtual", ctypes.c_ulonglong),
+                    ("available_virtual", ctypes.c_ulonglong),
+                    ("available_extended", ctypes.c_ulonglong),
+                ]
+
+            status = MemoryStatus()
+            status.length = ctypes.sizeof(MemoryStatus)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                result.update({
+                    "total_bytes": int(status.total_physical),
+                    "available_bytes": int(status.available_physical),
+                    "total_page_file_bytes": int(status.total_page_file),
+                    "available_page_file_bytes": int(status.available_page_file),
+                })
+                return result
+        except (AttributeError, OSError, TypeError):
+            pass
+    if hasattr(os, "sysconf"):
+        try:
+            pages = os.sysconf("SC_AVPHYS_PAGES")
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            if isinstance(pages, int) and isinstance(page_size, int) and pages > 0 and page_size > 0:
+                result["available_bytes"] = pages * page_size
+        except (OSError, ValueError, TypeError):
+            pass
+    return result
 
 
 def _run_probe(command: list[str], timeout: float = 2.0) -> str | None:
@@ -74,6 +148,22 @@ def _cuda() -> dict[str, Any]:
         }
     except (ImportError, RuntimeError, ValueError, AttributeError):
         return {"available": False, "verified": False, "device_count": 0, "compute_types": []}
+
+
+def _cpu() -> dict[str, Any]:
+    """Probe CTranslate2 CPU compute types before selecting int8."""
+    try:
+        import ctranslate2  # type: ignore
+
+        supported = sorted(ctranslate2.get_supported_compute_types("cpu"))
+        return {
+            "available": True,
+            "verified": bool(supported),
+            "compute_types": supported,
+            "version": str(getattr(ctranslate2, "__version__", "unknown")),
+        }
+    except (ImportError, RuntimeError, ValueError, AttributeError):
+        return {"available": False, "verified": False, "compute_types": []}
 
 
 def _pytorch_cuda() -> dict[str, Any]:
@@ -136,11 +226,16 @@ def snapshot(data_root: Path | None = None) -> dict[str, Any]:
     pytorch_cuda = _pytorch_cuda()
     whisperx_alignment = _whisperx_alignment()
     vulkan = _vulkan()
+    memory = _memory_snapshot()
     return {
         "os": system,
         "architecture": machine,
         "cpu_logical_cores": os.cpu_count(),
-        "ram_bytes": _memory_bytes(),
+        "ram_bytes": memory["total_bytes"],
+        "available_ram_bytes": memory["available_bytes"],
+        "total_page_file_bytes": memory["total_page_file_bytes"],
+        "available_page_file_bytes": memory["available_page_file_bytes"],
+        "cpu_ctranslate2": _cpu(),
         "apple_silicon": apple_silicon,
         "nvidia": nvidia,
         "cuda_ctranslate2": cuda,
@@ -162,21 +257,54 @@ def select_asr_accelerator(capabilities: dict[str, Any]) -> tuple[str, str]:
         for candidate in ("float16", "int8_float16", "int8"):
             if candidate in compute_types:
                 return "cuda", candidate
+    cpu = capabilities.get("cpu_ctranslate2") or {}
+    compute_types = set(cpu.get("compute_types") or [])
+    if "int8" in compute_types:
+        return "cpu", "int8"
+    if "float32" in compute_types:
+        return "cpu", "float32"
+    if compute_types:
+        return "cpu", min(compute_types)
     return "cpu", "int8"
 
 
-def select_asr_devices(capabilities: dict[str, Any]) -> dict[str, str]:
+def cpu_asr_policy(capabilities: dict[str, Any]) -> dict[str, Any]:
+    """Choose a conservative CPU batch from physical RAM."""
+    total = capabilities.get("ram_bytes")
+    available = capabilities.get("available_ram_bytes")
+    scarce_available = isinstance(available, int) and available <= 2 * GIB
+    if scarce_available or not isinstance(total, int) or total <= CPU_LOW_MEMORY_LIMIT:
+        batch_size, mode = 1, "low-memory"
+    elif total <= CPU_MODERATE_MEMORY_LIMIT:
+        batch_size, mode = 2, "standard"
+    elif total <= CPU_HIGH_MEMORY_LIMIT:
+        batch_size, mode = 4, "standard"
+    else:
+        batch_size, mode = 8, "standard"
+    _, compute_type = select_asr_accelerator({"cpu_ctranslate2": capabilities.get("cpu_ctranslate2", {})})
+    return {"device": "cpu", "compute_type": compute_type, "batch_size": batch_size, "mode": mode}
+
+
+def select_asr_devices(capabilities: dict[str, Any]) -> dict[str, Any]:
     """Select transcription and alignment backends independently."""
     transcription_device, transcription_compute_type = select_asr_accelerator(capabilities)
     pytorch = capabilities.get("pytorch_cuda") or {}
     whisperx = capabilities.get("whisperx_alignment") or {}
     alignment_verified = bool(pytorch.get("verified")) and bool(whisperx.get("verified", True))
     alignment_device = "cuda" if alignment_verified else "cpu"
-    return {
+    result: dict[str, Any] = {
         "transcription_device": transcription_device,
         "transcription_compute_type": transcription_compute_type,
         "alignment_device": alignment_device,
     }
+    if "ram_bytes" in capabilities or "cpu_ctranslate2" in capabilities:
+        cpu_policy = cpu_asr_policy(capabilities)
+        result.update({
+            "transcription_batch_size": cpu_policy["batch_size"] if transcription_device == "cpu" else 8,
+            "transcription_mode": cpu_policy["mode"] if transcription_device == "cpu" else "cuda",
+            "cpu_supported_compute_types": list((capabilities.get("cpu_ctranslate2") or {}).get("compute_types") or []),
+        })
+    return result
 
 
 def asr_readiness(capabilities: dict[str, Any]) -> dict[str, Any]:

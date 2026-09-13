@@ -426,7 +426,7 @@ fn privacy_summary(
         json!({
             "mode": selected.clone(),
             "device": ["source media remains in the managed local job directory"],
-            "network": ["source URL download when a URL is provided", "pinned runtime/model downloads when absent", "Gemini receives transcript slices, scoring context, and sampled finalist frames", "optional Pexels visual queries"],
+            "network": ["source URL download when a URL is provided", "pinned runtime/model downloads when absent", "Gemini receives candidate transcript slices and candidate metadata; sampled finalist images leave the device for visual scoring; the full source file is not sent", "optional Pexels visual queries"],
             "provider": "Gemini is contacted with an operation-scoped vault credential; the API key is not included in requests as a query parameter"
         })
     } else if selected == "clipgauge-local" {
@@ -440,7 +440,7 @@ fn privacy_summary(
         json!({
             "mode": selected,
             "device": ["source media remains in the managed local job directory"],
-            "network": ["source URL download when a URL is provided", "provider endpoint receives transcript slices and scoring context", "selected frames leave the device only when the selected model advertises vision"],
+            "network": ["source URL download when a URL is provided", "provider endpoint receives candidate transcript slices and candidate metadata", "sampled images leave the device only when the selected model advertises vision; the full source file is not sent"],
             "provider": "This selected provider is contacted outside ClipGauge; review its current privacy and retention terms before sending source-derived material",
             "model": model,
             "endpoint": endpoint.map(|value| value.split('/').take(3).collect::<Vec<_>>().join("/"))
@@ -2554,6 +2554,25 @@ mod tests {
         assert!(text.contains("scores on this computer"));
         assert!(!text.contains("provider endpoint receives transcript slices"));
         assert!(!text.contains("selected frames leave the device"));
+    }
+
+    #[test]
+    fn cloud_privacy_summary_names_candidate_data_boundary() {
+        for provider in ["groq", "gemini"] {
+            let summary = privacy_summary(
+                Some(provider.to_string()),
+                Some(provider.to_string()),
+                Some("test-model".to_string()),
+                Some("https://provider.example/v1".to_string()),
+            )
+            .unwrap();
+            let text = summary.to_string();
+
+            assert!(text.contains("candidate transcript slices"));
+            assert!(text.contains("candidate metadata"));
+            assert!(text.contains("sampled"));
+            assert!(text.contains("full source file is not sent"));
+        }
     }
 
     #[test]

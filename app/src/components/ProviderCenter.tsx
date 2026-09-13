@@ -165,6 +165,12 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
   const connectionRequestRef = useRef(0)
   const credentialRequestRef = useRef(0)
   const selectedProviderPropRef = useRef(selectedProvider)
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -247,7 +253,7 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
       const save = localSaveChainRef.current.then(() => api.saveLocalModel(model))
       localSaveChainRef.current = save.catch(() => undefined)
       void save.then(() => {
-        if (requestId !== modelRequestRef.current || providerId !== active.id) return
+        if (!mountedRef.current || requestId !== modelRequestRef.current || providerId !== active.id) return
         const nextInventory = inventory?.local_ai
           ? { ...inventory, local_ai: { ...inventory.local_ai, selected_model_id: model } }
           : null
@@ -257,7 +263,7 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
         }
         onSelectLocalModel?.(model)
       }).catch((error) => {
-        if (requestId !== modelRequestRef.current || providerId !== active.id) return
+        if (!mountedRef.current || requestId !== modelRequestRef.current || providerId !== active.id) return
         setSelectedModels((current) => {
           const next = { ...current }
           if (previous) next[providerId] = previous
@@ -280,17 +286,17 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
     setModelsMessage(null)
     try {
       const result = await api.listProviderModels(providerId, selectedModel || undefined, providerId === 'custom' || providerId === 'cloudflare' ? customEndpoint : active.endpoint, active.credential ? 'bearer' : 'none')
-      if (requestId !== modelRequestRef.current || providerId !== active.id) return
+      if (!mountedRef.current || requestId !== modelRequestRef.current || providerId !== active.id) return
       if (!isProviderModelsResult(result)) throw new Error('Provider returned an invalid model list. Retry the refresh.')
       const next = normalizeProviderModels(result.models)
       setModels((current) => ({ ...current, [providerId]: next }))
       setModelsFetchedAt((current) => ({ ...current, [providerId]: Date.now() }))
       setModelsMessage(result.message ?? (next.length ? 'Models refreshed.' : 'No usable model list returned. Manual model entry remains available.'))
     } catch (error) {
-      if (requestId !== modelRequestRef.current || providerId !== active.id) return
+      if (!mountedRef.current || requestId !== modelRequestRef.current || providerId !== active.id) return
       setModelsMessage(friendlyErrorMessage(error, 'Model list unavailable. Retry the refresh.'))
     } finally {
-      if (requestId === modelRequestRef.current && providerId === active.id) setModelsLoading(false)
+      if (mountedRef.current && requestId === modelRequestRef.current && providerId === active.id) setModelsLoading(false)
     }
   }
 
@@ -304,13 +310,13 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
         ? await api.saveGeminiKey(credential.trim())
         : await api.saveProviderKey(`preset-${providerId}`, credential.trim())
       if (stored !== true) throw new Error('The credential was not saved. Retry and check the operating-system vault.')
-      if (requestId !== credentialRequestRef.current || providerId !== active.id) return
+      if (!mountedRef.current || requestId !== credentialRequestRef.current || providerId !== active.id) return
       setCredential('')
       setSaved(true)
       setTestResult(null)
       setSetup((current) => current ? { ...current, provider_keys: { ...(current.provider_keys ?? {}), [providerId]: providerId === 'gemini' ? Boolean(current.provider_keys?.[providerId]) : true }, has_gemini_key: providerId === 'gemini' ? true : current.has_gemini_key } : current)
     } catch (error) {
-      if (requestId === credentialRequestRef.current && providerId === active.id) setTestResult({ state: 'FAIL', provider: providerId, message: friendlyErrorMessage(error, 'The credential could not be saved. Retry the action.') })
+      if (mountedRef.current && requestId === credentialRequestRef.current && providerId === active.id) setTestResult({ state: 'FAIL', provider: providerId, message: friendlyErrorMessage(error, 'The credential could not be saved. Retry the action.') })
     }
   }
 
@@ -321,18 +327,18 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
     if (!provider.credential || !hasSavedCredential) return
     try {
       if (!(await confirm(`Remove the saved ${active.name} credential from this computer? This removes only ClipGauge’s saved credential and does not revoke the provider key.`))) return
-      if (requestId !== credentialRequestRef.current || providerId !== active.id) return
+      if (!mountedRef.current || requestId !== credentialRequestRef.current || providerId !== active.id) return
       const removed = providerId === 'gemini'
         ? await api.removeGeminiKey()
         : await api.removeProviderKey(`preset-${providerId}`)
       if (removed !== true) throw new Error('The credential could not be removed. Check the operating-system vault and retry.')
-      if (requestId !== credentialRequestRef.current || providerId !== active.id) return
+      if (!mountedRef.current || requestId !== credentialRequestRef.current || providerId !== active.id) return
       setSaved(false)
       setCredential('')
       setTestResult(null)
       setSetup((current) => current ? { ...current, has_gemini_key: providerId === 'gemini' ? false : current.has_gemini_key, provider_keys: { ...(current.provider_keys ?? {}), [providerId]: false, [`preset-${providerId}`]: false } } : current)
     } catch (error) {
-      if (requestId === credentialRequestRef.current && providerId === active.id) setTestResult({ state: 'FAIL', provider: providerId, message: friendlyErrorMessage(error, 'The credential could not be removed. Retry the action.') })
+      if (mountedRef.current && requestId === credentialRequestRef.current && providerId === active.id) setTestResult({ state: 'FAIL', provider: providerId, message: friendlyErrorMessage(error, 'The credential could not be removed. Retry the action.') })
     }
   }
 
@@ -345,7 +351,7 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
       const model = selectedModel
       const endpoint = active.id === 'custom' || active.id === 'cloudflare' ? customEndpoint : active.endpoint
       const result = await api.testConnection(active.id, model || undefined, endpoint || undefined, active.credential ? 'bearer' : 'none')
-      if (requestId !== connectionRequestRef.current || providerId !== active.id) return
+      if (!mountedRef.current || requestId !== connectionRequestRef.current || providerId !== active.id) return
       if (!isProviderTestResult(result)) throw new Error('Provider returned an invalid connection result. Refresh models and retry.')
       if (Array.isArray(result.models) && result.models.length) {
         const next = normalizeProviderModels(result.models)
@@ -354,9 +360,9 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
       }
       setTestResult(result)
     } catch (error) {
-      if (requestId === connectionRequestRef.current && providerId === active.id) setTestResult({ state: 'FAIL', provider: active.id, message: friendlyErrorMessage(error, 'Connection failed. Retry the selected model.') })
+      if (mountedRef.current && requestId === connectionRequestRef.current && providerId === active.id) setTestResult({ state: 'FAIL', provider: active.id, message: friendlyErrorMessage(error, 'Connection failed. Retry the selected model.') })
     } finally {
-      if (requestId === connectionRequestRef.current && providerId === active.id) setTesting(false)
+      if (mountedRef.current && requestId === connectionRequestRef.current && providerId === active.id) setTesting(false)
     }
   }
 

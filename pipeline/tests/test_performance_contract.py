@@ -131,6 +131,74 @@ def test_local_scoring_batch_keeps_materially_earlier_story_opening():
     assert {item[0]["anchor_sentence_id"] for item in selected} == {"a", "b"}
 
 
+def test_local_scoring_batch_keeps_story_after_strong_topic_boundary():
+    early = (
+        {
+            "start": 0.0,
+            "end": 40.0,
+            "anchor_sentence_id": "early",
+            "sentence_ids": ["S1", "S2", "S3", "S4"],
+            "payoff_candidate": True,
+            "payoff_time": 30.0,
+            "payoff_boundary_explicit": False,
+        },
+        "",
+        "The first story builds toward a complete result with context.",
+    )
+    later = (
+        {
+            "start": 17.0,
+            "end": 60.0,
+            "anchor_sentence_id": "later",
+            "sentence_ids": ["S3", "S4", "S5", "S6"],
+            "payoff_candidate": True,
+            "payoff_time": 55.0,
+            "payoff_boundary_explicit": False,
+            "start_topic_boundary": 0.9,
+        },
+        "",
+        "A new story follows the boundary and reaches its final result.",
+    )
+
+    selected = scoring_stage.select_diverse_scoring_batch([early, later], 2)
+
+    assert {item[0]["anchor_sentence_id"] for item in selected} == {"early", "later"}
+
+
+def test_local_scoring_batch_covers_evidenced_time_regions_before_decoys():
+    def item(start, end, *, explicit=False, final=False, boundary=0.0):
+        candidate = {
+            "start": start,
+            "end": end,
+            "anchor_sentence_id": f"S{int(start):04d}",
+            "payoff_candidate": True,
+            "payoff_time": end - 4.0,
+            "payoff_boundary_explicit": explicit,
+            "source_final_boundary": final,
+            "start_topic_boundary": boundary,
+        }
+        return candidate, "", "A complete result is shown with useful context and reaction."
+
+    prepared = [
+        item(10.0, 28.0, explicit=True, boundary=0.9),
+        item(100.0, 128.0, explicit=True, boundary=0.9),
+        item(190.0, 218.0, explicit=True, boundary=0.9),
+        item(280.0, 308.0, explicit=True, boundary=0.9),
+        item(370.0, 398.0, explicit=True, boundary=0.9),
+        item(460.0, 488.0, explicit=True, boundary=0.9),
+        item(730.0, 815.0, explicit=True, final=True, boundary=0.9),
+        item(40.0, 68.0),
+        item(130.0, 158.0),
+        item(220.0, 248.0),
+    ]
+
+    selected = scoring_stage.select_diverse_scoring_batch(prepared, 7)
+    regions = {int((entry[0]["start"] + entry[0]["end"]) / 2.0 // 90.0) for entry in selected}
+
+    assert regions == {0, 1, 2, 3, 4, 5, 8}
+    assert all(entry[0]["payoff_boundary_explicit"] for entry in selected)
+
+
 def test_local_shortlist_preserves_late_temporal_coverage(monkeypatch):
     candidates = [
         {"start": 0.0, "end": 30.0, "curve_score": 1.0, "channel_scores": {}},
@@ -143,9 +211,6 @@ def test_local_shortlist_preserves_late_temporal_coverage(monkeypatch):
         "_transcript_slice",
         lambda _segments, start, end, **_kwargs: (
             "",
-            "A complete result is shown clearly with useful context and enough words "
-            "to represent a realistic transcript candidate for scoring."
-            if start < 300.0 else
             "A complete result is shown clearly with useful context and enough words "
             "to represent a realistic transcript candidate for scoring.",
         ),
@@ -305,6 +370,24 @@ def test_near_good_clean_story_can_be_recommended():
     assert scoring_stage.is_good_recommendation(quality) is True
 
 
+def test_evidence_backed_story_can_survive_local_quality_flags():
+    entry = {
+        "payoff_boundary_explicit": True,
+        "short_quality": {
+            "eligible_to_recommend": True,
+            "quality_tier": "STRUCTURALLY_VALID",
+            "quality_flags": ["WEAK_SEMANTIC_CLOSURE", "PAYOFF_NOT_RELEVANT"],
+            "complete_ending": True,
+            "story_consistent": True,
+            "effective_hook_0_100": 30.0,
+            "payoff": 50.0,
+            "standalone": 50.0,
+        },
+    }
+
+    assert scoring_stage.is_evidence_backed_recommendation(entry) is True
+
+
 def test_windows_vulkan_remains_fallback_without_cuda_runtime():
     key = local_runtime.select_runtime_asset_key(
         platform_key="windows-x86_64",
@@ -459,6 +542,34 @@ def test_finalist_selection_suppresses_duplicate_story_identity():
     finalists = scoring_stage.select_diverse_finalists(entries, limit=4)
 
     assert [entry["start"] for entry in finalists] == [0.0, 600.0, 900.0]
+
+
+def test_finalist_selection_reserves_evidenced_regions():
+    entries = [
+        {
+            "start": start,
+            "end": start + 35.0,
+            "recommendation_score": score,
+            "payoff_candidate": True,
+            "payoff_boundary_explicit": explicit,
+            "start_topic_boundary": 0.8,
+            "short_quality": {"quality_tier": "GOOD", "quality_flags": []},
+        }
+        for start, score, explicit in [
+            (10.0, 90.0, False),
+            (25.0, 89.0, False),
+            (100.0, 70.0, False),
+            (190.0, 69.0, False),
+            (280.0, 68.0, True),
+        ]
+    ]
+
+    finalists = scoring_stage.select_diverse_finalists(entries, limit=4)
+
+    assert {
+        int(((item["start"] + item["end"]) / 2.0) // 90.0)
+        for item in finalists
+    } == {0, 1, 2, 3}
 
 
 def test_scored_review_ranking_prefers_distinct_regions():

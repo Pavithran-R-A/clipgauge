@@ -447,6 +447,31 @@ def test_local_runtime_inference_probe_rejects_empty_reply(monkeypatch, tmp_path
     assert result["reason"] == "Local inference returned an invalid response."
 
 
+def test_local_runtime_avoids_configured_port_when_already_bound(monkeypatch, tmp_path):
+    instance = local_runtime.LocalRuntime(root=tmp_path, manifest={})
+    binds = []
+
+    class Socket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def bind(self, address):
+            binds.append(address)
+            if address[1] == 8080:
+                raise OSError("address already in use")
+
+        def getsockname(self):
+            return ("127.0.0.1", 19001)
+
+    monkeypatch.setattr(local_runtime.socket, "socket", lambda *args, **kwargs: Socket())
+
+    assert instance._port("http://127.0.0.1:8080/v1") == 19001
+    assert binds == [("127.0.0.1", 8080), ("127.0.0.1", 0)]
+
+
 def test_extracted_runtime_stays_ready_after_archive_cache_is_removed(monkeypatch, tmp_path):
     manifest = {
         "runtimes": {

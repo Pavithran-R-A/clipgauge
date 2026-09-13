@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import { chooseExportDestination } from '../exportDestination'
 import { traceMedia } from '../mediaDiagnostics'
@@ -58,15 +58,21 @@ function confidenceLabel(value: string): string {
 
 function OtherMoments({ moments, jobId }: { moments: NonNullable<JobResults['score']>['borderline_candidates']; jobId: string }) {
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
   if (!moments?.length) return null
   async function preview(moment: { start: number; end: number }) {
     setPreviewError(null)
     try {
       const url = await api.requestPlaybackUrl(jobId, 'source')
       if (!isPlaybackUrl(url)) throw new Error('Playback URL is malformed.')
+      if (!mountedRef.current) return
       window.open(`${url}#t=${moment.start},${moment.end}`, '_blank', 'noopener,noreferrer')
     } catch (error) {
-      setPreviewError(friendlyErrorMessage(error, 'Preview unavailable. Retry the preview.'))
+      if (mountedRef.current) setPreviewError(friendlyErrorMessage(error, 'Preview unavailable. Retry the preview.'))
     }
   }
   return <details className="other-moments"><summary>Other moments ({moments.length})</summary>{previewError && <p className="field-help" role="alert">{previewError}</p>}<div className="other-moments-list">{moments.map((moment, index) => <div className="other-moment" key={`${moment.start}-${moment.end}-${index}`}><div><strong>{fmtTime(moment.start)}–{fmtTime(moment.end)}</strong><small>Score {Math.round(moment.recommendation_score)} · {moment.reasons?.join(', ') ?? 'Below the recommendation bar'}</small></div><button type="button" className="button button-secondary" onClick={() => void preview(moment)}>Preview source</button></div>)}</div></details>
@@ -85,8 +91,14 @@ export default function Review({ results, onBack, onRestyle }: Props) {
   const [mediaState, setMediaState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [mediaUrl, setMediaUrl] = useState<string | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
+  const mountedRef = useRef(true)
   const styleChanged = restylePreset !== currentPreset || restyleCamera !== 'cut'
   const borderline = results.score?.borderline_candidates
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   const pair = useMemo(() => {
     const out = outputs[selected]
@@ -128,9 +140,10 @@ export default function Review({ results, onBack, onRestyle }: Props) {
         suggestedTitle,
       })
       if (!dest) return
+      if (!mountedRef.current) return
       setExported((prev) => ({ ...prev, [out.clip]: dest }))
     } catch (error) {
-      setExportError(friendlyErrorMessage(error, 'Export could not be completed. Retry the export.'))
+      if (mountedRef.current) setExportError(friendlyErrorMessage(error, 'Export could not be completed. Retry the export.'))
     }
   }
 

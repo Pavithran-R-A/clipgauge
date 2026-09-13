@@ -299,8 +299,8 @@ export interface PrivacySummary {
     device: string[]
     network: string[]
     provider: string
-    model?: string
-    endpoint?: string
+    model?: string | null
+    endpoint?: string | null
   }
   instagram: string
   source: string

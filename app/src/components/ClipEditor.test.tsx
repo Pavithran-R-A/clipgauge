@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { invoke } from '@tauri-apps/api/core'
 import { api } from '../api'
@@ -165,5 +165,28 @@ describe('ClipEditor loading, recovery, and ready states', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Render updated clip' })).toBeEnabled())
     expect(screen.queryByRole('button', { name: 'Rendering…' })).not.toBeInTheDocument()
     expect(onRendered).toHaveBeenCalledOnce()
+  })
+
+  it('does not request visual suggestions after unmount during save', async () => {
+    let resolveSave: ((value: unknown) => void) | undefined
+    vi.mocked(invoke)
+      .mockResolvedValueOnce(validContext as never)
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSave = resolve }) as never)
+    const view = renderEditor()
+
+    await screen.findByTestId('editor-source-video')
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest stock visuals' }))
+    expect(resolveSave).toBeDefined()
+    view.unmount()
+
+    await act(async () => {
+      resolveSave?.({ ok: true, edit: validContext.edit })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith('edit_tool', {
+      args: ['suggest-visuals', 'job-1', '0', '--prefer', 'pexels']
+    })
   })
 })

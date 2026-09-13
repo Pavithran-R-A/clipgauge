@@ -1,5 +1,6 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { StrictMode } from 'react'
 import Loop from './Loop'
 import { api } from '../api'
 
@@ -85,6 +86,11 @@ describe('Instagram loop recovery', () => {
     expect(await screen.findByText('Instagram sync could not complete. Retry the sync.')).toBeInTheDocument()
   })
 
+  it('remains live after StrictMode effect cleanup', async () => {
+    render(<StrictMode><Loop onBack={vi.fn()} /></StrictMode>)
+    expect(await screen.findByText('A reel')).toBeInTheDocument()
+  })
+
   it('keeps the newest overview when refreshes resolve out of order', async () => {
     let resolveOlder: (value: typeof overview) => void = () => undefined
     let resolveNewer: (value: typeof overview) => void = () => undefined
@@ -106,5 +112,20 @@ describe('Instagram loop recovery', () => {
     resolveOlder({ ...overview, username: 'older' })
     await waitFor(() => expect(screen.getByText(/@newer/)).toBeInTheDocument())
     expect(screen.queryByText(/@older/)).not.toBeInTheDocument()
+  })
+
+  it('does not refresh after a link resolves post-unmount', async () => {
+    let resolveLink: ((value: { ok: boolean }) => void) | undefined
+    vi.mocked(api.igLink).mockImplementationOnce(() => new Promise((resolve) => { resolveLink = resolve }))
+    const view = render(<Loop onBack={vi.fn()} />)
+    await screen.findByText('A reel')
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm suggested clip' }))
+    view.unmount()
+
+    await act(async () => {
+      resolveLink?.({ ok: true })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(api.igOverview).toHaveBeenCalledTimes(1)
   })
 })

@@ -62,7 +62,6 @@ def run_cuda_probe(audio_path: Path, evidence_path: Path, *, align: bool) -> dic
         raise RuntimeError("CTranslate2 CUDA device verification failed")
 
     import ctranslate2
-    import faster_whisper
     import whisperx
 
     audio = whisperx.load_audio(str(path))

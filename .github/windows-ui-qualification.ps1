@@ -4,11 +4,19 @@ param(
   [Parameter(Mandatory = $true)] [string] $Sentinel,
   [switch] $FreshOnly,
   [switch] $SetupOnly,
-  [switch] $AllowProductionSetupOnly
+  [switch] $AllowProductionSetupOnly,
+  [switch] $GroqOnly
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $FreshOnly -and -not $SetupOnly -and -not $GroqOnly) {
+  $fixtureEndpoint = $env:CLIPGAUGE_QA_OPENROUTER_ENDPOINT
+  if ($fixtureEndpoint -notmatch '^http://127\.0\.0\.1:\d{1,5}/v1$') {
+    throw 'full Windows qualification requires CLIPGAUGE_QA_OPENROUTER_ENDPOINT to target a loopback /v1 fixture'
+  }
+}
 New-Item -ItemType Directory -Force $OutputDir | Out-Null
+$OutputDir = [IO.Path]::GetFullPath($OutputDir)
 $winapp = (Get-Command winapp -ErrorAction Stop).Source
 $appName = [System.IO.Path]::GetFileNameWithoutExtension($AppPath)
 $proc = $null
@@ -301,6 +309,7 @@ Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $cdp
 New-Item -ItemType Directory -Force $cdp | Out-Null
 $env:CLIPGAUGE_QA_WEBVIEW2_CDP = '1'
 $env:CLIPGAUGE_QA_ALLOW_PRODUCTION_SCOPE = if ($AllowProductionSetupOnly -and $SetupOnly) { '1' } else { '0' }
+$env:CLIPGAUGE_QA_ALLOW_PRODUCTION_PROVIDER = if ($GroqOnly) { '1' } else { '0' }
 $env:CLIPGAUGE_QUALIFICATION_VAULT_SERVICE = $qualificationService
 $env:CLIPGAUGE_HOME = $qualificationHome
 if ($useIsolatedHome) { $env:CLIPGAUGE_QA_HOME = $qualificationHome }
@@ -364,6 +373,13 @@ try {
   }
   if ($SetupOnly) {
     Invoke-State 'setup' 1366 768 '1366x768-setup-only'
+    return
+  }
+  if ($GroqOnly) {
+    Invoke-State 'groq-model-switch' 1366 768 '1366x768'
+    Restart-QualificationApp
+    Invoke-State 'groq-model-switch-restart' 1366 768 '1366x768-restart'
+    Write-Host 'WINDOWS_UI_GROQ_QUALIFICATION=PASS'
     return
   }
   Invoke-State 'setup' 1366 768 '1366x768'
@@ -431,6 +447,7 @@ try {
   if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
   Remove-Item Env:CLIPGAUGE_QA_WEBVIEW2_CDP -ErrorAction SilentlyContinue
   Remove-Item Env:CLIPGAUGE_QA_ALLOW_PRODUCTION_SCOPE -ErrorAction SilentlyContinue
+  Remove-Item Env:CLIPGAUGE_QA_ALLOW_PRODUCTION_PROVIDER -ErrorAction SilentlyContinue
   Remove-Item Env:CLIPGAUGE_QA_WEBVIEW2_PORT -ErrorAction SilentlyContinue
   if ($null -eq $previousClipGaugeHome) { Remove-Item Env:CLIPGAUGE_HOME -ErrorAction SilentlyContinue } else { $env:CLIPGAUGE_HOME = $previousClipGaugeHome }
   if ($null -eq $previousQaHome) { Remove-Item Env:CLIPGAUGE_QA_HOME -ErrorAction SilentlyContinue } else { $env:CLIPGAUGE_QA_HOME = $previousQaHome }

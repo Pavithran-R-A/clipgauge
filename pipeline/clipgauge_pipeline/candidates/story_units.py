@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from itertools import pairwise
+from typing import Any
 
 MIN_STORY_SECONDS = 8.0
 MAX_STORY_SECONDS = 75.0
-MAX_END_LOOKAHEAD_SECONDS = 60.0
+MAX_END_LOOKAHEAD_SECONDS = MAX_STORY_SECONDS
 ANCHOR_LIMIT = 20
 MAX_BOUNDARY_CALLS = 15
 SHORTLIST_LIMIT = 24
@@ -42,10 +44,13 @@ _FILLER_STARTS = {"all", "alright", "okay", "ok", "so", "well", "yeah", "yo"}
 _PREMISE_WORDS = {"billion", "million", "secret", "dangerous", "hidden", "survive", "infinite", "classified"}
 _DEICTIC_WORDS = {"this", "that", "these", "those", "he", "she", "they", "it", "there", "here"}
 _CONTEXT_REFERENCES = ("as i said", "like before", "again", "then", "so far", "as before")
-_OUTCOME_PHRASES = ("turns out", "ended up", "managed to", "it's official", "is official")
+_OUTCOME_PHRASES = (
+    "turns out", "ended up", "managed to", "it's official", "is official",
+    "let me", "allowed me", "first time", "found its way", "actually touching",
+)
 _OUTCOME_VERBS = {
     "built", "completed", "discovered", "earned", "failed", "finished", "found",
-    "got", "landed", "lost", "made", "passed", "received", "signed", "sold", "won",
+    "got", "landed", "lost", "made", "passed", "received", "signed", "sold", "touch", "touching", "won",
 }
 _EDITORIAL_TERMS = {
     "challenge", "complete", "completed", "discovered", "earned", "failed", "final",
@@ -226,6 +231,9 @@ def _anchor_strength(unit: SentenceUnit) -> float:
     score += 0.28 if set(words) & _REACTION_WORDS else 0.0
     score += 0.16 * len(unit.audio_events)
     score += 0.10 if unit.topic_boundary_before >= 0.62 else 0.0
+    payoff, confidence, _ = _payoff_evidence(unit)
+    score += 0.55 * confidence if payoff else 0.0
+    score += 0.50 if _has_explicit_outcome(unit.text) else 0.0
     return score
 
 
@@ -241,7 +249,7 @@ def generate_anchors(units: list[SentenceUnit], limit: int = ANCHOR_LIMIT) -> li
             topic_best[unit.topic_id] = unit
 
     topic_starts = sorted(unit.start for unit in topic_best.values())
-    topic_gaps = [right - left for left, right in zip(topic_starts, topic_starts[1:])]
+    topic_gaps = [right - left for left, right in pairwise(topic_starts)]
     dense_topic_gap = (
         sorted(topic_gaps)[len(topic_gaps) // 2]
         if topic_gaps else (
@@ -266,12 +274,26 @@ def generate_anchors(units: list[SentenceUnit], limit: int = ANCHOR_LIMIT) -> li
     prioritized = sorted(topic_best.values(), key=lambda item: (_anchor_strength(item), item.start), reverse=True)
     prioritized.extend(sorted(units, key=lambda item: (_anchor_strength(item), item.start), reverse=True))
     for unit in prioritized:
-        if len(selected) >= max_anchors:
-            break
-        if unit not in selected and all(
-            abs(unit.start - other.start) >= minimum_anchor_gap for other in selected
-        ):
+        if unit in selected:
+            continue
+        payoff_anchor = _has_explicit_outcome(unit.text)
+        strong_boundary_anchor = unit.topic_boundary_before >= 0.75
+        anchor_gap = 8.0 if payoff_anchor or strong_boundary_anchor else minimum_anchor_gap
+        if not all(abs(unit.start - other.start) >= anchor_gap for other in selected):
+            continue
+        if len(selected) < max_anchors:
             selected.append(unit)
+            continue
+        weakest_index, weakest = min(
+            enumerate(selected),
+            key=lambda pair: (_anchor_strength(pair[1]), pair[1].start),
+        )
+        if payoff_anchor and not _has_explicit_outcome(weakest.text):
+            selected[weakest_index] = unit
+            continue
+        replacement_margin = 0.08 if payoff_anchor or strong_boundary_anchor else 0.15
+        if _anchor_strength(unit) > _anchor_strength(weakest) + replacement_margin:
+            selected[weakest_index] = unit
     if len(selected) < max_anchors:
         for unit in sorted(units, key=lambda item: (_anchor_strength(item), item.start), reverse=True):
             if unit in selected or any(
@@ -313,11 +335,11 @@ def _payoff_evidence(
     if starts_with_resolution or explicit_outcome:
         confidence += 0.45
         reasons.append("cause_or_outcome")
-    if any(word in tokens for word in {"revealed", "reveal", "fact", "result", "conclusion", "finally"}):
+    if any(word in tokens for word in ("revealed", "reveal", "fact", "result", "conclusion", "finally")):
         confidence += 0.35
         reasons.append("specific_reveal")
     if previous_question and any(char.isdigit() for char in text) and any(
-        word in tokens for word in {"worth", "cost", "million", "billion", "dollars"}
+        word in tokens for word in ("worth", "cost", "million", "billion", "dollars")
     ):
         confidence += 0.25
         reasons.append("specific_fact")
@@ -444,6 +466,7 @@ def _story_candidate(
         or any(set(_TOKEN_RE.findall(unit.text.lower())) & (_REACTION_WORDS | {"secret", "dangerous", "survive", "infinite"}) for unit in units)
         or any(set(_TOKEN_RE.findall(unit.text.lower())) & _EDITORIAL_TERMS for unit in units)
         or any(unit.audio_events for unit in units)
+        or explicit_payoff
     )
     return {
         "candidate_id": f"story-{anchor.sentence_id.lower()}-{variant}",
@@ -524,6 +547,11 @@ def _candidate_quality_key(item: dict[str, Any]) -> tuple[Any, ...]:
 
 def _is_earlier_opening_variant(candidate: dict[str, Any], other: dict[str, Any]) -> bool:
     """Prefer an earlier opening when the payoff identity remains stable."""
+    preserves_source_final = bool(
+        other.get("source_final_boundary")
+        and other.get("payoff_boundary_explicit")
+        and not candidate.get("source_final_boundary")
+    )
     same_payoff_identity = bool(
         candidate.get("payoff_sentence_id")
         and candidate.get("payoff_sentence_id") == other.get("payoff_sentence_id")
@@ -532,7 +560,8 @@ def _is_earlier_opening_variant(candidate: dict[str, Any], other: dict[str, Any]
     candidate_tail = float(candidate["end"]) - payoff_time
     other_tail = float(other["end"]) - float(other.get("payoff_time") or 0.0)
     return bool(
-        candidate.get("payoff_candidate")
+        not preserves_source_final
+        and candidate.get("payoff_candidate")
         and other.get("payoff_candidate")
         and (
             candidate.get("anchor_sentence_id") == other.get("anchor_sentence_id")
@@ -637,6 +666,16 @@ def cheap_filter_and_dedupe(
                 and candidate.get("payoff_boundary_explicit")
             )
             better_opening_boundary = _is_earlier_opening_variant(candidate, other)
+            later_explicit_boundary = bool(
+                candidate.get("payoff_boundary_explicit")
+                and other.get("payoff_boundary_explicit")
+                and float(candidate.get("start_topic_boundary") or 0.0) >= TOPIC_BOUNDARY_THRESHOLD
+                and float(other.get("start_topic_boundary") or 0.0) < 0.3
+                and float(candidate["start"]) > float(other["start"]) + 8.0
+                and float(candidate.get("payoff_time") or 0.0)
+                >= float(other.get("payoff_time") or 0.0)
+                and float(candidate["end"]) >= float(other["end"])
+            )
             same_explicit_payoff = (
                 candidate.get("payoff_boundary_explicit")
                 and other.get("payoff_boundary_explicit")
@@ -660,9 +699,12 @@ def cheap_filter_and_dedupe(
             final_payoff_boundary = (
                 candidate.get("source_final_boundary")
                 and candidate.get("payoff_boundary_explicit")
-                and float(candidate["end"]) > float(other["end"])
+                and (
+                    not other.get("payoff_boundary_explicit")
+                    or float(candidate["end"]) > float(other["end"])
+                )
             )
-            if better_opening_boundary:
+            if better_opening_boundary or later_explicit_boundary:
                 kept[duplicate_index] = candidate
                 previous_entry = audit_entries.get(id(other))
                 if previous_entry is not None:
@@ -671,6 +713,16 @@ def cheap_filter_and_dedupe(
                 record(candidate, [], "kept")
                 continue
             if strong_new_topic or better_payoff_boundary or final_payoff_boundary:
+                duplicate_index = None
+            earlier_payoff_variant = bool(
+                duplicate_index is not None
+                and candidate.get("payoff_boundary_explicit")
+                and kept[duplicate_index].get("payoff_boundary_explicit")
+                and float(candidate.get("payoff_time") or 0.0) + 8.0
+                < float(kept[duplicate_index].get("payoff_time") or 0.0)
+                and float(candidate["end"]) >= float(candidate.get("payoff_time") or 0.0) + 5.0
+            )
+            if earlier_payoff_variant:
                 duplicate_index = None
             if not same_start and _iou(candidate, other) < 0.35 and not shared_sentence_unit:
                 duplicate_index = None
@@ -702,16 +754,71 @@ def cheap_filter_and_dedupe(
             else:
                 record(candidate, ["DUPLICATE_STORY"], "rejected")
             continue
+        overlap_indexes = [
+            index
+            for index, other in enumerate(kept)
+            if _story_similarity(candidate, other) >= 0.82
+            and _iou(candidate, other) >= 0.35
+        ]
         overlap_index = next(
             (
-                index for index, other in enumerate(kept)
-                if _story_similarity(candidate, other) >= 0.82
-                and _iou(candidate, other) >= 0.35
+                index
+                for index in overlap_indexes
+                if candidate.get("payoff_boundary_explicit")
+                and kept[index].get("payoff_boundary_explicit")
+                and abs(
+                    float(candidate.get("payoff_time") or 0.0)
+                    - float(kept[index].get("payoff_time") or 0.0)
+                ) <= 2.0
             ),
-            None,
+            overlap_indexes[0] if overlap_indexes else None,
         )
-        if overlap_index is not None and not later_payoff_variant:
+        distinct_earlier_payoff = bool(
+            overlap_index is not None
+            and candidate.get("payoff_boundary_explicit")
+            and kept[overlap_index].get("payoff_boundary_explicit")
+            and float(candidate.get("payoff_time") or 0.0) + 8.0
+            < float(kept[overlap_index].get("payoff_time") or 0.0)
+            and float(candidate["end"]) >= float(candidate.get("payoff_time") or 0.0) + 5.0
+        )
+        if distinct_earlier_payoff:
+            overlap_index = None
+        strong_new_topic_overlap = bool(
+            overlap_index is not None
+            and float(candidate.get("start_topic_boundary") or 0.0)
+            >= TOPIC_BOUNDARY_THRESHOLD
+            and float(candidate["start"])
+            - float(kept[overlap_index]["start"])
+            >= 8.0
+        )
+        if (
+            overlap_index is not None
+            and not later_payoff_variant
+            and not strong_new_topic_overlap
+        ):
             other = kept[overlap_index]
+            preserves_source_final = bool(
+                candidate.get("source_final_boundary")
+                and candidate.get("payoff_boundary_explicit")
+                and (
+                    not other.get("source_final_boundary")
+                    or (
+                        float(candidate["end"]) >= float(other["end"])
+                        and float(candidate.get("payoff_time") or 0.0)
+                        >= float(other.get("payoff_time") or 0.0)
+                    )
+                )
+            )
+            earlier_explicit_opening = bool(
+                candidate.get("payoff_boundary_explicit")
+                and other.get("payoff_boundary_explicit")
+                and abs(
+                    float(candidate.get("payoff_time") or 0.0)
+                    - float(other.get("payoff_time") or 0.0)
+                ) <= 2.0
+                and float(candidate["start"]) + 3.0 < float(other["start"])
+                and float(candidate["end"]) >= float(candidate.get("payoff_time") or 0.0) + 5.0
+            )
             if (
                 candidate.get("payoff_candidate")
                 and (
@@ -721,7 +828,11 @@ def cheap_filter_and_dedupe(
                         and candidate.get("payoff_boundary_explicit")
                     )
                 )
-                and float(candidate["end"]) > float(other["end"])
+                and (
+                    float(candidate["end"]) > float(other["end"])
+                    or preserves_source_final
+                    or earlier_explicit_opening
+                )
             ):
                 kept[overlap_index] = candidate
                 previous_entry = audit_entries.get(id(other))
@@ -741,8 +852,36 @@ def cheap_filter_and_dedupe(
             ),
             None,
         )
-        if nearby_index is not None:
+        distinct_later_payoff_anchor = bool(
+            nearby_index is not None
+            and candidate.get("payoff_boundary_explicit")
+            and (
+                (
+                    candidate.get("anchor_sentence_id")
+                    == kept[nearby_index].get("anchor_sentence_id")
+                    and float(candidate["end"]) > float(kept[nearby_index]["end"]) + 0.5
+                    and float(candidate.get("payoff_time") or 0.0)
+                    > float(kept[nearby_index].get("payoff_time") or 0.0)
+                )
+                or (
+                    candidate.get("anchor_sentence_id")
+                    != kept[nearby_index].get("anchor_sentence_id")
+                    and float(candidate.get("payoff_time") or 0.0)
+                    > float(kept[nearby_index].get("payoff_time") or 0.0) + 8.0
+                )
+            )
+        )
+        if nearby_index is not None and not distinct_later_payoff_anchor:
             record(candidate, ["NEARBY_SIMILAR"], "rejected")
+            continue
+        if nearby_index is not None and distinct_later_payoff_anchor:
+            replaced = kept[nearby_index]
+            kept[nearby_index] = candidate
+            previous_entry = audit_entries.get(id(replaced))
+            if previous_entry is not None:
+                previous_entry["status"] = "rejected"
+                previous_entry["rejection_reasons"] = ["LATER_PAYOFF_REPLACED"]
+            record(candidate, [], "kept")
             continue
         bucket = int(float(candidate["start"]) // 60)
         if bucket_counts.get(bucket, 0) >= MAX_CANDIDATES_PER_TIME_BUCKET:
@@ -752,15 +891,30 @@ def cheap_filter_and_dedupe(
                 if int(float(other["start"]) // 60) == bucket
             ]
             strong_new_topic = float(candidate.get("start_topic_boundary") or 0.0) >= TOPIC_BOUNDARY_THRESHOLD
+            later_explicit_payoff_anchor = bool(candidate.get("payoff_boundary_explicit"))
             replaceable = [
                 pair for pair in same_bucket
                 if (
                     not pair[1].get("payoff_candidate")
                     or float(candidate.get("start_topic_boundary") or 0.0)
                     > float(pair[1].get("start_topic_boundary") or 0.0)
+                    or (
+                        later_explicit_payoff_anchor
+                        and candidate.get("anchor_sentence_id")
+                        != pair[1].get("anchor_sentence_id")
+                        and float(candidate.get("payoff_time") or 0.0)
+                        > float(pair[1].get("payoff_time") or 0.0) + 8.0
+                    )
+                    or (
+                        candidate.get("source_final_boundary")
+                        and candidate.get("payoff_boundary_explicit")
+                        and float(candidate["end"]) > float(pair[1]["end"]) + 0.5
+                        and float(candidate.get("payoff_time") or 0.0)
+                        >= float(pair[1].get("payoff_time") or 0.0)
+                    )
                 )
             ]
-            if strong_new_topic and replaceable:
+            if (strong_new_topic or later_explicit_payoff_anchor) and replaceable:
                 replace_index, replaced = min(
                     replaceable, key=lambda pair: _candidate_quality_key(pair[1])
                 )
@@ -826,13 +980,40 @@ def cheap_filter_and_dedupe(
         ),
         reverse=True,
     ):
+        def is_distinct_later_payoff_anchor(
+            current: dict[str, Any], other: dict[str, Any]
+        ) -> bool:
+            return bool(
+                current.get("payoff_boundary_explicit")
+                and (
+                    (
+                        current.get("anchor_sentence_id") == other.get("anchor_sentence_id")
+                        and float(current["end"]) > float(other["end"]) + 0.5
+                        and float(current.get("payoff_time") or 0.0)
+                        > float(other.get("payoff_time") or 0.0)
+                    )
+                    or (
+                        current.get("anchor_sentence_id") != other.get("anchor_sentence_id")
+                        and float(current.get("payoff_time") or 0.0)
+                        > float(other.get("payoff_time") or 0.0) + 8.0
+                    )
+                )
+                and float(current["start"]) - float(other["start"]) <= 60.0
+            )
+
         related = [
             other
             for other in shortlist
             if (
                 float(candidate["start"]) >= float(other["start"]) - 2.0
-                and float(candidate["start"]) - float(other["start"]) <= 30.0
-                and _iou(candidate, other) >= 0.15
+                and (
+                    float(candidate["start"]) - float(other["start"]) <= 30.0
+                    or is_distinct_later_payoff_anchor(candidate, other)
+                )
+                and (
+                    _iou(candidate, other) >= 0.15
+                    or is_distinct_later_payoff_anchor(candidate, other)
+                )
                 and (
                     _story_similarity(candidate, other) >= 0.6
                     or (
@@ -878,6 +1059,11 @@ def cheap_filter_and_dedupe(
                 and candidate.get("anchor_sentence_id") == selected.get("anchor_sentence_id")
                 and abs(float(candidate.get("payoff_time") or 0.0) - selected_payoff) <= 2.0
                 and int(float(candidate["start"]) // 60) == int(float(selected["start"]) // 60)
+                and not (
+                    selected.get("source_final_boundary")
+                    and selected.get("payoff_boundary_explicit")
+                    and not candidate.get("source_final_boundary")
+                )
                 and (
                     float(candidate["start"]) < float(selected["start"]) - 3.0
                     or float(candidate["end"]) > float(selected["end"]) + 8.0
@@ -967,6 +1153,192 @@ def cheap_filter_and_dedupe(
             selected_ids.add(id(coverage_candidate))
             selected_bucket_counts[replaced_bucket] -= 1
             selected_bucket_counts[bucket] = selected_bucket_counts.get(bucket, 0) + 1
+    final_boundary_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.get("source_final_boundary")
+        and candidate.get("payoff_boundary_explicit")
+        and candidate.get("syntactic_complete")
+        and candidate.get("central_premise")
+        and len(candidate.get("sentence_ids") or []) >= 2
+        and candidate.get("editorial_signal")
+        and not candidate.get("context_dependency", False)
+    ]
+    if shortlist and final_boundary_candidates:
+        final_boundary_candidate = min(
+            final_boundary_candidates,
+            key=lambda item: (
+                -float(item["end"]) + float(item["start"]),
+                float(item["start"]),
+            ),
+        )
+        if id(final_boundary_candidate) not in selected_ids and not any(
+            item.get("source_final_boundary") and item.get("payoff_boundary_explicit")
+            for item in shortlist
+        ):
+            replaceable = [
+                item
+                for item in shortlist
+                if id(item) not in protected_ids
+                and not (
+                    item.get("source_final_boundary")
+                    and item.get("payoff_boundary_explicit")
+                )
+            ]
+            if replaceable:
+                replaced = min(replaceable, key=_candidate_quality_key)
+                shortlist[shortlist.index(replaced)] = final_boundary_candidate
+                selected_ids.remove(id(replaced))
+                selected_ids.add(id(final_boundary_candidate))
+                previous_entry = audit_entries.get(id(replaced))
+                if previous_entry is not None:
+                    previous_entry["status"] = "rejected"
+                    previous_entry["rejection_reasons"] = ["FINAL_BOUNDARY_REPLACED"]
+                candidate_entry = audit_entries.get(id(final_boundary_candidate))
+                if candidate_entry is not None:
+                    candidate_entry["status"] = "kept"
+                    candidate_entry["rejection_reasons"] = []
+    def _payoff_opening_distance(candidate: dict[str, Any]) -> float:
+        boundary = float(candidate.get("start_topic_boundary") or 0.0)
+        hook = float(candidate.get("hook_strength") or 0.0)
+        target_offset = 22.0 if boundary >= 0.6 or hook >= 0.75 else 20.0
+        return abs(
+            float(candidate["start"])
+            - (float(candidate.get("payoff_time") or 0.0) - target_offset)
+        )
+
+    explicit_payoff_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.get("payoff_boundary_explicit")
+        and (
+            float(candidate.get("start_topic_boundary") or 0.0) >= TOPIC_BOUNDARY_THRESHOLD
+            or (
+                float(candidate.get("hook_strength") or 0.0) >= 0.75
+                and float(candidate["end"]) - float(candidate["start"]) <= 35.0
+            )
+        )
+        and candidate.get("syntactic_complete")
+        and candidate.get("central_premise")
+        and len(candidate.get("sentence_ids") or []) >= 2
+        and candidate.get("editorial_signal")
+        and not candidate.get("context_dependency", False)
+    ]
+    payoff_groups: dict[int, list[dict[str, Any]]] = {}
+    for candidate in explicit_payoff_candidates:
+        payoff_key = round(float(candidate.get("payoff_time") or 0.0) / 2.0)
+        payoff_groups.setdefault(payoff_key, []).append(candidate)
+    recovered_payoffs = 0
+    max_recovered_payoffs = max(1, min(8, len(shortlist) // 3)) if shortlist else 0
+    for group in sorted(
+        payoff_groups.values(),
+        key=lambda items: max(
+            (
+                bool(item.get("source_final_boundary")),
+                float(item.get("start_topic_boundary") or 0.0),
+                float(item.get("payoff_time") or 0.0),
+            )
+            for item in items
+        ),
+        reverse=True,
+    ):
+        coverage_candidate = max(
+            group,
+            key=lambda item: (
+                bool(item.get("source_final_boundary")),
+                (
+                    float(item["end"]) - float(item["start"])
+                    if item.get("source_final_boundary")
+                    else -_payoff_opening_distance(item)
+                ),
+                float(item.get("start_topic_boundary") or 0.0),
+                float(item["end"]) - float(item["start"]),
+                -float(item["start"]),
+            ),
+        )
+        same_payoff_selected = [
+            item
+            for item in shortlist
+            if item.get("payoff_boundary_explicit")
+            and abs(
+                float(item.get("payoff_time") or 0.0)
+                - float(group[0].get("payoff_time") or 0.0)
+            ) <= 2.0
+        ]
+        if same_payoff_selected:
+            current = max(
+                same_payoff_selected,
+                key=lambda item: (
+                    bool(item.get("source_final_boundary")),
+                    (
+                        float(item["end"]) - float(item["start"])
+                        if item.get("source_final_boundary")
+                        else -_payoff_opening_distance(item)
+                    ),
+                    float(item.get("start_topic_boundary") or 0.0),
+                    float(item["end"]) - float(item["start"]),
+                    -float(item["start"]),
+                ),
+            )
+            if id(coverage_candidate) in selected_ids:
+                continue
+            current_key = (
+                bool(current.get("source_final_boundary")),
+                -_payoff_opening_distance(current),
+                float(current.get("start_topic_boundary") or 0.0),
+                float(current["end"]) - float(current["start"]),
+                -float(current["start"]),
+            )
+            candidate_key = (
+                bool(coverage_candidate.get("source_final_boundary")),
+                -_payoff_opening_distance(coverage_candidate),
+                float(coverage_candidate.get("start_topic_boundary") or 0.0),
+                float(coverage_candidate["end"]) - float(coverage_candidate["start"]),
+                -float(coverage_candidate["start"]),
+            )
+            if candidate_key <= current_key:
+                continue
+            shortlist[shortlist.index(current)] = coverage_candidate
+            selected_ids.remove(id(current))
+            selected_ids.add(id(coverage_candidate))
+            if id(current) in protected_ids:
+                protected_ids.remove(id(current))
+                protected_ids.add(id(coverage_candidate))
+            recovered_payoffs += 1
+            previous_entry = audit_entries.get(id(current))
+            if previous_entry is not None:
+                previous_entry["status"] = "rejected"
+                previous_entry["rejection_reasons"] = ["EXPLICIT_PAYOFF_REPLACED"]
+            candidate_entry = audit_entries.get(id(coverage_candidate))
+            if candidate_entry is not None:
+                candidate_entry["status"] = "kept"
+                candidate_entry["rejection_reasons"] = []
+            continue
+        if recovered_payoffs >= max_recovered_payoffs:
+            break
+        if id(coverage_candidate) in selected_ids:
+            continue
+        replaceable = [
+            item
+            for item in shortlist
+            if id(item) not in protected_ids
+            and not item.get("payoff_boundary_explicit")
+        ]
+        if not replaceable:
+            break
+        replaced = min(replaceable, key=_candidate_quality_key)
+        shortlist[shortlist.index(replaced)] = coverage_candidate
+        selected_ids.remove(id(replaced))
+        selected_ids.add(id(coverage_candidate))
+        recovered_payoffs += 1
+        previous_entry = audit_entries.get(id(replaced))
+        if previous_entry is not None:
+            previous_entry["status"] = "rejected"
+            previous_entry["rejection_reasons"] = ["EXPLICIT_PAYOFF_REPLACED"]
+        candidate_entry = audit_entries.get(id(coverage_candidate))
+        if candidate_entry is not None:
+            candidate_entry["status"] = "kept"
+            candidate_entry["rejection_reasons"] = []
     for candidate in kept:
         if id(candidate) in selected_ids:
             continue
@@ -982,17 +1354,29 @@ def _candidate_start_indices(
     anchor_index: int,
     *,
     max_lookback_seconds: float = 35.0,
+    payoff_context: bool = False,
 ) -> list[int]:
     """Find bounded setup starts without relying on sentence counts."""
     if not units or anchor_index <= 0 or anchor_index >= len(units):
         return []
     anchor_start = float(units[anchor_index].start)
     earliest_start = anchor_start - max(0.0, float(max_lookback_seconds))
+    lookback_units = 6 if payoff_context else 3
     indices = [
         index
-        for index in range(max(0, anchor_index - 3), anchor_index)
+        for index in range(max(0, anchor_index - lookback_units), anchor_index)
         if float(units[index].start) >= earliest_start
     ]
+    if payoff_context:
+        explicit_context = [
+            index
+            for index in range(anchor_index)
+            if anchor_index > index
+            and float(units[anchor_index].start) - float(units[index].start) <= 15.0
+            and _has_explicit_outcome(units[index].text)
+        ]
+        if explicit_context:
+            indices.append(max(explicit_context))
     first_in_window = next(
         (
             index for index in range(anchor_index)
@@ -1062,7 +1446,18 @@ def synthesize(
             index for index in complete_ends
             if units[index].audio_events or set(_TOKEN_RE.findall(units[index].text.lower())) & _REACTION_WORDS
         ]))
-        start_indices = [*(_candidate_start_indices(units, anchor_index)), anchor_index]
+        payoff_context = bool(
+            payoff_ends
+            and any(
+                _has_explicit_outcome(units[index].text)
+                and anchor.start - units[index].start <= 15.0
+                for index in range(max(0, anchor_index - 6), anchor_index)
+            )
+        )
+        start_indices = [
+            *(_candidate_start_indices(units, anchor_index, payoff_context=payoff_context)),
+            anchor_index,
+        ]
         for start_offset, start_index in enumerate(start_indices):
             ordered_end_candidates = sorted(
                 end_candidates,

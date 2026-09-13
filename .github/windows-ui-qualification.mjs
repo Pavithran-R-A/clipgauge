@@ -97,7 +97,7 @@ async function invokeVaultScope(page) {
   })
 }
 
-async function verifyNativeBridgeContract(page, outputDir, state, suffix, vaultScope) {
+async function verifyNativeBridgeContract(page, outputDir, state, suffix, vaultScope, allowProductionScope = false) {
   const evidence = await page.evaluate(async (expectedScope) => {
     const tauri = globalThis.__TAURI__
     const internals = globalThis.__TAURI_INTERNALS__
@@ -140,7 +140,8 @@ async function verifyNativeBridgeContract(page, outputDir, state, suffix, vaultS
       credential_values_exposed: false,
     }
   }, vaultScope)
-  if (evidence.vault_scope !== 'qualification') throw new Error(`native bridge qualification scope mismatch: ${String(evidence.vault_scope)}`)
+  if (!allowProductionScope && evidence.vault_scope !== 'qualification') throw new Error(`native bridge qualification scope mismatch: ${String(evidence.vault_scope)}`)
+  if (allowProductionScope && evidence.vault_scope !== 'production') throw new Error(`native bridge production scope mismatch: ${String(evidence.vault_scope)}`)
   if (!evidence.facts.tauri_core_invoke && !evidence.facts.internals_invoke) throw new Error('native bridge qualification invoke was unavailable')
   const schema = evidence.authorized_operation.payload_schema
   if (schema.type !== 'object' || schema.provider_keys_type !== 'object' || !schema.provider_key_values_are_boolean) throw new Error('native bridge setup-state payload schema was unsafe')
@@ -479,6 +480,39 @@ async function geminiSaved(page) {
   await capture(`gemini-saved-unverified-${suffix}`)
 }
 
+async function groqModelSwitch(page, restart = false) {
+  await clickNav(page, 'AI Providers')
+  await clickProvider(page, 'Groq')
+  const model = page.locator('#provider-model')
+  await visible(model, 'Groq model selector')
+  const expectedModel = 'openai/gpt-oss-120b'
+  if (restart) {
+    const selected = await model.inputValue()
+    if (selected !== expectedModel) throw new Error(`Groq model selection did not persist after restart: ${selected}`)
+    await capture(`groq-model-switch-restart-${suffix}`)
+    writeFileSync(`${outputDir}/groq-model-switch-${suffix}.json`, `${JSON.stringify({ provider: 'groq', selected_model: selected, restart_persisted: true, credential_values_exposed: false }, null, 2)}\n`)
+    return
+  }
+  const body = await page.locator('body').innerText()
+  if (!body.includes('API key saved in your operating-system credential vault.')) throw new Error('Groq saved credential state was not shown')
+  await page.getByRole('button', { name: 'Refresh models', exact: true }).click()
+  await page.waitForFunction((modelId) => [...document.querySelectorAll('#provider-model option')].some((option) => option.value === modelId), expectedModel, { timeout: 120_000 })
+  const discoveredCount = await page.locator('#provider-model option').count()
+  await model.selectOption(expectedModel)
+  if (await model.inputValue() !== expectedModel) throw new Error('Groq model selector rejected the selected model')
+  await page.getByRole('button', { name: 'Test connection', exact: true }).click()
+  await text(page, 'Connection ready', 'Groq selected-model connection state')
+  await capture(`groq-model-switch-${suffix}`)
+  await page.getByRole('button', { name: 'Use for next clip', exact: true }).click()
+  await visible(page.getByRole('heading', { name: 'Create clips', exact: true }), 'Groq provider applied to creator')
+  await clickNav(page, 'AI Providers')
+  await clickProvider(page, 'Groq')
+  const persisted = page.locator('#provider-model')
+  await visible(persisted, 'persisted Groq model selector')
+  if (await persisted.inputValue() !== expectedModel) throw new Error('Groq model selection did not persist after provider navigation')
+  writeFileSync(`${outputDir}/groq-model-switch-${suffix}.json`, `${JSON.stringify({ provider: 'groq', discovered_model_count: discoveredCount - 1, selected_model: expectedModel, connection_ready: true, navigation_persisted: true, credential_values_exposed: false }, null, 2)}\n`)
+}
+
 function nativeWindowRecords() {
   const raw = execFileSync('powershell.exe', ['-NoProfile', '-File', windowProbe, '-ProcessId', pid, '-AllVisible'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
   if (!raw) return []
@@ -653,8 +687,9 @@ try {
   }
   const vaultScope = await invokeVaultScope(page)
   const productionSetupOnly = state === 'setup' && process.env.CLIPGAUGE_QA_ALLOW_PRODUCTION_SCOPE === '1'
-  if (vaultScope !== 'qualification' && !productionSetupOnly) throw new Error(`qualification build required, got ${String(vaultScope)}`)
-  if (state === 'setup') await verifyNativeBridgeContract(page, outputDir, state, suffix, vaultScope)
+  const productionProviderTest = state.startsWith('groq-model-switch') && process.env.CLIPGAUGE_QA_ALLOW_PRODUCTION_PROVIDER === '1'
+  if (vaultScope !== 'qualification' && !productionSetupOnly && !productionProviderTest) throw new Error(`qualification build required, got ${String(vaultScope)}`)
+  if (state === 'setup') await verifyNativeBridgeContract(page, outputDir, state, suffix, vaultScope, productionSetupOnly)
   await setLogicalSize(page)
   const displayFacts = await collectDisplayFacts(page)
   writeFileSync(`${outputDir}/display-${state}-${suffix}.json`, `${JSON.stringify(displayFacts, null, 2)}\n`)
@@ -669,6 +704,8 @@ try {
   else if (state === 'openrouter-saved') await openRouterSaved(page)
   else if (state === 'openrouter-connected') await openRouterConnected(page)
   else if (state === 'gemini-saved-unverified') await geminiSaved(page)
+  else if (state === 'groq-model-switch') await groqModelSwitch(page)
+  else if (state === 'groq-model-switch-restart') await groqModelSwitch(page, true)
   else if (state === 'credential-removal-confirmation') await removalConfirmation(page)
   else if (state === 'openrouter-remove') await verifyOpenRouterRemoved(page)
   else throw new Error(`unknown state: ${state}`)
