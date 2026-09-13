@@ -66,7 +66,7 @@ def test_successful_startup_records_ownership_before_return(provider_ready, fake
     responses = iter([
         {"running": False, "healthy": False, "version": None},
         {"running": False, "healthy": False, "version": None},
-        {"running": True, "healthy": True, "version": "1.3.2"},
+        {"running": True, "healthy": True, "version": "2.0.0"},
     ])
     monkeypatch.setattr(supervisor, "health", lambda: next(responses))
 
@@ -75,6 +75,28 @@ def test_successful_startup_records_ownership_before_return(provider_ready, fake
     assert endpoint == "http://127.0.0.1:4416"
     assert supervisor.handle is not None
     assert supervisor.handle.process is fake_popen[0]
+
+
+def test_provider_starts_on_loopback_addresses_only(provider_ready, fake_popen, monkeypatch):
+    captured = {}
+    responses = iter([
+        {"running": False, "healthy": False, "version": None},
+        {"running": True, "healthy": True, "version": "2.0.0", "address_family": "ipv4"},
+    ])
+
+    def popen(*args, **kwargs):
+        captured["command"] = args[0]
+        return FakeProcess()
+
+    monkeypatch.setattr(youtube_compat.subprocess, "Popen", popen)
+    supervisor = youtube_compat.ProviderSupervisor()
+    monkeypatch.setattr(supervisor, "health", lambda: next(responses))
+
+    supervisor.start()
+
+    command = captured["command"]
+    assert command[command.index("--host") + 1] == "127.0.0.1,::1"
+    supervisor.stop()
 
 
 def test_provider_exits_before_health_is_classified(provider_ready, fake_popen, monkeypatch):
@@ -146,9 +168,9 @@ def test_repeated_start_stop_start_succeeds(provider_ready, fake_popen, monkeypa
     supervisor = youtube_compat.ProviderSupervisor()
     responses = iter([
         {"running": False, "healthy": False, "version": None},
-        {"running": True, "healthy": True, "version": "1.3.2"},
+        {"running": True, "healthy": True, "version": "2.0.0"},
         {"running": False, "healthy": False, "version": None},
-        {"running": True, "healthy": True, "version": "1.3.2"},
+        {"running": True, "healthy": True, "version": "2.0.0"},
     ])
     monkeypatch.setattr(supervisor, "health", lambda: next(responses))
 
@@ -165,7 +187,7 @@ def test_repeated_start_stop_start_succeeds(provider_ready, fake_popen, monkeypa
 
 def test_healthy_listener_with_expected_version_is_reused(provider_ready, fake_popen, monkeypatch):
     supervisor = youtube_compat.ProviderSupervisor()
-    monkeypatch.setattr(supervisor, "health", lambda: {"running": True, "healthy": True, "version": "1.3.2", "address_family": "ipv4"})
+    monkeypatch.setattr(supervisor, "health", lambda: {"running": True, "healthy": True, "version": "2.0.0", "address_family": "ipv4"})
 
     assert supervisor.start() == "http://127.0.0.1:4416"
     assert fake_popen == []
@@ -199,7 +221,7 @@ def test_health_accepts_ipv6_when_ipv4_is_unreachable(monkeypatch):
 
         @staticmethod
         def json():
-            return {"version": "1.3.2", "server_uptime": 1.0}
+            return {"version": "2.0.0", "server_uptime": 1.0}
 
     def get(url, **kwargs):
         calls.append(url)
@@ -221,7 +243,7 @@ def test_health_accepts_ipv4_when_ipv6_is_unreachable(monkeypatch):
 
         @staticmethod
         def json():
-            return {"version": "1.3.2", "server_uptime": 1.0}
+            return {"version": "2.0.0", "server_uptime": 1.0}
 
     def get(url, **kwargs):
         if "[::1]" in url:
@@ -248,7 +270,7 @@ def test_reentrant_start_is_serialized(provider_ready, fake_popen, monkeypatch):
             entered.set()
             release.wait(timeout=2)
             return {"running": False, "healthy": False, "version": None}
-        return {"running": True, "healthy": True, "version": "1.3.2"}
+        return {"running": True, "healthy": True, "version": "2.0.0"}
 
     monkeypatch.setattr(supervisor, "health", health)
     errors = []
@@ -276,7 +298,7 @@ def test_cancellation_cleanup_uses_owned_handle(provider_ready, fake_popen, monk
     supervisor = youtube_compat.ProviderSupervisor()
     responses = iter([
         {"running": False, "healthy": False, "version": None},
-        {"running": True, "healthy": True, "version": "1.3.2"},
+        {"running": True, "healthy": True, "version": "2.0.0"},
     ])
     monkeypatch.setattr(supervisor, "health", lambda: next(responses))
 
@@ -293,7 +315,7 @@ def test_provider_output_is_suppressed_after_spawn(provider_ready, monkeypatch):
     process = FakeProcess()
     responses = iter([
         {"running": False, "healthy": False, "version": None},
-        {"running": True, "healthy": True, "version": "1.3.2", "address_family": "ipv4"},
+        {"running": True, "healthy": True, "version": "2.0.0", "address_family": "ipv4"},
     ])
 
     def popen(*args, **kwargs):
@@ -338,7 +360,7 @@ def test_ytdlp_enables_verified_managed_node_for_youtube(monkeypatch):
             return {"ok": True}
 
     managed_node = Path(r"C:\clipgauge\runtimes\youtube\node.exe")
-    managed_plugin = Path(r"C:\clipgauge\runtimes\youtube\bgutil\1.3.2\plugin")
+    managed_plugin = Path(r"C:\clipgauge\runtimes\youtube\bgutil\2.0.0\plugin")
     monkeypatch.setattr(ytdlp, "_provider_supervisor", StubSupervisor())
     monkeypatch.setattr(youtube_compat, "node_path", lambda: managed_node)
     monkeypatch.setattr(youtube_compat, "plugin_dir", lambda: managed_plugin)

@@ -2,6 +2,20 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.17] - 2026-09-13
+
+ClipGauge v0.5.17 stabilizes real-device processing and completed-result recovery.
+
+- Added ClipGauge-owned normalized-WAV loading for managed CPU and CUDA ASR paths.
+- Added bounded, typed audio validation without PATH-dependent decoding.
+- Repaired partial YouTube provider installs atomically and pinned bgutil 2.0.0.
+- Added provider build postconditions, loopback health checks, and idempotent repair.
+- Restored bait-adjustment reasons and safe historical result normalization.
+- Added Review-only retry after completed-result loading failures.
+- Froze terminal elapsed time and cleared stale runtime notices.
+- Clarified local, hybrid, and cloud scoring provider/model boundaries.
+- Recorded physical i5-8265U / 8 GB validation as deferred post-release testing.
+
 ## [0.5.16] - 2026-09-09
 
 ClipGauge v0.5.16 adds product-intelligence controls and qualification safeguards.

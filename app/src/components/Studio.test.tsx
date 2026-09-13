@@ -7,6 +7,92 @@ import Studio from './Studio'
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }))
 
 describe('Studio output controls', () => {
+  it('disables cloud scoring until a cloud provider is configured', () => {
+    render(
+      <Studio
+        jobs={[]}
+        running={false}
+        runState="IDLE"
+        cancelling={false}
+        startedAt={null}
+        stages={{}}
+        error={null}
+        errorCode={null}
+        notice={null}
+        cloudConfigured={false}
+        onRun={vi.fn()}
+        onCancel={vi.fn()}
+        onContinueCpu={vi.fn()}
+        onNavigate={vi.fn()}
+        selectedProvider="clipgauge-local"
+        onSelectProvider={vi.fn()}
+        onOpenJob={vi.fn()}
+        onResume={vi.fn()}
+      />
+    )
+
+    expect(screen.getByRole('button', { name: /Balanced \/ Hybrid/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /Best Quality/i })).toBeDisabled()
+    expect(screen.getByText('Configure a cloud provider and model in AI Providers before choosing Hybrid or Best Quality.')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('ClipGauge Local')
+  })
+
+  it('shows the selected cloud provider and model before creation', async () => {
+    render(
+      <Studio
+        jobs={[]}
+        running={false}
+        runState="IDLE"
+        cancelling={false}
+        startedAt={null}
+        stages={{}}
+        error={null}
+        errorCode={null}
+        notice={null}
+        cloudConfigured
+        onRun={vi.fn()}
+        onCancel={vi.fn()}
+        onContinueCpu={vi.fn()}
+        onNavigate={vi.fn()}
+        selectedProvider="openrouter"
+        onSelectProvider={vi.fn()}
+        onOpenJob={vi.fn()}
+        onResume={vi.fn()}
+      />
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: /Balanced \/ Hybrid/i }))
+
+    expect(screen.getAllByText('OpenRouter Free - openrouter/free')).toHaveLength(2)
+  })
+
+  it.each(['SUCCEEDED', 'FAILED', 'CANCELLED'] as const)('keeps final elapsed time for %s runs', (runState) => {
+    render(
+      <Studio
+        jobs={[]}
+        running={false}
+        runState={runState}
+        cancelling={false}
+        startedAt={null}
+        elapsedSeconds={83}
+        stages={{}}
+        error={null}
+        errorCode={null}
+        notice={null}
+        onRun={vi.fn()}
+        onCancel={vi.fn()}
+        onContinueCpu={vi.fn()}
+        onNavigate={vi.fn()}
+        selectedProvider="clipgauge-local"
+        onSelectProvider={vi.fn()}
+        onOpenJob={vi.fn()}
+        onResume={vi.fn()}
+      />
+    )
+
+    expect(screen.getByText('1:23 elapsed')).toBeInTheDocument()
+  })
+
   it('discloses the cloud-scoring data boundary before a run', async () => {
     render(
       <Studio

@@ -382,11 +382,12 @@ def cross_validate(
     bait = bait_verification["verified_bait"]
     if bait_verification["model_reported_bait"] or bait_verification["rejected_bait"]:
         adjustments.append(
-            {
-                "rule": "bait_verification",
-                "factor": 1.0,
-                **bait_verification,
-            }
+                {
+                    "rule": "bait_verification",
+                    "factor": 1.0,
+                    "reason": "Bait phrases were checked against the candidate transcript.",
+                    **bait_verification,
+                }
         )
     if bait:
         factor = max(0.6, BAIT_PENALTY ** len(bait))

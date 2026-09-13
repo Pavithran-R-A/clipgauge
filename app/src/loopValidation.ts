@@ -27,7 +27,11 @@ function isMetrics(value: unknown): boolean {
 }
 
 function isAdjustment(value: unknown): boolean {
-  return isRecord(value) && typeof value.rule === 'string' && isNumber(value.factor) && typeof value.reason === 'string'
+  if (!isRecord(value) || typeof value.rule !== 'string' || typeof value.reason !== 'string') return false
+  const hasFactor = 'factor' in value
+  const hasBonus = 'bonus' in value
+  return hasFactor !== hasBonus
+    && (hasFactor ? isNumber(value.factor) : isNumber(value.bonus))
 }
 
 function isLinked(value: unknown): boolean {

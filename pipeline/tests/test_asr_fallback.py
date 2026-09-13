@@ -1,12 +1,21 @@
+import sys
+import wave
 from types import SimpleNamespace
 
 import pytest
-import sys
 
 from clipgauge_pipeline.asr import stage as asr_stage
 from clipgauge_pipeline.asr import probe as asr_probe
 from clipgauge_pipeline.asr.stage import _transcribe_with_fallback
 from clipgauge_pipeline.jobs.queue import StageError
+
+
+def _write_valid_analysis_wav(path):
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(16_000)
+        handle.writeframes(b"\x00\x00" * 16_000)
 
 
 def test_cuda_probe_evidence_write_cleans_failed_temporary(monkeypatch, tmp_path):
@@ -161,7 +170,7 @@ def test_cpu_asr_stage_rejects_unverified_compute_types(monkeypatch, tmp_path):
 
 def test_tamil_asr_uses_local_fallback_and_never_loads_english_alignment(monkeypatch, tmp_path):
     audio_path = tmp_path / "audio.wav"
-    audio_path.write_bytes(b"audio")
+    _write_valid_analysis_wav(audio_path)
     events = []
 
     class Torch:
@@ -220,7 +229,7 @@ def test_tamil_asr_uses_local_fallback_and_never_loads_english_alignment(monkeyp
 
 def test_gpu_transcription_uses_cpu_alignment_when_pytorch_cuda_is_unavailable(monkeypatch, tmp_path):
     audio_path = tmp_path / "audio.wav"
-    audio_path.write_bytes(b"audio")
+    _write_valid_analysis_wav(audio_path)
     events = []
 
     class Torch:
@@ -282,7 +291,7 @@ def test_gpu_transcription_uses_cpu_alignment_when_pytorch_cuda_is_unavailable(m
 
 def test_transcription_checkpoint_reuse_skips_model_loading(monkeypatch, tmp_path):
     audio_path = tmp_path / "audio.wav"
-    audio_path.write_bytes(b"audio")
+    _write_valid_analysis_wav(audio_path)
     cached = {
         "identity": asr_stage._transcription_identity(audio_path),
         "result": {"language": "en", "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}]},
@@ -317,3 +326,70 @@ def test_transcription_checkpoint_reuse_skips_model_loading(monkeypatch, tmp_pat
 
     assert result["word_count"] == 1
     assert result["benchmark"]["transcribe_sec"] == 0.0
+
+
+def test_packaged_cpu_asr_does_not_depend_on_path_ffmpeg_for_analysis_wav(monkeypatch, tmp_path):
+    audio_path = tmp_path / "audio16k.wav"
+    _write_valid_analysis_wav(audio_path)
+
+    class Torch:
+        class backends:
+            class mps:
+                @staticmethod
+                def is_available():
+                    return False
+
+    class Model:
+        def transcribe(self, audio, batch_size):
+            assert batch_size == 1
+            assert getattr(audio, "dtype", None) is not None
+            return {"language": "en", "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}]}
+
+    class WhisperX:
+        @staticmethod
+        def load_model(*_args, **_kwargs):
+            return Model()
+
+        @staticmethod
+        def load_audio(_path):
+            raise FileNotFoundError("ffmpeg was not found on PATH")
+
+        @staticmethod
+        def load_align_model(*_args, **_kwargs):
+            return object(), object()
+
+        @staticmethod
+        def align(segments, *_args, **_kwargs):
+            return {"segments": [{**segments[0], "words": [{"word": "hello", "start": 0.0, "end": 1.0}]}]}
+
+    class Context:
+        prior = {"ingest": {"audio_path": str(audio_path), "probe": {"duration_sec": 1.0}}}
+        settings = SimpleNamespace(allow_cpu_asr_fallback=False)
+
+        def emit(self, _fraction, _message):
+            pass
+
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setitem(sys.modules, "torch", Torch)
+    monkeypatch.setitem(sys.modules, "whisperx", WhisperX)
+    monkeypatch.setattr(asr_stage.managed, "ready", lambda _manager: True)
+    monkeypatch.setattr(asr_stage.managed, "asr_model_path", lambda: tmp_path / "model")
+    monkeypatch.setattr(asr_stage.managed, "alignment_model_dir", lambda: tmp_path / "alignment")
+    monkeypatch.setattr(asr_stage.hardware, "snapshot", lambda _root: {
+        "ram_bytes": 8 * 1024**3,
+        "cpu_ctranslate2": {"verified": True, "compute_types": ["int8"]},
+    })
+    monkeypatch.setattr(asr_stage.hardware, "select_asr_devices", lambda _capabilities: {
+        "transcription_device": "cpu", "transcription_compute_type": "int8", "alignment_device": "cpu",
+        "transcription_batch_size": 1, "transcription_mode": "low-memory",
+    })
+    monkeypatch.setattr(asr_stage.hardware, "cpu_asr_policy", lambda _capabilities: {
+        "batch_size": 1, "compute_type": "int8", "mode": "low-memory",
+    })
+    monkeypatch.setattr(asr_stage.hardware, "asr_readiness", lambda _capabilities: {
+        "state": "CPU FALLBACK", "device": "cpu", "compute_type": "int8", "reason": "cpu",
+    })
+
+    result = asr_stage.AsrStage().run(Context())
+
+    assert result["word_count"] == 1

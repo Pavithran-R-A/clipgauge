@@ -18,6 +18,7 @@ from typing import Any
 from .. import config, hardware
 from ..models import managed
 from .alignment import EXACT, alignment_policy, fallback_word_alignment
+from .audio import load_analysis_audio
 
 
 def _package_version(name: str) -> str:
@@ -64,7 +65,7 @@ def run_cuda_probe(audio_path: Path, evidence_path: Path, *, align: bool) -> dic
     import ctranslate2
     import whisperx
 
-    audio = whisperx.load_audio(str(path))
+    audio = load_analysis_audio(path)
     audio_seconds = float(len(audio)) / 16000.0
     started = time.monotonic()
     model = whisperx.load_model(

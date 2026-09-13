@@ -43,11 +43,9 @@ export interface StageProgress {
   oneTimeDownload?: boolean
 }
 
-export interface Adjustment {
-  rule: string
-  factor: number
-  reason: string
-}
+export type Adjustment =
+  | { rule: string; factor: number; reason: string }
+  | { rule: string; bonus: number; reason: string }
 
 export interface MusicBrief {
   genre: string
@@ -211,7 +209,7 @@ export interface OtherMoment {
   candidate_id?: string | null
   status?: 'OTHER_MOMENT'
   summary?: string
-  story?: string
+  story?: string | number
   reasons?: string[]
   quality?: Record<string, unknown>
 }

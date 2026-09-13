@@ -14,6 +14,7 @@ from ..jobs import queue
 from ..jobs.queue import Stage, StageContext, StageError
 from ..models import managed
 from .alignment import EXACT, alignment_policy, fallback_word_alignment
+from .audio import load_analysis_audio
 
 ASR_MODEL = "large-v3-turbo"
 COMPUTE_TYPE = "int8"
@@ -336,7 +337,7 @@ class AsrStage(Stage):
             transcription_batch_size = int(cached.get("transcription_batch_size") or transcription_batch_size)
             transcription_mode = str(cached.get("transcription_mode") or transcription_mode)
             try:
-                audio = whisperx.load_audio(str(audio_path))
+                audio = load_analysis_audio(audio_path)
             except Exception as exc:
                 raise StageError(
                     "Speech recognition could not read the analysis audio. Retry the job or repair the video.",
@@ -395,7 +396,7 @@ class AsrStage(Stage):
                         details=_asr_details(capabilities, selected_device=selected_device, selected_compute_type=selected_compute_type, actual_device=transcription_device, actual_compute_type=transcription_compute_type, batch_size=transcription_batch_size, mode=transcription_mode, substep="ASR_MODEL_LOAD", exc=exc, fallback_attempts=fallback_attempts, model_file_state=model_file_state, whisperx_version=whisperx_version, started_at=model_started),
                     ) from exc
             try:
-                audio = whisperx.load_audio(str(audio_path))
+                audio = load_analysis_audio(audio_path)
             except Exception as exc:
                 raise StageError(
                     "Speech recognition could not read the analysis audio. Retry the job or repair the video.",

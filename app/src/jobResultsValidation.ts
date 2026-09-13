@@ -19,10 +19,11 @@ function isStringArray(value: unknown): value is string[] {
 }
 
 function isAdjustment(value: unknown): boolean {
-  return isRecord(value)
-    && typeof value.rule === 'string'
-    && isFiniteNumber(value.factor)
-    && typeof value.reason === 'string'
+  if (!isRecord(value) || typeof value.rule !== 'string' || typeof value.reason !== 'string') return false
+  const hasFactor = 'factor' in value
+  const hasBonus = 'bonus' in value
+  return hasFactor !== hasBonus
+    && (hasFactor ? isFiniteNumber(value.factor) : isFiniteNumber(value.bonus))
 }
 
 function isClip(value: unknown): boolean {
@@ -54,7 +55,7 @@ function isBorderlineCandidate(value: unknown): boolean {
     && (value.candidate_id === undefined || value.candidate_id === null || typeof value.candidate_id === 'string')
     && (value.status === undefined || value.status === 'OTHER_MOMENT')
     && (value.summary === undefined || typeof value.summary === 'string')
-    && (value.story === undefined || typeof value.story === 'string')
+    && (value.story === undefined || typeof value.story === 'string' || isFiniteNumber(value.story))
     && (value.quality === undefined || isRecord(value.quality))
 }
 
@@ -83,4 +84,32 @@ export function validateJobResults(value: unknown): value is JobResults {
     if (!isRecord(value.render) || !Array.isArray(value.render.outputs) || !value.render.outputs.every(isRenderOutput)) return false
   }
   return true
+}
+
+const HISTORICAL_BAIT_REASON = 'Historical bait verification was recorded without a reason; transcript verification details were preserved.'
+
+function normalizeAdjustment(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  if (value.rule === 'bait_verification' && value.reason === undefined) {
+    return { ...value, reason: HISTORICAL_BAIT_REASON }
+  }
+  return { ...value }
+}
+
+export function normalizeJobResults(value: unknown): JobResults | null {
+  if (!isRecord(value)) return null
+  const score = value.score
+  const normalized = !isRecord(score) || !Array.isArray(score.clips)
+    ? { ...value }
+    : {
+        ...value,
+        score: {
+          ...score,
+          clips: score.clips.map((clip) => {
+            if (!isRecord(clip) || !Array.isArray(clip.adjustments)) return clip
+            return { ...clip, adjustments: clip.adjustments.map(normalizeAdjustment) }
+          }),
+        },
+      }
+  return validateJobResults(normalized) ? normalized : null
 }

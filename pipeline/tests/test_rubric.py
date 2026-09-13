@@ -112,6 +112,7 @@ def test_verified_viewer_directed_bait_is_recorded():
     verification = next(item for item in adj if item["rule"] == "bait_verification")
     assert verification["model_reported_bait"] == ["subscribe"]
     assert verification["verified_bait"] == ["subscribe"]
+    assert verification["reason"] == "Bait phrases were checked against the candidate transcript."
 
 
 def test_t1_prompt_excludes_normal_dialogue_from_bait_field():

@@ -43,6 +43,14 @@ function fmtTime(t: number): string {
   return `${m}:${String(s).padStart(2, '0')}`
 }
 
+function adjustmentLabel(adj: Clip['adjustments'][number]): string {
+  return 'factor' in adj ? `×${adj.factor}` : `${adj.bonus >= 0 ? '+' : ''}${adj.bonus}`
+}
+
+function adjustmentDirection(adj: Clip['adjustments'][number]): 'up' | 'down' {
+  return 'factor' in adj ? (adj.factor >= 1 ? 'up' : 'down') : (adj.bonus >= 0 ? 'up' : 'down')
+}
+
 function qualityTier(score: number): string {
   if (score >= 85) return 'Exceptional'
   if (score >= 70) return 'Recommended'
@@ -365,8 +373,8 @@ export default function Review({ results, onBack, onRestyle }: Props) {
                 <div className="ledger">
                   {pair.clip.adjustments.map((adj, i) => (
                     <div className="ledger-row" key={i}>
-                      <span className={`ledger-factor mono ${adj.factor >= 1 ? 'up' : 'down'}`}>
-                        ×{adj.factor}
+                      <span className={`ledger-factor mono ${adjustmentDirection(adj)}`}>
+                        {adjustmentLabel(adj)}
                       </span>
                       <div>
                         <span className="ledger-rule">{RULE_LABELS[adj.rule] ?? adj.rule}</span>
