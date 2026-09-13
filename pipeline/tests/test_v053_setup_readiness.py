@@ -327,6 +327,25 @@ def test_youtube_readiness_distinguishes_dependencies_from_public_download(monke
     assert result['dependency_state'] == 'DEPENDENCIES_READY'
 
 
+def test_youtube_readiness_rejects_public_verification_from_old_provider(monkeypatch, tmp_path):
+    monkeypatch.setattr(youtube_compat.config, 'home_dir', lambda: tmp_path)
+    monkeypatch.setattr(youtube_compat, '_yt_dlp_ready', lambda: True)
+    monkeypatch.setattr(youtube_compat.DownloadManager, 'inventory', lambda self, assets: [
+        {'asset_id': asset.asset_id, 'installed': True, 'status': 'ready'} for asset in assets
+    ])
+    monkeypatch.setattr(youtube_compat, '_server_ready', lambda: True)
+    monkeypatch.setattr(youtube_compat, '_provider_plugin_ready', lambda: True)
+    (tmp_path / youtube_compat.PUBLIC_COMPATIBILITY_FILENAME).write_text(
+        '{"verified": true, "provider_version": "1.3.2", "yt_dlp_version": "2026.08.19", "method": "mweb"}',
+        encoding='utf-8',
+    )
+
+    result = youtube_compat.readiness()
+
+    assert result['state'] == 'DEPENDENCIES_READY'
+    assert result['public_download_verified'] is False
+
+
 def test_public_compatibility_success_is_metadata_only_and_secret_free(tmp_path, monkeypatch):
     monkeypatch.setattr(youtube_compat.config, 'home_dir', lambda: tmp_path)
     youtube_compat.record_public_compatibility_success(method='bgutil-http', ytdlp_version='2026.07.04')

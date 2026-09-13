@@ -19,10 +19,11 @@ function isStringArray(value: unknown): value is string[] {
 }
 
 function isAdjustment(value: unknown): boolean {
-  return isRecord(value)
-    && typeof value.rule === 'string'
-    && isFiniteNumber(value.factor)
-    && typeof value.reason === 'string'
+  if (!isRecord(value) || typeof value.rule !== 'string' || typeof value.reason !== 'string') return false
+  const hasFactor = 'factor' in value
+  const hasBonus = 'bonus' in value
+  return hasFactor !== hasBonus
+    && (hasFactor ? isFiniteNumber(value.factor) : isFiniteNumber(value.bonus))
 }
 
 function isClip(value: unknown): boolean {
@@ -54,7 +55,7 @@ function isBorderlineCandidate(value: unknown): boolean {
     && (value.candidate_id === undefined || value.candidate_id === null || typeof value.candidate_id === 'string')
     && (value.status === undefined || value.status === 'OTHER_MOMENT')
     && (value.summary === undefined || typeof value.summary === 'string')
-    && (value.story === undefined || typeof value.story === 'string')
+    && (value.story === undefined || typeof value.story === 'string' || isFiniteNumber(value.story))
     && (value.quality === undefined || isRecord(value.quality))
 }
 

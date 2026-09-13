@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -331,7 +332,8 @@ def public_compatibility_status() -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {"verified": False}
     allowed = {"verified_at", "yt_dlp_version", "provider_version", "method"}
-    return {key: payload[key] for key in allowed if key in payload} | {"verified": bool(payload.get("verified"))}
+    current_provider = payload.get("provider_version") == PROVIDER_VERSION
+    return {key: payload[key] for key in allowed if key in payload} | {"verified": bool(payload.get("verified")) and current_provider}
 
 
 def invalidate_public_compatibility() -> None:
@@ -826,7 +828,5 @@ class ProviderSupervisor:
         }
 
     def __del__(self) -> None:
-        try:
+        with suppress(Exception):
             self.stop()
-        except Exception:
-            pass
