@@ -107,10 +107,15 @@ def test_youtube_repair_reextracts_partial_managed_directories(monkeypatch, tmp_
     def extract(archive, destination, *, archive_type):
         extracted.append((archive, destination, archive_type))
         if archive == node_archive:
-            installed = destination / youtube_compat.NODE_SPECS[youtube_compat.platform_key()].root_name
+            spec = youtube_compat.NODE_SPECS[youtube_compat.platform_key()]
+            installed = destination / spec.root_name
             installed.mkdir(parents=True)
-            (installed / 'node.exe').touch()
-            (installed / 'npm.cmd').touch()
+            node = installed / spec.node_relative
+            npm = installed / spec.npm_relative
+            node.parent.mkdir(parents=True, exist_ok=True)
+            npm.parent.mkdir(parents=True, exist_ok=True)
+            node.touch()
+            npm.touch()
         else:
             installed = destination / youtube_compat.PROVIDER_SOURCE_ROOT
             (installed / 'server').mkdir(parents=True)
