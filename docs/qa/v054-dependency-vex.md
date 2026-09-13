@@ -128,3 +128,15 @@ v0.5.16.
 | cargo | unic-ucd-ident 0.9.0 | RUSTSEC-2025-0100 | Unmaintained | Transitive | No | Build/runtime dependency graph | No direct first-party use; through urlpattern/Tauri. | None | No safe direct replacement | Tauri dependency graph pins the line. | No first-party parser input. | Accept as upstream warning; monitor. |
 | cargo | unic-ucd-version 0.9.0 | RUSTSEC-2025-0098 | Unmaintained | Transitive | No | Build/runtime dependency graph | No direct first-party use; through urlpattern/Tauri. | None | No safe direct replacement | Tauri dependency graph pins the line. | No first-party parser input. | Accept as upstream warning; monitor. |
 | cargo | glib 0.18.5 | RUSTSEC-2024-0429 | Unsound | Transitive | No | Runtime on Linux GTK path | Linux Tauri GTK/webkit2gtk graph; not Windows runtime. | None established | No safe compatible update established | Tauri GTK compatibility currently pins glib 0.18.x. | Windows release does not ship this Linux path; Linux qualification remains required. | Specific owner risk review; do not silently suppress. |
+
+## v0.5.16 security-owner approval
+
+On 2026-09-13, the security owner approved the documented VEX dispositions
+for all nine current Python advisory records. The owner also approved the six
+unmaintained Rust transitive warnings listed above. No advisory record is
+suppressed or deleted, and no finding was introduced by v0.5.16.
+
+The owner explicitly accepts the documented Linux-only upstream risk for
+`glib 0.18.5` / `RUSTSEC-2024-0429` for v0.5.16. Revisit this risk when the
+Tauri GTK dependency graph permits `glib >=0.20`. The advisory remains
+documented and visible until then.
