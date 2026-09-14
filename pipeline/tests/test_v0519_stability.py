@@ -1,3 +1,5 @@
+import json
+
 from clipgauge_pipeline import resource_guard, storage_estimate
 
 
@@ -25,6 +27,87 @@ def test_url_estimate_does_not_treat_missing_size_as_zero():
 
     assert estimate["source_bytes"] > 1 * 1024**3
     assert estimate["source_size_confidence"] == "duration-fallback"
+
+
+def test_url_estimate_uses_selected_requested_formats_not_catalogue_sum():
+    estimate = storage_estimate.for_url_metadata({
+        "duration": 600,
+        "formats": [{"format_id": str(index), "filesize": 2 * 1024**3} for index in range(15)],
+        "requested_formats": [
+            {"format_id": "137", "filesize": 300 * 1024**2},
+            {"format_id": "140", "filesize": 50 * 1024**2},
+        ],
+    })
+
+    assert estimate["source_bytes"] == 350 * 1024**2
+    assert estimate["source_size_confidence"] == "exact"
+
+
+def test_url_estimate_ignores_alternative_catalogue_sizes():
+    estimate = storage_estimate.for_url_metadata({
+        "duration": 60,
+        "formats": [{"format_id": "137", "filesize": 3 * 1024**3}, {"format_id": "140", "filesize": 50 * 1024**2}],
+    })
+
+    assert estimate["source_size_confidence"] == "duration-fallback"
+    assert estimate["source_bytes"] != 3 * 1024**3 + 50 * 1024**2
+
+
+def test_url_estimate_deduplicates_selected_stream_records():
+    estimate = storage_estimate.for_url_metadata({
+        "duration": 60,
+        "requested_formats": [
+            {"format_id": "137", "filesize": 300 * 1024**2},
+            {"format_id": "137", "filesize": 300 * 1024**2},
+            {"format_id": "140", "filesize": 50 * 1024**2},
+        ],
+    })
+
+    assert estimate["source_bytes"] == 350 * 1024**2
+    assert estimate["source_size_confidence"] == "exact"
+
+
+def test_url_estimate_sums_selected_approximate_components():
+    estimate = storage_estimate.for_url_metadata({
+        "duration": 120,
+        "formats": [{"format_id": "bad-alternative", "filesize": 8 * 1024**3}],
+        "requested_formats": [
+            {"format_id": "137", "filesize_approx": 100 * 1024**2},
+            {"format_id": "140", "filesize_approx": 20 * 1024**2},
+        ],
+    })
+
+    assert estimate["source_bytes"] == 120 * 1024**2
+    assert estimate["source_size_confidence"] == "approximate"
+
+
+def test_url_estimate_uses_selected_bitrate_before_duration_fallback():
+    estimate = storage_estimate.for_url_metadata({
+        "duration": 100,
+        "formats": [{"tbr": 10_000}],
+        "requested_formats": [{"format_id": "137", "tbr": 100}, {"format_id": "140", "tbr": 50}],
+    })
+
+    assert estimate["source_bytes"] == 1_875_000
+    assert estimate["source_size_confidence"] == "bitrate-estimate"
+
+
+def test_url_metadata_uses_the_production_download_selector(monkeypatch):
+    from clipgauge_pipeline.ingest import ytdlp
+
+    calls = []
+    monkeypatch.setattr(ytdlp, "ensure_ytdlp", lambda _progress: "yt-dlp")
+    monkeypatch.setattr(
+        ytdlp,
+        "_run",
+        lambda _binary, args, **_kwargs: calls.append(args) or json.dumps({"id": "fixture", "title": "Fixture", "duration": 60, "url": "https://example.test/video"}),
+    )
+
+    ytdlp.fetch_meta("https://example.test/video", lambda *_: None)
+
+    args = calls[0]
+    selector_index = args.index("-f")
+    assert args[selector_index + 1] == ytdlp.download_format_for("mweb")
 
 
 def test_asr_headroom_blocks_low_commit_before_model_load():

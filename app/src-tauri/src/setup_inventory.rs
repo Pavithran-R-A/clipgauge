@@ -874,6 +874,13 @@ fn row_installed(row: &Value) -> bool {
         .unwrap_or(false)
 }
 
+fn row_readiness_flag(row: &Value, key: &str) -> bool {
+    row.get("readiness")
+        .and_then(|readiness| readiness.get(key))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 fn row_is_ready(spec: &AssetSpec, row: &Value, video_ready: bool) -> bool {
     if spec.asset_id.starts_with("runtime:ffmpeg:") {
         video_ready
@@ -918,6 +925,21 @@ fn probe_executable(name: &str, args: &[&str]) -> bool {
     sidecar::run_bounded(command, RunPolicy::status())
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+fn runnable_model_id_for(
+    selected_id: &str,
+    runtime_ready: bool,
+    model_ready: bool,
+    model_verified: bool,
+    model_usable: bool,
+    model_compatible: bool,
+) -> Option<String> {
+    if runtime_ready && model_ready && model_verified && model_usable && model_compatible {
+        Some(selected_id.to_string())
+    } else {
+        None
+    }
 }
 
 fn native_runtime_selection(
@@ -1606,11 +1628,24 @@ pub fn native_inventory(
                 .unwrap_or(false)
         })
         .unwrap_or(false);
-    let runnable_model_id = if model_ready {
-        Some(selected_id.clone())
-    } else {
-        None
-    };
+    let selected_model_row = rows
+        .iter()
+        .find(|row| row.get("asset_id") == Some(&json!(selected_id)));
+    let model_verified = selected_model_row
+        .map(|row| row_readiness_flag(row, "verified"))
+        .unwrap_or(false);
+    let model_usable = selected_model_row
+        .map(|row| row_readiness_flag(row, "usable"))
+        .unwrap_or(false);
+    let model_compatible = runtime_spec.is_some() && selected.is_some();
+    let runnable_model_id = runnable_model_id_for(
+        &selected_id,
+        runtime_ready,
+        model_ready,
+        model_verified,
+        model_usable,
+        model_compatible,
+    );
     let local_state = if runtime_spec.is_none() {
         "unavailable"
     } else if runtime_ready && model_ready {
@@ -1768,7 +1803,7 @@ mod tests {
     use serde_json::Value;
 
     use super::save_selected_model;
-    use super::{native_inventory, InventoryCache};
+    use super::{native_inventory, runnable_model_id_for, InventoryCache};
 
     fn temporary_home() -> PathBuf {
         let suffix = SystemTime::now()
@@ -1778,6 +1813,34 @@ mod tests {
         let path = std::env::temp_dir().join(format!("clipgauge-inventory-{suffix}"));
         fs::create_dir_all(&path).expect("temporary inventory home must be creatable");
         path
+    }
+
+    #[test]
+    fn runnable_model_requires_complete_native_readiness() {
+        assert_eq!(
+            runnable_model_id_for("clipgauge-local/light", true, true, true, true, true),
+            Some("clipgauge-local/light".to_string())
+        );
+        assert_eq!(
+            runnable_model_id_for("clipgauge-local/light", false, true, true, true, true),
+            None
+        );
+        assert_eq!(
+            runnable_model_id_for("clipgauge-local/light", true, false, true, true, true),
+            None
+        );
+        assert_eq!(
+            runnable_model_id_for("clipgauge-local/light", true, true, false, true, true),
+            None
+        );
+        assert_eq!(
+            runnable_model_id_for("clipgauge-local/light", true, true, true, false, true),
+            None
+        );
+        assert_eq!(
+            runnable_model_id_for("clipgauge-local/light", true, true, true, true, false),
+            None
+        );
     }
 
     #[test]

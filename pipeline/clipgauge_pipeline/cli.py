@@ -119,7 +119,7 @@ def _emit_result(jsonl: bool, payload: dict) -> None:
 def _disk_warning(source: str | None = None) -> str | None:
     """Warn before long work when managed or source storage is tight."""
     try:
-        free_bytes = shutil.disk_usage(config.home_dir().parent).free
+        free_bytes = shutil.disk_usage(config.home_dir()).free
     except OSError:
         return "Free disk space could not be measured. Check storage before a long run."
     estimate = _source_storage_estimate(source)
@@ -138,7 +138,7 @@ def _disk_block(source: str | None = None, *, score_only: bool = False) -> str |
     estimate = _source_storage_estimate(source, score_only=score_only)
     decision = resource_guard.disk_headroom_decision(
         source,
-        data_root=config.home_dir().parent,
+        data_root=config.home_dir(),
         estimate=estimate,
         score_only=score_only,
     )

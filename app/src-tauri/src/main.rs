@@ -1130,35 +1130,37 @@ fn classify_native_exit(
     }
 }
 
-fn write_native_exit_diagnostic(
-    job_id: Option<&str>,
-    attempt_id: Option<&str>,
+struct NativeExitDiagnosticContext<'a> {
+    job_id: Option<&'a str>,
+    attempt_id: Option<&'a str>,
     process_id: u32,
-    last_stage: Option<&str>,
-    last_successful_stage: Option<&str>,
-    last_event: Option<&Value>,
-    status: Option<&ExitStatus>,
-    classification: &NativeExitClassification,
-    stderr: &str,
-) -> String {
-    let raw_status = status.and_then(raw_exit_status);
+    last_stage: Option<&'a str>,
+    last_successful_stage: Option<&'a str>,
+    last_event: Option<&'a Value>,
+    status: Option<&'a ExitStatus>,
+    classification: &'a NativeExitClassification,
+    stderr: &'a str,
+}
+
+fn write_native_exit_diagnostic(context: &NativeExitDiagnosticContext<'_>) -> String {
+    let raw_status = context.status.and_then(raw_exit_status);
     let payload = json!({
         "diagnostic_schema_version": 2,
-        "job_id": job_id,
-        "attempt_id": attempt_id,
-        "process_id": process_id,
+        "job_id": context.job_id,
+        "attempt_id": context.attempt_id,
+        "process_id": context.process_id,
         "app_version": env!("CARGO_PKG_VERSION"),
-        "last_successful_stage": last_successful_stage,
-        "last_active_stage": last_stage,
-        "last_event": last_event,
+        "last_successful_stage": context.last_successful_stage,
+        "last_active_stage": context.last_stage,
+        "last_event": context.last_event,
         "exit_code_decimal": raw_status,
         "exit_code_hex": exit_code_hex(raw_status),
-        "classification": classification.code,
-        "allow_cpu_resume": classification.allow_cpu_resume,
-        "stderr_tail": diagnostics::redact(stderr),
+        "classification": context.classification.code,
+        "allow_cpu_resume": context.classification.allow_cpu_resume,
+        "stderr_tail": diagnostics::redact(context.stderr),
     });
     write_bridge_diagnostic(
-        &serde_json::to_string_pretty(&payload).unwrap_or_else(|_| stderr.to_string()),
+        &serde_json::to_string_pretty(&payload).unwrap_or_else(|_| context.stderr.to_string()),
     )
 }
 
@@ -1436,23 +1438,24 @@ fn stream_pipeline(
         write_lifecycle_snapshot(&processes, &key);
         let status_ref = status.as_ref().ok();
         let raw_status = status_ref.and_then(raw_exit_status);
+        let stderr = stderr_tail.text();
         let classification = classify_native_exit(
             last_stage.as_deref(),
             last_accelerator.as_deref(),
-            &stderr_tail.text(),
+            &stderr,
             raw_status,
         );
-        let diagnostic_id = write_native_exit_diagnostic(
-            observed_job_id.as_deref(),
-            observed_attempt_id.as_deref(),
+        let diagnostic_id = write_native_exit_diagnostic(&NativeExitDiagnosticContext {
+            job_id: observed_job_id.as_deref(),
+            attempt_id: observed_attempt_id.as_deref(),
             process_id,
-            last_stage.as_deref(),
-            last_successful_stage.as_deref(),
-            last_event.as_ref(),
-            status_ref,
-            &classification,
-            &stderr_tail.text(),
-        );
+            last_stage: last_stage.as_deref(),
+            last_successful_stage: last_successful_stage.as_deref(),
+            last_event: last_event.as_ref(),
+            status: status_ref,
+            classification: &classification,
+            stderr: &stderr,
+        });
         let message = if classification.allow_cpu_resume {
             format!(
                 "{} Continue once in slower CPU mode, then keep the diagnostic ID for support.",

@@ -95,4 +95,23 @@ describe('setup queue aggregation', () => {
 
     expect(resolveRunnableLocalModel(inventory)).toBe('clipgauge-local/qwen3-1.7b-q8_0')
   })
+
+  it('does not reconstruct runnability when native reports null', () => {
+    const inventory = {
+      local_ai: {
+        preferred_model_id: 'clipgauge-local/qwen3-1.7b-q8_0',
+        runnable_model_id: null,
+        runtime_ready: false,
+        model_ready: true,
+      },
+      models: [{
+        asset_id: 'clipgauge-local/qwen3-1.7b-q8_0',
+        lifecycle_state: 'VERIFIED',
+        installed: true,
+        readiness: { verified: true, usable: true },
+      }],
+    }
+
+    expect(resolveRunnableLocalModel(inventory)).toBeUndefined()
+  })
 })

@@ -246,6 +246,11 @@ def _clean_error(stderr: str) -> str:
     return ""
 
 
+def _windows_cmd_escape(value: str) -> str:
+    escaped = value.replace("^", "^^")
+    return re.sub(r"([&<>()|])", r"^\1", escaped)
+
+
 def classify_error(message: str) -> str:
     """Map yt-dlp's changing prose to stable, creator-facing states."""
     lowered = message.lower()
@@ -278,7 +283,13 @@ def _run(
     """Run yt-dlp, streaming stdout lines, killing on output inactivity."""
     command = [str(bin_path), *args]
     if os.name == "nt" and bin_path.suffix.lower() in {".cmd", ".bat"}:
-        command = ["cmd.exe", "/d", "/c", *command]
+        command = [
+            "cmd.exe",
+            "/d",
+            "/c",
+            str(bin_path),
+            *[_windows_cmd_escape(argument) for argument in args],
+        ]
     try:
         proc = subprocess.Popen(
             command,
@@ -419,7 +430,10 @@ def fetch_meta(url: str, progress: ProgressFn, cookies_from_browser: str | None 
     def _go() -> str:
         args = [*_youtube_provider_args(source_url, compatibility_method=compatibility_method), *_browser_auth_args(cookies_from_browser)]
         try:
-            return _run(bin_path, [*args, "-J", "--no-playlist", "--no-warnings", source_url])
+            return _run(
+                bin_path,
+                [*args, "-f", download_format_for(compatibility_method), "-J", "--no-playlist", "--no-warnings", source_url],
+            )
         except YtDlpError as error:
             if error.details:
                 error.details["method"] = compatibility_method

@@ -62,7 +62,7 @@ class IngestStage(Stage):
                 url_estimate = storage_estimate.for_url_metadata(meta.raw)
                 disk_decision = resource_guard.disk_headroom_decision(
                     job.source,
-                    data_root=config.home_dir().parent,
+                    data_root=config.home_dir(),
                     estimate=url_estimate,
                 )
                 if disk_decision.blocked:

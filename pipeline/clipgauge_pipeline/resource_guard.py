@@ -161,6 +161,7 @@ def disk_headroom_decision(
     data_root: Path,
     estimate: dict[str, object] | None = None,
     score_only: bool = False,
+    stage: str | None = None,
 ) -> DiskDecision:
     """Recheck disk space before transfer, ASR, and rendering."""
     try:
@@ -183,6 +184,8 @@ def disk_headroom_decision(
     else:
         chosen = storage_estimate.for_url_metadata(None)
         confidence = str(chosen.get("source_size_confidence") or "duration-fallback")
+    if stage is not None and not score_only:
+        chosen = storage_estimate.for_stage(stage, chosen)
     minimum = storage_estimate.CACHED_SCORE_MIN_SAFE_BYTES if score_only else storage_estimate.MIN_SAFE_BYTES
     required = max(minimum, int(chosen.get("required_bytes") or 0))
     blocked = available < required

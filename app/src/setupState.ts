@@ -79,10 +79,9 @@ function isRunnableModel(row: Record<string, unknown>): boolean {
 export function resolveRunnableLocalModel(inventory: unknown): string | undefined {
   const preferred = resolvePreferredLocalModel(inventory)
   const runnable = localAi(inventory).runnable_model_id
-  if (runnable !== null && runnable !== undefined && !localModelId(runnable)) return undefined
-  if (preferred && runnable && runnable !== preferred) return undefined
-  const candidate = preferred ?? (localModelId(runnable) ? runnable : undefined)
-  if (!candidate) return undefined
+  if (!localModelId(runnable)) return undefined
+  if (preferred && runnable !== preferred) return undefined
+  const candidate = runnable
   const row = localModelRows(inventory).find((model) => model.asset_id === candidate)
   return row && isRunnableModel(row) ? candidate : undefined
 }

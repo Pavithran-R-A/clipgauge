@@ -332,7 +332,7 @@ def run(
     _check(checks, "platform", "ready" if system in SUPPORTED_SYSTEMS and machine in SUPPORTED_MACHINES else "warning", f"Detected {system}/{machine}.", "Use a supported desktop build if runtime behavior is unexpected.", system=system, architecture=machine)
     free_bytes: int | None = None
     try:
-        usage = shutil.disk_usage(config.home_dir().parent)
+        usage = shutil.disk_usage(config.home_dir())
         free_bytes = usage.free
         if usage.free < MIN_FREE_BYTES:
             _check(checks, "disk", "blocked", "Less than 1 GiB is free on the managed data volume.", "Free disk space before downloading models or rendering.", free_bytes=usage.free)

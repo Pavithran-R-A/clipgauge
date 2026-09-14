@@ -31,7 +31,7 @@ describe('Studio output controls', () => {
       />
     )
 
-    expect(screen.getByRole('button', { name: /Balanced \/ Hybrid/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /^Hybrid/i })).toBeDisabled()
     expect(screen.getByRole('button', { name: /Best Quality/i })).toBeDisabled()
     expect(screen.getByText('Configure a cloud provider and model in AI Providers before choosing Hybrid or Best Quality.')).toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent('ClipGauge Local')
@@ -61,7 +61,7 @@ describe('Studio output controls', () => {
       />
     )
 
-    await userEvent.click(screen.getByRole('button', { name: /Balanced \/ Hybrid/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^Hybrid/i }))
 
     expect(screen.getAllByText(/OpenRouter Free - Auto Free route/)).toHaveLength(2)
   })
@@ -103,7 +103,7 @@ describe('Studio output controls', () => {
     )
 
     await userEvent.type(screen.getByLabelText('Video link'), 'https://example.com/video')
-    if (mode !== 'private') await userEvent.click(screen.getByRole('button', { name: new RegExp(mode === 'balanced' ? 'Balanced / Hybrid' : 'Best Quality') }))
+    if (mode !== 'private') await userEvent.click(screen.getByRole('button', { name: new RegExp(mode === 'balanced' ? '^Hybrid' : 'Best Quality') }))
     await userEvent.click(screen.getByRole('button', { name: 'Create clips' }))
 
     expect(onRun).toHaveBeenCalledTimes(1)
@@ -247,7 +247,7 @@ describe('Studio output controls', () => {
       />
     )
 
-    await userEvent.click(screen.getByRole('button', { name: /Balanced \/ Hybrid/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^Hybrid/i }))
 
     expect(screen.getByRole('note')).toHaveTextContent('What leaves this computer: candidate transcript, candidate metadata, and sampled images when visual scoring is supported.')
     expect(screen.getByRole('note')).toHaveTextContent('The full source file stays on this computer.')

@@ -1091,7 +1091,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         error: ProviderError | None,
     ) -> dict[str, Any]:
         try:
-            free_disk_bytes = shutil.disk_usage(config.home_dir().parent).free
+            free_disk_bytes = shutil.disk_usage(config.home_dir()).free
         except OSError:
             free_disk_bytes = None
         details: dict[str, Any] = {
