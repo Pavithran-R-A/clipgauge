@@ -193,10 +193,10 @@ def _profile_from_args(
 def _profile_for_quality_mode(args: argparse.Namespace, quality_mode: str) -> providers_mod.ProviderProfile:
     mode = config.validate_quality_mode(quality_mode)
     explicit_kind = args.provider or args.llm
-    if mode == "private" and explicit_kind and explicit_kind != "clipgauge-local":
-        raise ValueError("private mode requires ClipGauge Local; choose Balanced or Best Quality for cloud scoring")
     default_kind = "clipgauge-local" if mode == "private" and not explicit_kind else None
-    return _profile_from_args(args, default_kind=default_kind)
+    profile = _profile_from_args(args, default_kind=default_kind)
+    config.validate_quality_mode_for_provider(mode, profile.locality)
+    return profile
 
 
 def _apply_profile(settings: config.Settings, profile: providers_mod.ProviderProfile) -> None:
@@ -667,8 +667,10 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     from . import preflight
 
     try:
-        profile = _profile_from_args(args)
-        payload = preflight.run(profile, args.source)
+        requested_mode = args.quality_mode
+        profile = _profile_for_quality_mode(args, requested_mode) if requested_mode else _profile_from_args(args)
+        quality_mode = requested_mode or ("private" if profile.locality == "local" else "best")
+        payload = preflight.run(profile, args.source, quality_mode=quality_mode)
     except Exception as err:  # noqa: BLE001 — preflight must return an actionable JSON result
         payload = {
             "state": "blocked",

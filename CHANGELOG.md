@@ -2,6 +2,20 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.18] - 2026-09-14
+
+ClipGauge v0.5.18 closes post-release defects without changing the product contract.
+
+- Preserved selected local-provider identity through Creator, preflight, and Review.
+- Separated Provider Center inspection from committed next-run selection.
+- Unified provider readiness and model, endpoint, service, and runtime checks.
+- Made YouTube dependency, provider self-test, and public-transfer timestamps independent.
+- Hardened managed bgutil 2.0.0 repair and loopback lifecycle recovery.
+- Bounded owned-WAV ASR conversion with typed resource-limit failures.
+- Generalized historical result normalization and Review request identity guards.
+- Corrected elapsed-time, notice, setup-cache, and current-version semantics.
+- Recorded physical i5-8265U / 8 GB qualification as deferred post-release testing.
+
 ## [0.5.17] - 2026-09-13
 
 ClipGauge v0.5.17 stabilizes real-device processing and completed-result recovery.

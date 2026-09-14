@@ -42,6 +42,19 @@ PROVIDER_SOURCE_SHA256 = "e95324ee24b1b0f1b4ad43d336343afe7cf1914acdf65d9cc1977f
 PROVIDER_SOURCE_SIZE_BYTES = 126_968
 PROVIDER_SOURCE_ROOT = "bgutil-ytdlp-pot-provider-2.0.0"
 PROVIDER_PLUGIN_RELATIVE = "plugin/yt_dlp_plugins/extractor/getpot_bgutil_http.py"
+SOURCE_REQUIRED_FILES = (
+    "server/package.json",
+    "server/package-lock.json",
+    "server/tsconfig.json",
+    "server/src/main.ts",
+    "server/src/generate_once.ts",
+    "server/src/session_manager.ts",
+    "server/src/utils.ts",
+    "server/types/commander.d.ts",
+    "plugin/yt_dlp_plugins/extractor/getpot_bgutil.py",
+    "plugin/yt_dlp_plugins/extractor/getpot_bgutil_http.py",
+    "plugin/yt_dlp_plugins/extractor/getpot_bgutil_script.py",
+)
 WPC_VERSION = "1.1.2"
 WPC_SOURCE = "https://github.com/coletdjnz/yt-dlp-getpot-wpc/tree/v1.1.2"
 WPC_LICENSE = "MIT"
@@ -211,16 +224,56 @@ def plugin_dir() -> Path:
 
 
 def _provider_plugin_ready() -> bool:
-    return (plugin_dir() / "yt_dlp_plugins" / "extractor" / "getpot_bgutil_http.py").is_file()
+    extractor = plugin_dir() / "yt_dlp_plugins" / "extractor"
+    return all(_nonempty_file(extractor / name) for name in (
+        "getpot_bgutil.py",
+        "getpot_bgutil_http.py",
+        "getpot_bgutil_script.py",
+    ))
 
 
 def _node_install_ready() -> bool:
-    return node_path().is_file() and npm_path().is_file()
+    return _nonempty_file(node_path()) and _nonempty_file(npm_path())
+
+
+def _nonempty_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _node_modules_ready(server: Path | None = None) -> bool:
+    modules = (server or server_home()) / "node_modules"
+    try:
+        return modules.is_dir() and any(modules.iterdir())
+    except OSError:
+        return False
 
 
 def _source_install_ready() -> bool:
     source = source_home()
-    return (source / "server" / "package.json").is_file() and (source / PROVIDER_PLUGIN_RELATIVE).is_file()
+    if not source.is_dir() or not all(_nonempty_file(source / relative) for relative in SOURCE_REQUIRED_FILES):
+        return False
+    try:
+        package = json.loads((source / "server" / "package.json").read_text(encoding="utf-8"))
+        lockfile = json.loads((source / "server" / "package-lock.json").read_text(encoding="utf-8"))
+        tsconfig = json.loads((source / "server" / "tsconfig.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (
+        isinstance(package, dict)
+        and package.get("name") == "bgutil-ytdlp-pot-provider"
+        and package.get("version") == PROVIDER_VERSION
+        and isinstance(package.get("dependencies"), dict)
+        and isinstance(package.get("scripts"), dict)
+        and isinstance(lockfile, dict)
+        and lockfile.get("lockfileVersion") == 3
+        and isinstance(lockfile.get("packages"), dict)
+        and isinstance(tsconfig, dict)
+        and isinstance(tsconfig.get("compilerOptions"), dict)
+        and isinstance(tsconfig.get("include"), list)
+    )
 
 
 def _remove_managed_tree(path: Path) -> None:
@@ -245,8 +298,25 @@ def _atomic_replace_managed_tree(staged: Path, destination: Path) -> None:
         _remove_managed_tree(backup)
 
 
+def _cleanup_interrupted_tree(parent: Path, root_name: str) -> None:
+    _cleanup_interrupted_prefix(parent, f".{root_name}.")
+
+
+def _cleanup_interrupted_prefix(parent: Path, prefix: str) -> None:
+    if not parent.is_dir():
+        return
+    try:
+        entries = tuple(parent.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name.startswith(prefix):
+            _remove_managed_tree(entry)
+
+
 def _extract_archive_tree(archive: Path, destination_parent: Path, root_name: str, archive_type: str) -> None:
     destination_parent.mkdir(parents=True, exist_ok=True)
+    _cleanup_interrupted_tree(destination_parent, root_name)
     staging = Path(tempfile.mkdtemp(prefix=f".{root_name}.", dir=destination_parent))
     try:
         runtime.extract_archive_verified(archive, staging, archive_type=archive_type)
@@ -261,15 +331,24 @@ def _extract_archive_tree(archive: Path, destination_parent: Path, root_name: st
 
 def _install_plugin_tree() -> None:
     plugin_source = source_home() / "plugin" / "yt_dlp_plugins"
-    if not (plugin_source / "extractor" / "getpot_bgutil_http.py").is_file():
+    if not all(_nonempty_file(plugin_source / "extractor" / name) for name in (
+        "getpot_bgutil.py",
+        "getpot_bgutil_http.py",
+        "getpot_bgutil_script.py",
+    )):
         raise runtime.RuntimeIntegrityError("YOUTUBE_PLUGIN_MISSING: provider archive has no HTTP plugin")
     plugin_parent = plugin_home()
     plugin_parent.mkdir(parents=True, exist_ok=True)
+    _cleanup_interrupted_tree(plugin_parent, "yt_dlp_plugins")
     staging = Path(tempfile.mkdtemp(prefix=".yt_dlp_plugins.", dir=plugin_parent))
     try:
         staged = staging / "yt_dlp_plugins"
         shutil.copytree(plugin_source, staged)
-        if not (staged / "extractor" / "getpot_bgutil_http.py").is_file():
+        if not all(_nonempty_file(staged / "extractor" / name) for name in (
+            "getpot_bgutil.py",
+            "getpot_bgutil_http.py",
+            "getpot_bgutil_script.py",
+        )):
             raise runtime.RuntimeIntegrityError("YOUTUBE_PLUGIN_MISSING: provider plugin copy is incomplete")
         _atomic_replace_managed_tree(staged, plugin_parent / "yt_dlp_plugins")
     finally:
@@ -280,6 +359,8 @@ def _install_plugin_tree() -> None:
 def _extract_assets(manager: downloads.DownloadManager, archives: list[Path]) -> None:
     node_archive, provider_archive = archives
     spec = NODE_SPECS[platform_key()]
+    _cleanup_interrupted_tree(_root() / "node", spec.root_name)
+    _cleanup_interrupted_tree(_root() / "source", PROVIDER_SOURCE_ROOT)
     if not _node_install_ready():
         _extract_archive_tree(node_archive, _root() / "node", spec.root_name, spec.archive_type)
     if not _source_install_ready():
@@ -291,10 +372,9 @@ def _extract_assets(manager: downloads.DownloadManager, archives: list[Path]) ->
 def _server_ready() -> bool:
     server = server_home()
     return (
-        node_path().is_file()
-        and npm_path().is_file()
-        and (server / "package.json").is_file()
-        and (server / "node_modules").is_dir()
+        _node_install_ready()
+        and _source_install_ready()
+        and _node_modules_ready(server)
         and _build_ready(server / "build")
         and _provider_plugin_ready()
     )
@@ -436,34 +516,36 @@ def readiness() -> dict[str, Any]:
     """Return dependency readiness separately from verified public-download readiness."""
     checks: list[dict[str, Any]] = []
     public_status = public_compatibility_status()
+    dependency_checked_at = datetime.now(UTC).isoformat()
+    public_transfer_at = public_status.get("verified_at")
     wpc_status = wpc_availability()
     ytdlp_ok = _yt_dlp_ready()
     checks.append({"name": "yt-dlp", "ready": ytdlp_ok, "message": "Pinned yt-dlp is verified." if ytdlp_ok else "Pinned yt-dlp is not installed or failed verification."})
     if not ytdlp_ok:
-        return {"state": "NOT_INSTALLED", "ready": False, "dependency_state": "NOT_INSTALLED", "public_download_verified": False, "wpc": wpc_status, "reason": "Install the verified YouTube runtime before testing public links.", "actions": ["Install"], "checks": checks}
+        return {"state": "NOT_INSTALLED", "ready": False, "dependency_state": "NOT_INSTALLED", "public_download_verified": False, "public_transfer_verified_at": public_transfer_at, "dependency_checked_at": dependency_checked_at, "provider_self_tested_at": None, "wpc": wpc_status, "reason": "Install the verified YouTube runtime before testing public links.", "actions": ["Install"], "checks": checks}
 
     rows = DownloadManager().inventory(assets())
     installed = [bool(row.get("installed")) for row in rows]
     checks.extend({"name": str(row.get("asset_id", "youtube-asset")), "ready": bool(row.get("installed")), "message": "Verified asset is installed." if row.get("installed") else "Verified asset is missing or needs repair."} for row in rows)
     if not all(installed):
         state = "NOT_INSTALLED" if not any(installed) else "INSTALL_INCOMPLETE"
-        return {"state": state, "ready": False, "dependency_state": state, "public_download_verified": False, "wpc": wpc_status, "reason": "Install the complete YouTube support bundle, then test it.", "actions": ["Install", "Retry"], "checks": checks}
+        return {"state": state, "ready": False, "dependency_state": state, "public_download_verified": False, "public_transfer_verified_at": public_transfer_at, "dependency_checked_at": dependency_checked_at, "provider_self_tested_at": None, "wpc": wpc_status, "reason": "Install the complete YouTube support bundle, then test it.", "actions": ["Install", "Retry"], "checks": checks}
 
     if not _server_ready():
         checks.append({"name": "provider-build", "ready": False, "message": "The PO-token provider build or plugin is incomplete."})
-        return {"state": "BUILD_REQUIRED", "ready": False, "dependency_state": "BUILD_REQUIRED", "public_download_verified": False, "wpc": wpc_status, "reason": "Build the installed PO-token provider before using YouTube.", "actions": ["Repair", "Retry"], "checks": checks}
+        return {"state": "BUILD_REQUIRED", "ready": False, "dependency_state": "BUILD_REQUIRED", "public_download_verified": False, "public_transfer_verified_at": public_transfer_at, "dependency_checked_at": dependency_checked_at, "provider_self_tested_at": None, "wpc": wpc_status, "reason": "Build the installed PO-token provider before using YouTube.", "actions": ["Repair", "Retry"], "checks": checks}
 
     plugin_ok = _provider_plugin_ready()
     checks.append({"name": "plugin", "ready": plugin_ok, "message": "The YouTube plugin is discoverable." if plugin_ok else "The YouTube plugin is not discoverable."})
     if not plugin_ok:
-        return {"state": "REPAIR_REQUIRED", "ready": False, "dependency_state": "REPAIR_REQUIRED", "public_download_verified": False, "wpc": wpc_status, "reason": "Repair the installed YouTube support components, then test again.", "actions": ["Repair", "Retry"], "checks": checks}
+        return {"state": "REPAIR_REQUIRED", "ready": False, "dependency_state": "REPAIR_REQUIRED", "public_download_verified": False, "public_transfer_verified_at": public_transfer_at, "dependency_checked_at": dependency_checked_at, "provider_self_tested_at": None, "wpc": wpc_status, "reason": "Repair the installed YouTube support components, then test again.", "actions": ["Repair", "Retry"], "checks": checks}
     checks.append({
         "name": "provider-lifecycle",
         "ready": True,
         "message": "The managed provider starts when a YouTube operation begins.",
     })
     public_verified = bool(public_status.get("verified"))
-    return {"state": "PUBLIC_DOWNLOAD_VERIFIED" if public_verified else "DEPENDENCIES_READY", "ready": True, "dependency_state": "DEPENDENCIES_READY", "provider_state": "DORMANT", "public_download_verified": public_verified, "public_compatibility": public_status, "wpc": wpc_status, "reason": "YouTube download was tested successfully." if public_verified else "YouTube tools are ready. A public download has not been verified on this installation.", "actions": ["Test"], "checks": checks}
+    return {"state": "PUBLIC_DOWNLOAD_VERIFIED" if public_verified else "DEPENDENCIES_READY", "ready": True, "dependency_state": "DEPENDENCIES_READY", "provider_state": "DORMANT", "public_download_verified": public_verified, "public_transfer_verified_at": public_transfer_at, "dependency_checked_at": dependency_checked_at, "provider_self_tested_at": None, "public_compatibility": public_status, "wpc": wpc_status, "reason": "YouTube download was tested successfully." if public_verified else "YouTube tools are ready. A public download has not been verified on this installation.", "actions": ["Test"], "checks": checks}
 
 
 def _merge_live_health_checks(status: dict[str, Any], result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -513,10 +595,11 @@ def test() -> dict[str, Any]:
     try:
         supervisor.start()
         result = supervisor.self_test()
+        provider_self_tested_at = datetime.now(UTC).isoformat()
         checks = _merge_live_health_checks(status, result)
         if result.get("ok"):
-            return {**status, "state": "PUBLIC_DOWNLOAD_VERIFIED" if status.get("public_download_verified") else "DEPENDENCIES_READY", "ready": True, "dependency_state": "DEPENDENCIES_READY", "checks": checks, "reason": "YouTube tools are ready. A public download still needs to be verified by a real transfer.", "actions": ["Test"]}
-        return {**status, "state": "UNHEALTHY", "ready": False, "checks": checks, "reason": "The local YouTube support check failed. Repair the provider and test again.", "actions": ["Repair", "Test"]}
+            return {**status, "state": "PUBLIC_DOWNLOAD_VERIFIED" if status.get("public_download_verified") else "DEPENDENCIES_READY", "ready": True, "dependency_state": "DEPENDENCIES_READY", "provider_self_tested_at": provider_self_tested_at, "checks": checks, "reason": "Provider self-test passed. A public download still needs to be verified by a real transfer.", "actions": ["Test"]}
+        return {**status, "state": "UNHEALTHY", "ready": False, "provider_self_tested_at": provider_self_tested_at, "checks": checks, "reason": "The local YouTube support check failed. Repair the provider and test again.", "actions": ["Repair", "Test"]}
     except (OSError, RuntimeError, runtime.RuntimeIntegrityError) as error:
         code = startup_error_code(error)
         return {**status, "state": "UNHEALTHY", "ready": False, "startup_error_code": code, "reason": startup_error_message(code), "actions": ["Repair", "Test"], "error": str(error)}
@@ -574,6 +657,9 @@ def _run_provider_command(args: list[str], *, cwd: Path, failure_code: str, even
 
 
 def _build_provider(npm: Path, server: Path, *, event: downloads.EventFn | None) -> None:
+    _cleanup_interrupted_tree(server, "build")
+    _cleanup_interrupted_prefix(server, ".provider-build-")
+    _cleanup_interrupted_prefix(server, ".provider-build.")
     staging = Path(tempfile.mkdtemp(prefix=".provider-build-", dir=server))
     staged_build = staging / "build"
     try:
@@ -619,11 +705,13 @@ def install(*, event: downloads.EventFn | None = None, cancel: Callable[[], bool
     server = server_home()
     if not node.is_file() or not npm.is_file():
         _raise_install_code("YOUTUBE_NODE_MISSING", "managed Node.js runtime is missing after verified extraction")
-    if not (server / "package.json").is_file():
+    if not _source_install_ready():
         _raise_install_code("YOUTUBE_PROVIDER_POSTCONDITION_FAILED", "provider source layout is incomplete")
     if not _provider_plugin_ready():
         _raise_install_code("YOUTUBE_PLUGIN_MISSING", "provider plugin is not installed")
-    if not (server / "node_modules").is_dir():
+    if not _node_modules_ready(server):
+        if (server / "node_modules").exists():
+            _remove_managed_tree(server / "node_modules")
         event and event({"asset_id": f"youtube:bgutil-server:{PROVIDER_VERSION}", "display_name": "PO-token provider", "operation": "Installing locked provider dependencies", "bytes_done": 0, "bytes_total": None, "bytes_per_second": 0.0, "fraction": None, "eta_seconds": None, "elapsed_seconds": 0.0, "one_time_download": True, "cached": False, "state": "INSTALLING"})
         _run_provider_command([str(npm), "ci", "--no-audit", "--no-fund"], cwd=server, failure_code="YOUTUBE_NPM_INSTALL_FAILED", event=event)
     if not _build_ready(server / "build"):

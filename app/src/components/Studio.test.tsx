@@ -63,7 +63,111 @@ describe('Studio output controls', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /Balanced \/ Hybrid/i }))
 
-    expect(screen.getAllByText('OpenRouter Free - openrouter/free')).toHaveLength(2)
+    expect(screen.getAllByText(/OpenRouter Free - openrouter\/free/)).toHaveLength(2)
+  })
+
+  it.each([
+    ['clipgauge-local', 'private', 'clipgauge-local/qwen3-4b-q4_k_m'],
+    ['ollama', 'private', 'llama3.2:3b'],
+    ['lmstudio', 'private', 'qwen2.5-7b-instruct'],
+    ['groq', 'balanced', 'openai/gpt-oss-20b'],
+    ['groq', 'best', 'openai/gpt-oss-20b'],
+    ['openrouter', 'balanced', 'openrouter/free'],
+    ['custom', 'best', 'my-model'],
+  ] as const)('passes the selected provider and model for %s + %s', async (provider, mode, model) => {
+    const onRun = vi.fn()
+    render(
+      <Studio
+        jobs={[]}
+        running={false}
+        runState="IDLE"
+        cancelling={false}
+        startedAt={null}
+        stages={{}}
+        error={null}
+        errorCode={null}
+        notice={null}
+        cloudConfigured
+        providerEndpoint={provider === 'custom' ? 'https://custom.example/v1' : undefined}
+        localModelId={provider === 'clipgauge-local' ? model : undefined}
+        providerModel={model}
+        onRun={onRun}
+        onCancel={vi.fn()}
+        onContinueCpu={vi.fn()}
+        onNavigate={vi.fn()}
+        selectedProvider={provider}
+        onSelectProvider={vi.fn()}
+        onOpenJob={vi.fn()}
+        onResume={vi.fn()}
+      />,
+    )
+
+    await userEvent.type(screen.getByLabelText('Video link'), 'https://example.com/video')
+    if (mode !== 'private') await userEvent.click(screen.getByRole('button', { name: new RegExp(mode === 'balanced' ? 'Balanced / Hybrid' : 'Best Quality') }))
+    await userEvent.click(screen.getByRole('button', { name: 'Create clips' }))
+
+    expect(onRun).toHaveBeenCalledTimes(1)
+    expect(onRun.mock.calls[0]?.slice(0, 5)).toEqual(['https://example.com/video', provider, 'classic', model, undefined])
+    expect(onRun.mock.calls[0]?.[8]).toBe(mode)
+  })
+
+  it('describes private scoring using the selected local provider', () => {
+    render(
+      <Studio
+        jobs={[]}
+        running={false}
+        runState="IDLE"
+        cancelling={false}
+        startedAt={null}
+        stages={{}}
+        error={null}
+        errorCode={null}
+        notice={null}
+        providerModel="llama3.2:3b"
+        selectedProvider="ollama"
+        onRun={vi.fn()}
+        onCancel={vi.fn()}
+        onContinueCpu={vi.fn()}
+        onNavigate={vi.fn()}
+        onSelectProvider={vi.fn()}
+        onOpenJob={vi.fn()}
+        onResume={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('Use your selected local provider. No cloud.')).toBeInTheDocument()
+  })
+
+  it('blocks a cloud provider from private mode', async () => {
+    const onRun = vi.fn()
+    render(
+      <Studio
+        jobs={[]}
+        running={false}
+        runState="IDLE"
+        cancelling={false}
+        startedAt={null}
+        stages={{}}
+        error={null}
+        errorCode={null}
+        notice={null}
+        cloudConfigured
+        onRun={onRun}
+        onCancel={vi.fn()}
+        onContinueCpu={vi.fn()}
+        onNavigate={vi.fn()}
+        selectedProvider="groq"
+        onSelectProvider={vi.fn()}
+        onOpenJob={vi.fn()}
+        onResume={vi.fn()}
+      />,
+    )
+
+    await userEvent.type(screen.getByLabelText('Video link'), 'https://example.com/video')
+
+    expect(screen.getByRole('button', { name: 'Create clips' })).toBeDisabled()
+    expect(screen.getByRole('alert')).toHaveTextContent('Private mode requires a local provider')
+    expect(onRun).not.toHaveBeenCalled()
   })
 
   it.each(['SUCCEEDED', 'FAILED', 'CANCELLED'] as const)('keeps final elapsed time for %s runs', (runState) => {

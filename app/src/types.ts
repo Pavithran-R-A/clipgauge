@@ -216,6 +216,7 @@ export interface OtherMoment {
 
 export interface JobResults {
   job_id: string
+  diagnostic_metadata?: Record<string, unknown>
   outcome?: PipelineOutcome
   dir?: string
   ingest: {
@@ -331,6 +332,9 @@ export interface YouTubeReadiness {
   state: YouTubeReadinessState
   ready: boolean
   dependency_state?: string
+  dependency_checked_at?: string
+  provider_self_tested_at?: string | null
+  public_transfer_verified_at?: string | null
   public_download_verified?: boolean
   public_compatibility?: { verified?: boolean; verified_at?: string; yt_dlp_version?: string; provider_version?: string; method?: string }
   wpc?: { available?: boolean; browser_path?: string | null; plugin_installed?: boolean; version?: string; source?: string; license?: string; reason?: string }

@@ -525,3 +525,14 @@ def download(url: str, out_path: Path, progress: ProgressFn, cookies_from_browse
             candidates[0].replace(out_path)
         else:
             raise YtDlpError("Download finished but no output file was produced.")
+    try:
+        if not out_path.is_file() or out_path.stat().st_size <= 0:
+            raise YtDlpError("Download finished but the output file is empty.", code="YTDLP_EMPTY_OUTPUT", retryable=True)
+    except OSError as error:
+        raise YtDlpError("Downloaded media could not be verified on disk.", code="YTDLP_OUTPUT_VERIFY_FAILED", retryable=True) from error
+    if _needs_youtube_provider(source_url):
+        manifest, _record, _name = _manifest_record()
+        youtube_compat.record_public_compatibility_success(
+            method="bgutil-http",
+            ytdlp_version=str(manifest["runtimes"]["yt-dlp"]["version"]),
+        )

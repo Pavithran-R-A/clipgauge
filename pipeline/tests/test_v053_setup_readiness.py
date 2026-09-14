@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from clipgauge_pipeline import cli, setup_models
@@ -114,14 +116,25 @@ def test_youtube_repair_reextracts_partial_managed_directories(monkeypatch, tmp_
             npm = installed / spec.npm_relative
             node.parent.mkdir(parents=True, exist_ok=True)
             npm.parent.mkdir(parents=True, exist_ok=True)
-            node.touch()
-            npm.touch()
+            node.write_bytes(b'node')
+            npm.write_bytes(b'npm')
         else:
             installed = destination / youtube_compat.PROVIDER_SOURCE_ROOT
             (installed / 'server').mkdir(parents=True)
-            (installed / 'server' / 'package.json').write_text('{}', encoding='utf-8')
-            (installed / 'plugin' / 'yt_dlp_plugins' / 'extractor').mkdir(parents=True)
-            (installed / 'plugin' / 'yt_dlp_plugins' / 'extractor' / 'getpot_bgutil_http.py').write_text('', encoding='utf-8')
+            (installed / 'server' / 'package.json').write_text('{"name":"bgutil-ytdlp-pot-provider","version":"2.0.0","dependencies":{},"scripts":{}}', encoding='utf-8')
+            (installed / 'server' / 'package-lock.json').write_text('{"name":"bgutil-ytdlp-pot-provider","lockfileVersion":3,"packages":{}}', encoding='utf-8')
+            (installed / 'server' / 'tsconfig.json').write_text('{"compilerOptions":{},"include":["./src/**/*"]}', encoding='utf-8')
+            for name in ('main.ts', 'generate_once.ts', 'session_manager.ts', 'utils.ts'):
+                source_file = installed / 'server' / 'src' / name
+                source_file.parent.mkdir(parents=True, exist_ok=True)
+                source_file.write_text('source', encoding='utf-8')
+            type_file = installed / 'server' / 'types' / 'commander.d.ts'
+            type_file.parent.mkdir(parents=True, exist_ok=True)
+            type_file.write_text('type source = unknown', encoding='utf-8')
+            plugin_dir = installed / 'plugin' / 'yt_dlp_plugins' / 'extractor'
+            plugin_dir.mkdir(parents=True)
+            for name in ('getpot_bgutil.py', 'getpot_bgutil_http.py', 'getpot_bgutil_script.py'):
+                (plugin_dir / name).write_text('plugin', encoding='utf-8')
 
     monkeypatch.setattr(youtube_compat.runtime, 'extract_archive_verified', extract)
 
@@ -129,21 +142,94 @@ def test_youtube_repair_reextracts_partial_managed_directories(monkeypatch, tmp_
 
     assert [item[0] for item in extracted] == [node_archive, provider_archive]
 
-    youtube_compat._extract_assets(object(), [node_archive, provider_archive])
 
-    assert [item[0] for item in extracted] == [node_archive, provider_archive]
+def test_youtube_source_integrity_requires_pinned_build_inputs(monkeypatch, tmp_path):
+    source = tmp_path / youtube_compat.PROVIDER_SOURCE_ROOT
+    server = source / 'server'
+    plugin = source / 'plugin' / 'yt_dlp_plugins' / 'extractor'
+    server.mkdir(parents=True)
+    plugin.mkdir(parents=True)
+    (server / 'package.json').write_text('{}', encoding='utf-8')
+    for name in ('getpot_bgutil.py', 'getpot_bgutil_http.py', 'getpot_bgutil_script.py'):
+        (plugin / name).write_text('plugin', encoding='utf-8')
+    monkeypatch.setattr(youtube_compat, 'source_home', lambda: source)
 
+    assert youtube_compat._source_install_ready() is False
+
+    (server / 'package.json').write_text('{"name":"bgutil-ytdlp-pot-provider","version":"2.0.0","dependencies":{},"scripts":{}}', encoding='utf-8')
+    (server / 'package-lock.json').write_text('{"name":"bgutil-ytdlp-pot-provider","lockfileVersion":3,"packages":{}}', encoding='utf-8')
+    (server / 'tsconfig.json').write_text('{"compilerOptions":{},"include":["./src/**/*"]}', encoding='utf-8')
+    for name in ('main.ts', 'generate_once.ts', 'session_manager.ts', 'utils.ts'):
+        source_file = server / 'src' / name
+        source_file.parent.mkdir(parents=True, exist_ok=True)
+        source_file.write_text('source', encoding='utf-8')
+    type_file = server / 'types' / 'commander.d.ts'
+    type_file.parent.mkdir(parents=True, exist_ok=True)
+    type_file.write_text('type source = unknown', encoding='utf-8')
+    assert youtube_compat._source_install_ready() is True
+
+    (server / 'src' / 'main.ts').unlink()
+    assert youtube_compat._source_install_ready() is False
+
+
+def test_youtube_source_readiness_ignores_stale_adjacent_provider_tree(monkeypatch, tmp_path):
+    current = tmp_path / youtube_compat.PROVIDER_VERSION / youtube_compat.PROVIDER_SOURCE_ROOT
+    server = current / 'server'
+    plugin = current / 'plugin' / 'yt_dlp_plugins' / 'extractor'
+    server.mkdir(parents=True)
+    plugin.mkdir(parents=True)
+    (server / 'package.json').write_text(
+        '{"name":"bgutil-ytdlp-pot-provider","version":"2.0.0","dependencies":{},"scripts":{}}',
+        encoding='utf-8',
+    )
+    (server / 'package-lock.json').write_text(
+        '{"name":"bgutil-ytdlp-pot-provider","lockfileVersion":3,"packages":{}}',
+        encoding='utf-8',
+    )
+    (server / 'tsconfig.json').write_text('{"compilerOptions":{},"include":["./src/**/*"]}', encoding='utf-8')
+    for name in ('main.ts', 'generate_once.ts', 'session_manager.ts', 'utils.ts'):
+        source_file = server / 'src' / name
+        source_file.parent.mkdir(parents=True, exist_ok=True)
+        source_file.write_text('source', encoding='utf-8')
+    type_file = server / 'types' / 'commander.d.ts'
+    type_file.parent.mkdir(parents=True, exist_ok=True)
+    type_file.write_text('type source = unknown', encoding='utf-8')
+    for name in ('getpot_bgutil.py', 'getpot_bgutil_http.py', 'getpot_bgutil_script.py'):
+        (plugin / name).write_text('plugin', encoding='utf-8')
+
+    stale = tmp_path / '1.3.2' / youtube_compat.PROVIDER_SOURCE_ROOT
+    (stale / 'server').mkdir(parents=True)
+    (stale / 'server' / 'package.json').write_text('{"version":"1.3.2"}', encoding='utf-8')
+    monkeypatch.setattr(youtube_compat, 'source_home', lambda: current)
+
+    assert youtube_compat._source_install_ready() is True
+
+
+def test_youtube_integrity_rejects_malformed_package_and_zero_byte_plugin(monkeypatch, tmp_path):
+    source = tmp_path / youtube_compat.PROVIDER_SOURCE_ROOT
+    server = source / 'server'
+    source_plugin = source / 'plugin' / 'yt_dlp_plugins' / 'extractor'
+    server.mkdir(parents=True)
+    source_plugin.mkdir(parents=True)
+    (server / 'package.json').write_text('not-json', encoding='utf-8')
+    (source / youtube_compat.PROVIDER_PLUGIN_RELATIVE).write_text('', encoding='utf-8')
+    monkeypatch.setattr(youtube_compat, 'source_home', lambda: source)
+    monkeypatch.setattr(youtube_compat, 'plugin_dir', lambda: tmp_path / 'installed-plugin')
+
+    assert youtube_compat._source_install_ready() is False
+    assert youtube_compat._provider_plugin_ready() is False
 
 def test_provider_build_readiness_rejects_empty_output(tmp_path, monkeypatch):
     monkeypatch.setattr(youtube_compat, "_root", lambda: tmp_path)
     monkeypatch.setattr(youtube_compat, "node_path", lambda: tmp_path / "node")
     monkeypatch.setattr(youtube_compat, "npm_path", lambda: tmp_path / "npm")
+    monkeypatch.setattr(youtube_compat, "_source_install_ready", lambda: True)
     monkeypatch.setattr(youtube_compat, "_provider_plugin_ready", lambda: True)
     server = tmp_path / "source" / youtube_compat.PROVIDER_SOURCE_ROOT / "server"
     (server / "node_modules").mkdir(parents=True)
-    (server / "package.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "node").touch()
-    (tmp_path / "npm").touch()
+    (server / "node_modules" / ".package-lock.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "node").write_bytes(b"node")
+    (tmp_path / "npm").write_bytes(b"npm")
     (server / "build").mkdir()
     (server / "build" / "main.js").write_text("", encoding="utf-8")
 
@@ -172,6 +258,77 @@ def test_provider_build_swaps_compiled_output_atomically(tmp_path, monkeypatch):
 
     assert (server / "build" / "main.js").read_text(encoding="utf-8") == "new"
     assert not list(server.glob(".provider-build-*.backup"))
+
+
+def test_youtube_node_modules_readiness_rejects_empty_managed_directory(tmp_path, monkeypatch):
+    server = tmp_path / "server"
+    server.mkdir()
+    monkeypatch.setattr(youtube_compat, "server_home", lambda: server)
+
+    assert youtube_compat._node_modules_ready() is False
+    (server / "node_modules").mkdir()
+    assert youtube_compat._node_modules_ready() is False
+    (server / "node_modules" / ".package-lock.json").write_text("{}", encoding="utf-8")
+    assert youtube_compat._node_modules_ready() is True
+
+
+def test_youtube_install_repairs_empty_node_modules(tmp_path, monkeypatch):
+    server = tmp_path / "server"
+    server.mkdir()
+    (server / "package.json").write_text("{}", encoding="utf-8")
+    modules = server / "node_modules"
+    modules.mkdir()
+    node = tmp_path / "node"
+    npm = tmp_path / "npm"
+    node.write_bytes(b"node")
+    npm.write_bytes(b"npm")
+    archives = [tmp_path / "node.zip", tmp_path / "provider.zip", tmp_path / "yt-dlp"]
+    for archive in archives:
+        archive.write_bytes(b"archive")
+    commands = []
+
+    monkeypatch.setattr(youtube_compat, "assets", lambda: [object(), object(), object()])
+    monkeypatch.setattr(youtube_compat.DownloadManager, "download", lambda self, asset, cancel=None: archives.pop(0))
+    monkeypatch.setattr(youtube_compat, "_extract_assets", lambda manager, paths: None)
+    monkeypatch.setattr(youtube_compat, "node_path", lambda: node)
+    monkeypatch.setattr(youtube_compat, "npm_path", lambda: npm)
+    monkeypatch.setattr(youtube_compat, "server_home", lambda: server)
+    monkeypatch.setattr(youtube_compat, "_source_install_ready", lambda: True)
+    monkeypatch.setattr(youtube_compat, "_provider_plugin_ready", lambda: True)
+    monkeypatch.setattr(youtube_compat, "_build_ready", lambda _build: True)
+    monkeypatch.setattr(youtube_compat, "_server_ready", lambda: True)
+
+    def fake_command(args, **kwargs):
+        commands.append(args)
+        modules.mkdir(parents=True, exist_ok=True)
+        (modules / ".package-lock.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(youtube_compat, "_run_provider_command", fake_command)
+    monkeypatch.setattr(youtube_compat.ProviderSupervisor, "start", lambda self: "http://127.0.0.1:4416")
+    monkeypatch.setattr(youtube_compat.ProviderSupervisor, "self_test", lambda self: {"plugin_discoverable": True, "server_installed": True, "health": {"healthy": True}})
+    monkeypatch.setattr(youtube_compat.ProviderSupervisor, "stop", lambda self: None)
+
+    youtube_compat.install(require_consent=False)
+
+    assert commands and commands[0][1:3] == ["ci", "--no-audit"]
+
+
+def test_provider_build_cleans_interrupted_staging_before_rebuild(tmp_path, monkeypatch):
+    server = tmp_path / "server"
+    server.mkdir()
+    (server / ".provider-build-interrupted").mkdir()
+    npm = tmp_path / "npm"
+    npm.touch()
+
+    def fake_command(args, *, cwd, failure_code, event):
+        staged = Path(args[args.index("--outDir") + 1])
+        staged.mkdir(parents=True)
+        (staged / "main.js").write_text("new", encoding="utf-8")
+
+    monkeypatch.setattr(youtube_compat, "_run_provider_command", fake_command)
+    youtube_compat._build_provider(npm, server, event=None)
+
+    assert not (server / ".provider-build-interrupted").exists()
 
 
 def test_youtube_setup_group_includes_pinned_ytdlp_asset():
@@ -330,6 +487,70 @@ def test_youtube_readiness_distinguishes_dependencies_from_public_download(monke
     assert result['ready'] is True
     assert result['public_download_verified'] is False
     assert result['dependency_state'] == 'DEPENDENCIES_READY'
+
+
+def test_youtube_readiness_keeps_dependency_and_public_transfer_times_distinct(monkeypatch, tmp_path):
+    monkeypatch.setattr(youtube_compat.config, 'home_dir', lambda: tmp_path)
+    monkeypatch.setattr(youtube_compat, '_yt_dlp_ready', lambda: True)
+    monkeypatch.setattr(youtube_compat.DownloadManager, 'inventory', lambda self, assets: [
+        {'asset_id': asset.asset_id, 'installed': True, 'status': 'ready'} for asset in assets
+    ])
+    monkeypatch.setattr(youtube_compat, '_server_ready', lambda: True)
+    monkeypatch.setattr(youtube_compat, '_provider_plugin_ready', lambda: True)
+    youtube_compat.record_public_compatibility_success(method='bgutil-http', ytdlp_version='2026.08.19')
+
+    result = youtube_compat.readiness()
+
+    assert isinstance(result['dependency_checked_at'], str)
+    assert result.get('provider_self_tested_at') is None
+    assert result['public_transfer_verified_at'] == result['public_compatibility']['verified_at']
+    assert result['public_download_verified'] is True
+
+
+def test_youtube_self_test_records_only_provider_self_test_time(monkeypatch, tmp_path):
+    monkeypatch.setattr(youtube_compat.config, 'home_dir', lambda: tmp_path)
+    initial = {
+        'state': 'DEPENDENCIES_READY',
+        'ready': True,
+        'public_download_verified': False,
+        'public_transfer_verified_at': '2026-09-01T00:00:00+00:00',
+        'checks': [],
+    }
+    monkeypatch.setattr(youtube_compat, 'readiness', lambda: initial)
+    monkeypatch.setattr(youtube_compat.ProviderSupervisor, 'start', lambda self: 'http://127.0.0.1:4416')
+    monkeypatch.setattr(youtube_compat.ProviderSupervisor, 'self_test', lambda self: {
+        'plugin_discoverable': True,
+        'server_installed': True,
+        'health': {'healthy': True, 'running': True, 'version': '2.0.0'},
+        'loopback_only': True,
+        'ok': True,
+    })
+    monkeypatch.setattr(youtube_compat.ProviderSupervisor, 'stop', lambda self: None)
+
+    result = youtube_compat.test()
+
+    assert isinstance(result['provider_self_tested_at'], str)
+    assert result['public_transfer_verified_at'] == initial['public_transfer_verified_at']
+
+
+def test_public_download_records_transfer_verification_after_output_exists(monkeypatch, tmp_path):
+    from clipgauge_pipeline.ingest import ytdlp
+
+    monkeypatch.setattr(youtube_compat.config, 'home_dir', lambda: tmp_path)
+    binary = tmp_path / 'yt-dlp.exe'
+    output = tmp_path / 'video.mp4'
+    monkeypatch.setattr(ytdlp, 'ensure_ytdlp', lambda progress: binary)
+    monkeypatch.setattr(ytdlp, '_youtube_provider_args', lambda *args, **kwargs: [])
+    monkeypatch.setattr(ytdlp, '_stop_operation_provider', lambda: None)
+    monkeypatch.setattr(ytdlp, '_run_youtube_recovery', lambda fn, **kwargs: fn())
+    monkeypatch.setattr(ytdlp, '_run', lambda binary_path, args, on_line=None: output.write_bytes(b'video') or '')
+    monkeypatch.setattr(ytdlp.ffmpeg_bin, 'readiness', lambda: type('Decision', (), {'ready': False})())
+
+    ytdlp.download('https://www.youtube.com/watch?v=aqz-KE-bpKQ', output, lambda *_args: None)
+
+    status = youtube_compat.public_compatibility_status()
+    assert status['verified'] is True
+    assert status['provider_version'] == youtube_compat.PROVIDER_VERSION
 
 
 def test_youtube_readiness_rejects_public_verification_from_old_provider(monkeypatch, tmp_path):

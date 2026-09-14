@@ -118,7 +118,7 @@ describe('application navigation handoffs', () => {
   it('reuses the cached local model without another inventory scan', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.17',
+      app_version: '0.5.18',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: 1_700_000_000,
@@ -152,7 +152,7 @@ describe('application navigation handoffs', () => {
   it('does not reuse a local model from an incomplete inventory envelope', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.17',
+      app_version: '0.5.18',
       value: {
         state: 'ready',
         local_ai: { selected_model_id: 'clipgauge-local/balanced' },
@@ -190,7 +190,7 @@ describe('application navigation handoffs', () => {
     await waitFor(() => expect(mocks.api.runJob).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(JSON.parse(window.localStorage.getItem('clipgauge.setup.inventory.v1') ?? '{}')).toMatchObject({
       schema_version: 1,
-      app_version: '0.5.17',
+      app_version: '0.5.18',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       value: { local_ai: { selected_model_id: 'clipgauge-local/balanced' } },
@@ -338,6 +338,19 @@ describe('structured pipeline terminal events', () => {
     await waitFor(() => expect(screen.getByTestId('studio-notice')).toHaveTextContent(''))
   })
 
+  it('clears stale run notices when the provider changes', async () => {
+    render(<App />)
+    await waitFor(() => expect(mocks.pipelineHandler).toBeDefined())
+    mocks.pipelineHandler?.({ payload: { event: 'terminal', ok: false, code: 'CANCELLED', message: 'Old provider warning.' } })
+    expect(await screen.findByTestId('studio-notice')).toHaveTextContent('Old provider warning.')
+
+    await userEvent.click(screen.getByRole('button', { name: 'AI Providers' }))
+    await userEvent.click(screen.getByTestId('select-cloud-provider'))
+    await userEvent.click(screen.getByRole('button', { name: 'Back to Create' }))
+
+    expect(screen.getByTestId('studio-notice')).toHaveTextContent('')
+  })
+
   it('freezes terminal elapsed time from the pipeline payload', async () => {
     render(<App />)
     await waitFor(() => expect(mocks.pipelineHandler).toBeDefined())
@@ -359,6 +372,22 @@ describe('structured pipeline terminal events', () => {
     await userEvent.click(create)
     expect(mocks.api.preflight).toHaveBeenCalledTimes(1)
     releasePreflight({ state: 'blocked', selected_llm: 'local', checks: [] })
+  })
+
+  it('preserves elapsed preflight time when setup blocks the attempt', async () => {
+    let releasePreflight: (value: { state: string; selected_llm: string; checks: Array<{ name?: string; state: string; message: string }> }) => void = () => undefined
+    let now = 1_000
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    mocks.api.preflight.mockImplementation(() => new Promise((resolve) => { releasePreflight = resolve }))
+    render(<App />)
+
+    await userEvent.click(await screen.findByTestId('create-job'))
+    now = 3_500
+    releasePreflight({ state: 'blocked', selected_llm: 'local', checks: [{ name: 'speech', state: 'blocked', message: 'Install speech recognition.' }] })
+
+    await waitFor(() => expect(screen.getByTestId('studio-state')).toHaveTextContent('FAILED'))
+    expect(screen.getByTestId('studio-elapsed')).toHaveTextContent('2')
+    vi.restoreAllMocks()
   })
 
   it('does not launch a job after preflight resolves post-unmount', async () => {
@@ -592,6 +621,26 @@ describe('structured pipeline terminal events', () => {
     expect(await screen.findByTestId('review')).toHaveTextContent('job-no-recommendations')
   })
 
+  it('ignores a late terminal result after opening another session', async () => {
+    let releaseJobA: ((value: unknown) => void) | undefined
+    mocks.api.listJobs.mockResolvedValue([{ id: 'job-b', title: 'Second session', ingested: true, rendered: true }])
+    mocks.api.jobResults.mockImplementation((jobId: string) => jobId === 'job-a'
+      ? new Promise((resolve) => { releaseJobA = resolve })
+      : Promise.resolve({ job_id: 'job-b', outcome: 'SUCCESS_NO_RECOMMENDATIONS', score: { clips: [] }, render: null }))
+    render(<App />)
+    await waitFor(() => expect(mocks.pipelineHandler).toBeDefined())
+
+    mocks.pipelineHandler?.({ payload: { event: 'job', job_id: 'job-a', attempt_id: 'attempt-a' } })
+    mocks.pipelineHandler?.({ payload: { event: 'terminal', job_id: 'job-a', attempt_id: 'attempt-a', ok: true, code: 'OK' } })
+    await userEvent.click(await screen.findByRole('button', { name: 'Sessions' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Open clips' }))
+
+    expect(await screen.findByTestId('review')).toHaveTextContent('job-b')
+    await act(async () => { releaseJobA?.({ job_id: 'job-a', outcome: 'SUCCESS_NO_RECOMMENDATIONS', score: { clips: [] }, render: null }); await Promise.resolve() })
+
+    expect(screen.getByTestId('review')).toHaveTextContent('job-b')
+  })
+
   it('retries completed Review loading without rerunning the pipeline', async () => {
     mocks.api.jobResults.mockRejectedValueOnce(new Error('results temporarily unavailable')).mockResolvedValueOnce({ job_id: 'job-review-retry' })
     mocks.api.preflight.mockResolvedValue({ state: 'ready', selected_llm: 'local', checks: [] })
@@ -606,6 +655,22 @@ describe('structured pipeline terminal events', () => {
     await waitFor(() => expect(mocks.api.jobResults).toHaveBeenCalledTimes(2))
     expect(mocks.api.runJob).not.toHaveBeenCalled()
     expect(mocks.api.resumeJob).not.toHaveBeenCalled()
+  })
+
+  it('keeps the newest Review retry response when an older request resolves later', async () => {
+    const resolvers: Array<(value: unknown) => void> = []
+    mocks.api.jobResults.mockImplementation(() => new Promise((resolve) => { resolvers.push(resolve) }))
+    render(<App />)
+    await waitFor(() => expect(mocks.pipelineHandler).toBeDefined())
+    mocks.pipelineHandler?.({ payload: { event: 'job', job_id: 'job-retry-race', attempt_id: 'attempt-retry-race' } })
+    mocks.pipelineHandler?.({ payload: { event: 'terminal', job_id: 'job-retry-race', attempt_id: 'attempt-retry-race', ok: true, code: 'OK' } })
+
+    await userEvent.click(await screen.findByTestId('retry-review'))
+    await act(async () => { resolvers[1]?.({ job_id: 'job-retry-new', outcome: 'SUCCESS_NO_RECOMMENDATIONS', score: { clips: [] }, render: null }); await Promise.resolve() })
+    expect(await screen.findByTestId('review')).toHaveTextContent('job-retry-new')
+    await act(async () => { resolvers[0]?.({ job_id: 'job-retry-stale', outcome: 'SUCCESS_NO_RECOMMENDATIONS', score: { clips: [] }, render: null }); await Promise.resolve() })
+
+    expect(screen.getByTestId('review')).toHaveTextContent('job-retry-new')
   })
 
   it('surfaces rejected resume actions instead of silently staying busy', async () => {

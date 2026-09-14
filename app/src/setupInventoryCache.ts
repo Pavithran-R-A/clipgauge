@@ -3,7 +3,8 @@ import { isLocalSetupInventory } from './nativeValidation'
 
 export const SETUP_INVENTORY_CACHE_KEY = 'clipgauge.setup.inventory.v1'
 export const SETUP_INVENTORY_CACHE_SCHEMA_VERSION = 1
-export const SETUP_INVENTORY_CACHE_APP_VERSION = '0.5.17'
+export const SETUP_INVENTORY_CACHE_APP_VERSION = '0.5.18'
+export const SETUP_INVENTORY_CACHE_TTL_MS = 15 * 60 * 1000
 
 type InventoryCacheRecord = {
   schema_version: number
@@ -42,6 +43,15 @@ export function readCachedSetupInventory(): LocalSetupInventory | null {
   } catch {
     return null
   }
+}
+
+export function isFreshSetupInventory(value: LocalSetupInventory | null, now = Date.now()): boolean {
+  const verifiedAt = value?.last_verified_at
+  return typeof verifiedAt === 'number'
+    && Number.isFinite(verifiedAt)
+    && verifiedAt > 0
+    && now >= verifiedAt * 1000
+    && now - verifiedAt * 1000 < SETUP_INVENTORY_CACHE_TTL_MS
 }
 
 export function writeCachedSetupInventory(value: LocalSetupInventory) {

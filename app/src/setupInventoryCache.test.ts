@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { readCachedSetupInventory, writeCachedSetupInventory } from './setupInventoryCache'
+import { isFreshSetupInventory, readCachedSetupInventory, writeCachedSetupInventory } from './setupInventoryCache'
 import type { LocalSetupInventory } from './types'
 
 const inventory = {
@@ -38,5 +38,14 @@ describe('setup inventory cache identity', () => {
     writeCachedSetupInventory(inventory)
 
     expect(window.localStorage.getItem('clipgauge.setup.inventory.v1')).toBeNull()
+  })
+
+  it('only treats recent verified inventory as fresh', () => {
+    const now = 1_700_000_000_000
+
+    expect(isFreshSetupInventory({ ...inventory, last_verified_at: (now - 60_000) / 1000 }, now)).toBe(true)
+    expect(isFreshSetupInventory({ ...inventory, last_verified_at: (now - 15 * 60_000 - 1) / 1000 }, now)).toBe(false)
+    expect(isFreshSetupInventory({ ...inventory, last_verified_at: (now + 60_000) / 1000 }, now)).toBe(false)
+    expect(isFreshSetupInventory({ ...inventory, last_verified_at: null }, now)).toBe(false)
   })
 })

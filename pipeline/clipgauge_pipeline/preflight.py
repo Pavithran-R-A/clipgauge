@@ -38,6 +38,42 @@ def _check(checks: list[dict], name: str, state: str, message: str, remediation:
     checks.append(row)
 
 
+def _provider_readiness_check(
+    checks: list[dict],
+    profile: providers_mod.ProviderProfile,
+    *,
+    credential_ready: bool | None = None,
+    endpoint_ready: bool | None = None,
+    model_available: bool | None = None,
+    model_compatible: bool | None = None,
+    runtime_ready: bool = True,
+    local_model_ready: bool = True,
+    service_ready: bool = True,
+) -> dict:
+    result = readiness.provider_readiness(
+        profile,
+        credential_ready=credential_ready,
+        endpoint_ready=endpoint_ready,
+        model_available=model_available,
+        model_compatible=model_compatible,
+        runtime_ready=runtime_ready,
+        local_model_ready=local_model_ready,
+        service_ready=service_ready,
+    )
+    if result["configured"]:
+        _check(checks, "provider-readiness", "ready", f"{profile.display_name} has the required provider configuration.", **result)
+    else:
+        _check(
+            checks,
+            "provider-readiness",
+            "blocked",
+            f"{profile.display_name} is not ready: {', '.join(result['blocking_reasons'])}.",
+            "Complete the listed provider configuration, then retry.",
+            **result,
+        )
+    return result
+
+
 def _writable_root(checks: list[dict]) -> None:
     try:
         root = config.ensure_home()
@@ -133,10 +169,15 @@ def _ollama(checks: list[dict], selected: str) -> None:
         _check(checks, "ollama", "blocked", "Ollama is stopped or unavailable on loopback.", "Start Ollama locally or switch the run to Gemini mode.")
 
 
-def _provider(checks: list[dict], profile: providers_mod.ProviderProfile) -> None:
+def _provider(checks: list[dict], profile: providers_mod.ProviderProfile, *, quality_mode: str = "private") -> dict:
+    try:
+        config.validate_quality_mode_for_provider(quality_mode, profile.locality)
+    except ValueError as error:
+        _check(checks, "provider-mode", "blocked", str(error), "Choose a provider matching the selected scoring mode.", provider=profile.kind, quality_mode=quality_mode, locality=profile.locality)
     if not profile.enabled:
         _check(checks, "provider", "blocked", "The selected provider profile is disabled.", "Enable the profile in Settings.", provider=profile.kind)
-        return
+        return readiness.provider_readiness(profile, service_ready=False)
+    credential_ready = profile.auth_strategy == "none" or bool(providers_mod.secret_from_environment(profile))
     if profile.auth_strategy != "none" and not providers_mod.secret_from_environment(profile):
         _check(
             checks,
@@ -146,7 +187,8 @@ def _provider(checks: list[dict], profile: providers_mod.ProviderProfile) -> Non
             "Save the provider credential in Settings or choose a local provider.",
             provider=profile.kind,
         )
-        return
+        result = _provider_readiness_check(checks, profile, credential_ready=False)
+        return result
     if profile.kind == "clipgauge-local":
         try:
             managed = local_runtime.LocalRuntime()
@@ -155,20 +197,22 @@ def _provider(checks: list[dict], profile: providers_mod.ProviderProfile) -> Non
             model_spec = local_runtime.MODEL_CATALOG[profile.model]
         except (KeyError, local_runtime.LocalRuntimeError) as error:
             _check(checks, "clipgauge-local", "blocked", "ClipGauge Local is not available for the selected model or platform.", "Open Setup Center and choose a verified local model.", error=str(error), provider=profile.kind)
-            return
+            return _provider_readiness_check(checks, profile, credential_ready=credential_ready, runtime_ready=False, local_model_ready=False)
         if not binary.is_file():
             _check(checks, "clipgauge-local-runtime", "blocked", "ClipGauge Local runtime is not installed yet.", "Open Setup Center to install the verified llama.cpp runtime.", path=str(binary), expected_size=managed.runtime_asset().get("size"), provider=profile.kind)
-            return
+            return _provider_readiness_check(checks, profile, credential_ready=credential_ready, runtime_ready=False)
         if not model.is_file():
             _check(checks, "clipgauge-local-model", "blocked", f"{model_spec.display_name} is not installed yet.", "Open Setup Center to download the verified local model.", expected_size=model_spec.size_bytes, provider=profile.kind, model=profile.model)
-            return
+            return _provider_readiness_check(checks, profile, credential_ready=credential_ready, local_model_ready=False)
         digest = runtime.sha256_file(model)
         if digest.lower() != model_spec.sha256.lower():
             _check(checks, "clipgauge-local-model", "blocked", "The ClipGauge Local model failed SHA-256 verification.", "Delete the invalid model and retry the verified download.", sha256=digest, expected_size=model_spec.size_bytes, provider=profile.kind, model=profile.model)
-            return
+            return _provider_readiness_check(checks, profile, credential_ready=credential_ready, local_model_ready=False)
         _check(checks, "clipgauge-local", "ready", "ClipGauge Local runtime and model are verified.", provider=profile.kind, model=profile.model, endpoint=profile.endpoint_identity, capabilities=profile.capabilities.to_dict())
-        return
+        return _provider_readiness_check(checks, profile, credential_ready=credential_ready)
     if profile.kind in {"ollama", "lmstudio"}:
+        service_ready = False
+        model_available = False
         try:
             listing_path = "/api/tags" if profile.kind == "ollama" else "/models"
             response = httpx.get(profile.endpoint_identity.rstrip("/") + listing_path, timeout=3.0)
@@ -183,10 +227,24 @@ def _provider(checks: list[dict], profile: providers_mod.ProviderProfile) -> Non
             if not models:
                 _check(checks, "provider", "blocked", f"{profile.display_name} is running but has no local models.", "Start the local server and load a compatible chat model, then retry.", provider=profile.kind, models=[])
             else:
-                _check(checks, "provider", "ready", f"{profile.display_name} is running with local models.", provider=profile.kind, models=models)
+                service_ready = True
+                model_available = profile.model == "auto" or profile.model in models
+                state = "ready" if model_available else "blocked"
+                message = f"{profile.display_name} is running with the selected local model." if model_available else f"{profile.display_name} does not expose the selected model."
+                remediation = None if model_available else "Choose a model returned by the local service, then retry."
+                _check(checks, "provider", state, message, remediation, provider=profile.kind, model=profile.model, models=models)
         except (httpx.HTTPError, ValueError, KeyError, TypeError):
             _check(checks, "provider", "blocked", f"{profile.display_name} is stopped or unavailable on loopback.", "Start the local server or choose another provider.", provider=profile.kind)
-        return
+        return _provider_readiness_check(checks, profile, credential_ready=credential_ready, service_ready=service_ready, model_available=model_available)
+    model_available = profile.metadata.get("model_available", True)
+    model_compatible = profile.metadata.get("model_compatible", profile.capabilities.structured_json is not False)
+    result = _provider_readiness_check(
+        checks,
+        profile,
+        credential_ready=credential_ready,
+        model_available=bool(model_available),
+        model_compatible=bool(model_compatible),
+    )
     _check(
         checks,
         "provider",
@@ -198,6 +256,7 @@ def _provider(checks: list[dict], profile: providers_mod.ProviderProfile) -> Non
         endpoint=profile.endpoint_identity,
         capabilities=profile.capabilities.to_dict(),
     )
+    return result
 
 
 def _storage_estimate(checks: list[dict], free_bytes: int | None) -> dict:
@@ -261,7 +320,12 @@ def _source_storage_check(checks: list[dict], source: str | None, free_bytes: in
         )
 
 
-def run(selected_llm: providers_mod.ProviderProfile | str = "gemini", source: str | None = None) -> dict:
+def run(
+    selected_llm: providers_mod.ProviderProfile | str = "gemini",
+    source: str | None = None,
+    *,
+    quality_mode: str | None = None,
+) -> dict:
     checks: list[dict] = []
     system = platform.system()
     machine = platform.machine()
@@ -322,11 +386,12 @@ def run(selected_llm: providers_mod.ProviderProfile | str = "gemini", source: st
             public_download_verified=public_verified,
         )
     profile = providers_mod.legacy_profile(selected_llm) if isinstance(selected_llm, str) else selected_llm
-    _provider(checks, profile)
+    selected_mode = quality_mode or ("private" if profile.locality == "local" else "best")
+    provider_result = _provider(checks, profile, quality_mode=selected_mode)
     states = {item["state"] for item in checks}
     overall = "blocked" if "blocked" in states else "warning" if "warning" in states else "ready"
     capabilities = hardware.snapshot(config.home_dir())
-    provider_ready = not any(check.get("state") == "blocked" and check.get("name") in {"provider", "clipgauge-local", "clipgauge-local-runtime", "clipgauge-local-model", "provider-credential"} for check in checks)
+    provider_ready = bool(provider_result["configured"])
     selected_runtime = profile.kind
     runtime_ready = provider_ready
     if profile.kind == "clipgauge-local":
@@ -357,6 +422,7 @@ def run(selected_llm: providers_mod.ProviderProfile | str = "gemini", source: st
             "endpoint_identity": profile.endpoint_identity,
             "capabilities": profile.capabilities.to_dict(),
             "locality": profile.locality,
+            "readiness": provider_result,
         },
         "readiness": provider_contract,
     }

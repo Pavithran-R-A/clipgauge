@@ -6,6 +6,7 @@ import pytest
 
 from clipgauge_pipeline.asr import stage as asr_stage
 from clipgauge_pipeline.asr import probe as asr_probe
+from clipgauge_pipeline.asr.audio import AnalysisAudioError
 from clipgauge_pipeline.asr.stage import _transcribe_with_fallback
 from clipgauge_pipeline.jobs.queue import StageError
 
@@ -132,6 +133,12 @@ def test_cpu_transcription_does_not_retry_permanent_failures():
 
 def test_degraded_acceleration_state_uses_canonical_label():
     assert asr_stage.DEGRADED_ACCELERATION_STATE == "GPU PRESENT — RUNTIME DEGRADED"
+
+
+def test_oversized_analysis_audio_uses_typed_resource_failure():
+    error = AnalysisAudioError("WAV_TOO_LARGE", "analysis audio exceeds the memory safety limit")
+
+    assert asr_stage._asr_failure_code(error, "ASR_AUDIO_LOAD") == "ASR_RESOURCE_LIMIT"
 
 
 def test_cpu_asr_stage_rejects_unverified_compute_types(monkeypatch, tmp_path):

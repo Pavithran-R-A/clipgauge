@@ -62,6 +62,23 @@ def test_preflight_warning_is_not_blocked(monkeypatch, tmp_path):
     assert result["state"] == "warning"
 
 
+def test_preflight_enforces_quality_mode_provider_locality(monkeypatch, tmp_path):
+    monkeypatch.setattr(preflight.config, "home_dir", lambda: tmp_path)
+    monkeypatch.setattr(preflight.config, "ensure_home", lambda: tmp_path)
+    monkeypatch.setattr(preflight.shutil, "disk_usage", lambda _path: type("Usage", (), {"free": 5 * 1024 * 1024 * 1024})())
+    monkeypatch.setattr(preflight, "_writable_root", lambda checks: None)
+    monkeypatch.setattr(preflight, "_runtime_manifest", lambda: {"manifest_version": 1, "runtimes": {}, "models": {}})
+    monkeypatch.setattr(preflight, "_yt_dlp", lambda checks, manifest: None)
+    monkeypatch.setattr(preflight, "_models", lambda checks, manifest: None)
+    monkeypatch.setattr(preflight, "_ffmpeg", lambda checks: None)
+    monkeypatch.setattr(preflight, "_ollama", lambda checks, selected: None)
+
+    result = preflight.run("ollama", quality_mode="balanced")
+
+    assert result["state"] == "blocked"
+    assert any(check["name"] == "provider-mode" and check["state"] == "blocked" for check in result["checks"])
+
+
 def test_preflight_blocks_source_storage_shortfall(monkeypatch, tmp_path):
     source = tmp_path / "source.mp4"
     source.write_bytes(b"0" * (2 * 1024 * 1024))
