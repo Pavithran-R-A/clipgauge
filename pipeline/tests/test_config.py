@@ -31,6 +31,14 @@ def test_private_mode_rejects_cloud_provider_data_flow():
         config.validate_quality_mode_for_provider("private", "cloud")
 
 
+def test_cloud_modes_reject_local_provider_data_flow():
+    with pytest.raises(ValueError, match="require a cloud provider"):
+        config.validate_quality_mode_for_provider("balanced", "local")
+
+    with pytest.raises(ValueError, match="require a cloud provider"):
+        config.validate_quality_mode_for_provider("best", "local")
+
+
 def test_output_preference_is_validated_and_snapshotted():
     settings = config.Settings(output_preference="best")
     snapshot = settings.to_json()

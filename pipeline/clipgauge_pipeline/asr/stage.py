@@ -14,7 +14,7 @@ from ..jobs import queue
 from ..jobs.queue import Stage, StageContext, StageError
 from ..models import managed
 from .alignment import EXACT, alignment_policy, fallback_word_alignment
-from .audio import load_analysis_audio
+from .audio import AnalysisAudioError, load_analysis_audio
 
 ASR_MODEL = "large-v3-turbo"
 COMPUTE_TYPE = "int8"
@@ -49,6 +49,10 @@ def _safe_exception_message(exc: BaseException) -> str:
 
 
 def _asr_failure_code(exc: BaseException, substep: str) -> str:
+    if isinstance(exc, AnalysisAudioError):
+        if exc.code == "WAV_TOO_LARGE":
+            return "ASR_RESOURCE_LIMIT"
+        return "ASR_AUDIO_LOAD_FAILED"
     text = str(exc).lower()
     if any(term in text for term in ("dll", "shared object", "cannot import", "module named")):
         return "ASR_RUNTIME_MISSING"
@@ -339,9 +343,10 @@ class AsrStage(Stage):
             try:
                 audio = load_analysis_audio(audio_path)
             except Exception as exc:
+                code = _asr_failure_code(exc, "ASR_AUDIO_LOAD")
                 raise StageError(
-                    "Speech recognition could not read the analysis audio. Retry the job or repair the video.",
-                    code="ASR_AUDIO_LOAD_FAILED", retryable=True,
+                    "Speech recognition needs a shorter audio input or more available working memory; retry with a shorter video." if code == "ASR_RESOURCE_LIMIT" else "Speech recognition could not read the analysis audio. Retry the job or repair the video.",
+                    code=code, retryable=True,
                     details=_asr_details(capabilities, selected_device=selected_device, selected_compute_type=selected_compute_type, actual_device=transcription_device, actual_compute_type=transcription_compute_type, batch_size=transcription_batch_size, mode=transcription_mode, substep="ASR_AUDIO_LOAD", exc=exc, fallback_attempts=fallback_attempts, model_file_state=model_file_state, whisperx_version=whisperx_version),
                 ) from exc
             duration = float(len(audio)) / 16000.0
@@ -398,9 +403,10 @@ class AsrStage(Stage):
             try:
                 audio = load_analysis_audio(audio_path)
             except Exception as exc:
+                code = _asr_failure_code(exc, "ASR_AUDIO_LOAD")
                 raise StageError(
-                    "Speech recognition could not read the analysis audio. Retry the job or repair the video.",
-                    code="ASR_AUDIO_LOAD_FAILED", retryable=True,
+                    "Speech recognition needs a shorter audio input or more available working memory; retry with a shorter video." if code == "ASR_RESOURCE_LIMIT" else "Speech recognition could not read the analysis audio. Retry the job or repair the video.",
+                    code=code, retryable=True,
                     details=_asr_details(capabilities, selected_device=selected_device, selected_compute_type=selected_compute_type, actual_device=transcription_device, actual_compute_type=transcription_compute_type, batch_size=transcription_batch_size, mode=transcription_mode, substep="ASR_AUDIO_LOAD", exc=exc, fallback_attempts=fallback_attempts, model_file_state=model_file_state, whisperx_version=whisperx_version, started_at=model_started),
                 ) from exc
             duration = float(len(audio)) / 16000.0

@@ -4,6 +4,7 @@ import { open } from '@tauri-apps/plugin-dialog'
 import type { JobSummary, StageProgress } from '../types'
 import { creatorHeadline, YOUTUBE_HELPER_COPY, type CreatorRunState } from '../creatorState'
 import { friendlyErrorMessage } from '../errorMessaging'
+import { evaluateProviderReadiness, resolveProviderExecution, type QualityMode } from '../providerContract'
 
 const STAGE_ORDER = ['ingest', 'asr', 'diarize', 'events', 'candidates', 'score', 'camera', 'render']
 const STAGE_LABELS: Record<string, string> = {
@@ -32,7 +33,6 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   ollama: 'auto',
   lmstudio: 'auto',
 }
-const LOCAL_PROVIDER_IDS = new Set(['clipgauge-local', 'ollama', 'lmstudio'])
 const CAPTION_OPTIONS = [
   { id: 'classic', name: 'Clean', description: 'Readable and balanced.' },
   { id: 'beast', name: 'Bold Pop', description: 'High-energy emphasis.' },
@@ -40,7 +40,7 @@ const CAPTION_OPTIONS = [
   { id: 'minimal', name: 'Minimal', description: 'Quiet and focused.' },
 ]
 const QUALITY_OPTIONS = [
-  { id: 'private', name: 'Private / Local', description: 'ClipGauge Local. Lightweight or Balanced. No cloud.' },
+  { id: 'private', name: 'Private / Local', description: 'Use your selected local provider. No cloud.' },
   { id: 'balanced', name: 'Balanced / Hybrid', description: 'Local discovery plus your configured cloud provider.' },
   { id: 'best', name: 'Best Quality', description: 'Your configured cloud provider and model.' },
 ] as const
@@ -63,7 +63,12 @@ interface Props {
   notice: string | null
   onRun: (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, browserSession?: string, qualityMode?: string, outputPreference?: string) => void
   localModelId?: string
+  providerModel?: string
+  providerModelAvailable?: boolean
+  providerModelCompatible?: boolean
+  providerServiceReady?: boolean
   cloudConfigured?: boolean
+  providerEndpoint?: string
   onCancel: () => void
   onContinueCpu: () => void
   onRepairGpu?: () => void
@@ -111,8 +116,9 @@ function providerName(provider: string) {
   return names[provider] ?? provider
 }
 
-export default function Studio({ running, runState, cancelling, startedAt, elapsedSeconds, stages, error, errorCode, notice, resultsLoadFailed = false, onRetryResults, onRun, localModelId, cloudConfigured = true, onContinueCpu, onRepairGpu, gpuRepairing, onCancel, onNavigate, selectedProvider, onSelectProvider }: Props) {
+export default function Studio({ running, runState, cancelling, startedAt, elapsedSeconds, stages, error, errorCode, notice, resultsLoadFailed = false, onRetryResults, onRun, localModelId, providerModel, providerModelAvailable, providerModelCompatible, providerServiceReady, cloudConfigured = true, providerEndpoint, onContinueCpu, onRepairGpu, gpuRepairing, onCancel, onNavigate, selectedProvider, onSelectProvider }: Props) {
   const [source, setSource] = useState('')
+  const [sourceDraft, setSourceDraft] = useState('')
   const [captions, setCaptions] = useState('classic')
   const [qualityMode, setQualityMode] = useState<(typeof QUALITY_OPTIONS)[number]['id']>('private')
   const [outputPreference, setOutputPreference] = useState<(typeof OUTPUT_OPTIONS)[number]['id']>('recommended')
@@ -135,10 +141,12 @@ export default function Studio({ running, runState, cancelling, startedAt, elaps
   const elapsed = startedAt ? Math.max(0, Math.floor((now - startedAt) / 1000)) : elapsedSeconds ?? 0
   const selectedAI = AI_OPTIONS.find((option) => option.id === provider) ?? { id: 'other', name: providerName(provider), description: 'Selected provider for scoring.', tone: 'neutral' }
   const selectedCaption = CAPTION_OPTIONS.find((option) => option.id === captions) ?? CAPTION_OPTIONS[0]
-  const runProvider = qualityMode === 'private' ? 'clipgauge-local' : provider
-  const selectedModel = readProviderModel(runProvider, localModelId)
-  const cloudAvailable = cloudConfigured && !LOCAL_PROVIDER_IDS.has(provider)
-  const cloudModeBlocked = qualityMode !== 'private' && !cloudAvailable
+  const selectedModel = providerModel ?? readProviderModel(provider, localModelId)
+  const readiness = evaluateProviderReadiness({ provider, model: selectedModel, credentialReady: cloudConfigured, endpointReady: providerEndpoint ? true : undefined, modelAvailable: providerModelAvailable, modelCompatible: providerModelCompatible, serviceReady: providerServiceReady })
+  const cloudAvailable = readiness.locality === 'cloud' && readiness.configured
+  const modeAllowed = qualityMode === 'private' ? readiness.can_private : qualityMode === 'balanced' ? readiness.can_hybrid : readiness.can_best
+  const modeBlocked = !modeAllowed
+  const execution = modeAllowed ? resolveProviderExecution(provider, qualityMode as QualityMode, selectedModel) : null
   const hasProgress = running || Object.keys(stages).length > 0 || runState !== 'IDLE' || Boolean(error)
 
   async function chooseFile() {
@@ -146,7 +154,10 @@ export default function Studio({ running, runState, cancelling, startedAt, elaps
     try {
       const selected = await open({ multiple: false, directory: false, filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'mkv', 'webm', 'avi'] }] })
       if (!mountedRef.current) return
-      if (typeof selected === 'string') setSource(selected)
+      if (typeof selected === 'string') {
+        setSource(selected)
+        setSourceDraft('')
+      }
     } catch (error) {
       if (mountedRef.current) setFileError(friendlyErrorMessage(error, 'The video picker could not open. Retry the action.'))
     }
@@ -156,7 +167,7 @@ export default function Studio({ running, runState, cancelling, startedAt, elaps
     event.preventDefault()
     if (!running) {
       const file = event.dataTransfer.files[0] as (File & { path?: string }) | undefined
-      if (file?.path) { setFileError(null); setSource(file.path) }
+      if (file?.path) { setFileError(null); setSource(file.path); setSourceDraft('') }
     }
   }
 
@@ -177,18 +188,18 @@ export default function Studio({ running, runState, cancelling, startedAt, elaps
           <section className="add-video card-surface" aria-labelledby="add-video-heading">
             <div className="section-heading"><div><p className="section-eyebrow">Step 1</p><h2 id="add-video-heading">Add a video</h2><p className="section-caption">Choose a local file or paste a public YouTube link.</p></div><span className="step-count">1 of 3</span></div>
             <div className={`drop-zone ${source ? 'has-file' : ''}`} onDragOver={(event) => event.preventDefault()} onDrop={dropFile}>
-              {source ? <div className="selected-file"><span className="selected-file-icon"><FileVideo size={25} aria-hidden="true" /></span><span className="selected-file-copy"><strong>{displayFileName(source)}</strong><small>{source.startsWith('http') ? 'YouTube link' : 'Local video selected'}</small></span><button type="button" className="button button-quiet" onClick={() => setSource('')} disabled={running}><X size={15} aria-hidden="true" /> Change</button></div> : <div className="drop-zone-empty"><span className="drop-icon"><FolderOpen size={24} aria-hidden="true" /></span><strong>Drop a video here</strong><span>or choose a file from your computer</span><button type="button" className="button button-secondary" onClick={chooseFile} disabled={running}><FolderOpen size={16} aria-hidden="true" /> Choose video</button></div>}
+              {source ? <div className="selected-file"><span className="selected-file-icon"><FileVideo size={25} aria-hidden="true" /></span><span className="selected-file-copy"><strong>{displayFileName(source)}</strong><small>{source.startsWith('http') ? 'YouTube link' : 'Local video selected'}</small></span><button type="button" className="button button-quiet" onClick={() => { setSource(''); setSourceDraft('') }} disabled={running}><X size={15} aria-hidden="true" /> Change</button></div> : <div className="drop-zone-empty"><span className="drop-icon"><FolderOpen size={24} aria-hidden="true" /></span><strong>Drop a video here</strong><span>or choose a file from your computer</span><button type="button" className="button button-secondary" onClick={chooseFile} disabled={running}><FolderOpen size={16} aria-hidden="true" /> Choose video</button></div>}
             </div>
             {fileError && <p className="error-message" role="alert">{fileError}</p>}
-            <div className="link-input"><label htmlFor="source-link">Video link</label><input id="source-link" value={source.startsWith('http') ? source : ''} onChange={(event) => { setFileError(null); setSource(event.target.value) }} placeholder="Paste a YouTube link" disabled={running || Boolean(source && !source.startsWith('http'))} /><span className="input-hint">{YOUTUBE_HELPER_COPY}</span></div>
+            <div className="link-input"><label htmlFor="source-link">Video link</label><input id="source-link" value={sourceDraft} onChange={(event) => { setFileError(null); setSourceDraft(event.target.value); setSource(event.target.value) }} placeholder="Paste a YouTube link" disabled={running || Boolean(source && !source.startsWith('http') && !sourceDraft)} /><span className="input-hint">{YOUTUBE_HELPER_COPY}</span></div>
           </section>
           <section className="choice-section" aria-labelledby="ai-heading"><div className="section-heading"><div><p className="section-eyebrow">Step 2</p><h2 id="ai-heading">Choose AI</h2><p className="section-caption">Pick where ClipGauge scores the strongest moments.</p></div><span className="step-count">2 of 3</span></div><div className="choice-card-grid">{AI_OPTIONS.map((option) => { const selected = option.id === 'other' ? provider !== 'clipgauge-local' && provider !== 'openrouter' : provider === option.id; return <button type="button" key={option.id} className={`choice-card choice-${option.tone} ${selected ? 'is-selected' : ''}`} onClick={() => chooseAI(option.id)} aria-pressed={selected}><span className="choice-card-icon"><Sparkles size={17} aria-hidden="true" /></span><span><strong>{option.name}</strong><small>{option.description}</small></span>{selected && <span className="choice-selected">Selected</span>}</button> })}</div><button type="button" className="text-button" onClick={() => onNavigate('providers')}>Manage AI providers <span aria-hidden="true">-&gt;</span></button></section>
           <section className="choice-section" aria-labelledby="caption-heading"><div className="section-heading"><div><p className="section-eyebrow">Step 3</p><h2 id="caption-heading">Choose caption style</h2><p className="section-caption">You can change this later in Review.</p></div><span className="step-count">3 of 3</span></div><div className="caption-choice-grid">{CAPTION_OPTIONS.map((option) => <button type="button" key={option.id} className={`caption-choice ${captions === option.id ? 'is-selected' : ''}`} onClick={() => setCaptions(option.id)} aria-pressed={captions === option.id}><span className={`caption-preview caption-${option.id}`}>Aa</span><span><strong>{option.name}</strong><small>{option.description}</small></span></button>)}</div></section>
-          <section className="choice-section" aria-labelledby="quality-heading"><div className="section-heading"><div><p className="section-eyebrow">Scoring preference</p><h2 id="quality-heading">Choose scoring mode</h2><p className="section-caption">Cloud scoring never starts without your explicit mode choice.</p></div></div><div className="choice-card-grid">{QUALITY_OPTIONS.map((option) => { const disabled = option.id !== 'private' && !cloudAvailable; return <button type="button" key={option.id} className={`choice-card choice-neutral ${qualityMode === option.id ? 'is-selected' : ''}`} onClick={() => { if (!disabled) setQualityMode(option.id) }} aria-pressed={qualityMode === option.id} disabled={disabled} aria-disabled={disabled}><span className="choice-card-icon"><LockKeyhole size={17} aria-hidden="true" /></span><span><strong>{option.name}</strong><small>{option.description}</small></span>{qualityMode === option.id && <span className="choice-selected">Selected</span>}</button> })}</div>{qualityMode === 'private' && <p className="field-help" role="status">ClipGauge Local scores here using {readProviderModel('clipgauge-local', localModelId)}. No cloud provider receives candidate data.</p>}{!cloudAvailable && <p className="field-help" role="note">Configure a cloud provider and model in AI Providers before choosing Hybrid or Best Quality.</p>}{qualityMode !== 'private' && !cloudModeBlocked && <p className="field-help" role="note">What leaves this computer: candidate transcript, candidate metadata, and sampled images when visual scoring is supported. The full source file stays on this computer.</p>}</section>
+          <section className="choice-section" aria-labelledby="quality-heading"><div className="section-heading"><div><p className="section-eyebrow">Scoring preference</p><h2 id="quality-heading">Choose scoring mode</h2><p className="section-caption">Cloud scoring never starts without your explicit mode choice.</p></div></div><div className="choice-card-grid">{QUALITY_OPTIONS.map((option) => { const disabled = option.id === 'private' ? readiness.locality === 'cloud' : readiness.locality === 'local' || !cloudAvailable; return <button type="button" key={option.id} className={`choice-card choice-neutral ${qualityMode === option.id ? 'is-selected' : ''}`} onClick={() => { if (!disabled) setQualityMode(option.id) }} aria-pressed={qualityMode === option.id} disabled={disabled} aria-disabled={disabled}><span className="choice-card-icon"><LockKeyhole size={17} aria-hidden="true" /></span><span><strong>{option.name}</strong><small>{option.description}</small></span>{qualityMode === option.id && <span className="choice-selected">Selected</span>}</button> })}</div>{qualityMode === 'private' && readiness.locality === 'local' && <p className="field-help" role="status">{providerName(provider)} scores here using {selectedModel}. No cloud provider receives candidate data.</p>}{qualityMode === 'private' && readiness.locality === 'cloud' && <p className="field-help" role="alert">Private mode requires a local provider. Choose ClipGauge Local, Ollama, or LM Studio.</p>}{!cloudAvailable && readiness.locality === 'local' && <p className="field-help" role="note">Configure a cloud provider and model in AI Providers before choosing Hybrid or Best Quality.</p>}{qualityMode !== 'private' && !cloudAvailable && readiness.locality === 'cloud' && <p className="field-help" role="note">{readiness.blocking_reasons.join('. ') || 'Configure a capable cloud provider and model'} before choosing {qualityMode === 'balanced' ? 'Balanced' : 'Best Quality'}.</p>}{qualityMode !== 'private' && !modeBlocked && <p className="field-help" role="note">What leaves this computer: candidate transcript, candidate metadata, and sampled images when visual scoring is supported. The full source file stays on this computer.</p>}</section>
           <section className="choice-section" aria-labelledby="output-heading"><div className="section-heading"><div><p className="section-eyebrow">Review preference</p><h2 id="output-heading">Choose how many options</h2><p className="section-caption">You can review more moments before exporting.</p></div></div><div className="choice-card-grid">{OUTPUT_OPTIONS.map((option) => <button type="button" key={option.id} className={outputPreference === option.id ? 'choice-card choice-neutral is-selected' : 'choice-card choice-neutral'} onClick={() => setOutputPreference(option.id)} aria-pressed={outputPreference === option.id}><span className="choice-card-icon"><Sparkles size={17} aria-hidden="true" /></span><span><strong>{option.name}</strong><small>{option.description}</small></span>{outputPreference === option.id && <span className="choice-selected">Selected</span>}</button>)}</div></section>
-          <div className="create-action-row"><button type="button" className="button button-primary create-button" onClick={() => source.trim() && onRun(source.trim(), runProvider, captions, runProvider === 'clipgauge-local' ? localModelId : selectedModel, undefined, undefined, undefined, undefined, qualityMode, outputPreference)} disabled={running || !source.trim() || cloudModeBlocked}><Play size={17} fill="currentColor" aria-hidden="true" />{running ? 'Creating clips...' : 'Create clips'}</button>{running && <button type="button" className="button button-quiet" onClick={onCancel} disabled={cancelling}>{cancelling ? 'Cancelling...' : 'Cancel'}</button>}<span className="action-note"><LockKeyhole size={14} aria-hidden="true" /> {qualityMode === 'private' ? `ClipGauge Local - ${readProviderModel('clipgauge-local', localModelId)}` : `${providerName(provider)} - ${selectedModel}`}</span></div>
+          <div className="create-action-row"><button type="button" className="button button-primary create-button" onClick={() => source.trim() && execution && onRun(source.trim(), execution.provider, captions, execution.model, undefined, undefined, undefined, undefined, execution.qualityMode, outputPreference)} disabled={running || !source.trim() || modeBlocked}><Play size={17} fill="currentColor" aria-hidden="true" />{running ? 'Creating clips...' : 'Create clips'}</button>{running && <button type="button" className="button button-quiet" onClick={onCancel} disabled={cancelling}>{cancelling ? 'Cancelling...' : 'Cancel'}</button>}<span className="action-note"><LockKeyhole size={14} aria-hidden="true" /> {providerName(provider)} - {selectedModel} ({readiness.locality})</span></div>
         </div>
-        <aside className="create-side-column"><section className="side-note card-surface"><div className="side-note-icon"><Info size={18} aria-hidden="true" /></div><div><strong>What happens next?</strong><p>ClipGauge finds strong moments, reframes them for vertical video, and adds captions. You will get a review screen with every clip and its reasons.</p></div></section><section className="selected-summary card-surface"><p className="section-eyebrow">Your choices</p><div className="summary-row"><span>AI</span><strong>{selectedAI.name}</strong></div><div className="summary-row"><span>Mode</span><strong>{QUALITY_OPTIONS.find((option) => option.id === qualityMode)?.name}</strong></div><div className="summary-row"><span>Provider / model</span><strong>{qualityMode === 'private' ? `ClipGauge Local - ${readProviderModel('clipgauge-local', localModelId)}` : `${providerName(provider)} - ${selectedModel}`}</strong></div><div className="summary-row"><span>Captions</span><strong>{selectedCaption.name}</strong></div><div className="summary-row"><span>Output</span><strong>Vertical 9:16</strong></div></section></aside>
+        <aside className="create-side-column"><section className="side-note card-surface"><div className="side-note-icon"><Info size={18} aria-hidden="true" /></div><div><strong>What happens next?</strong><p>ClipGauge finds strong moments, reframes them for vertical video, and adds captions. You will get a review screen with every clip and its reasons.</p></div></section><section className="selected-summary card-surface"><p className="section-eyebrow">Your choices</p><div className="summary-row"><span>AI</span><strong>{selectedAI.name}</strong></div><div className="summary-row"><span>Mode</span><strong>{QUALITY_OPTIONS.find((option) => option.id === qualityMode)?.name}</strong></div><div className="summary-row"><span>Provider / model</span><strong>{providerName(provider)} - {selectedModel} ({readiness.locality})</strong></div><div className="summary-row"><span>Captions</span><strong>{selectedCaption.name}</strong></div><div className="summary-row"><span>Output</span><strong>Vertical 9:16</strong></div></section></aside>
       </div>
       {hasProgress && <section className="processing-panel card-surface" aria-live="polite"><div className="processing-header"><div><p className="section-eyebrow">Creating your clips</p><h2>{creatorHeadline(runState)}</h2></div><span className="elapsed-pill">{formatElapsed(elapsed)} elapsed</span></div><div className="processing-timeline" data-testid="processing-timeline">{STAGE_ORDER.map((stage) => { const current = stages[stage]; const done = Boolean(current && current.fraction >= 1); const active = Boolean(current && !done) || (!current && running && stage === STAGE_ORDER.find((item) => !stages[item])); return <div className={`timeline-step ${done ? 'is-done' : ''} ${active ? 'is-active' : ''}`} key={stage}><span className="timeline-dot" aria-hidden="true">{done ? 'check' : active ? 'dot' : ''}</span><span>{current?.displayStage ?? STAGE_LABELS[stage]}</span>{active && current?.operation && <small>{current.operation}</small>}</div> })}</div>{notice && <p className="inline-message" role="status">{notice}</p>}{error && <p className="error-message" role="alert">{error}</p>}{resultsLoadFailed && <button type="button" className="button button-secondary" onClick={onRetryResults}>Retry Review loading</button>}<details className="technical-disclosure"><summary>Show technical details</summary><div className="technical-progress-list">{Object.entries(stages).map(([name, stage]) => <div key={name}><span>{name}</span><span>{stage.message}</span></div>)}</div></details></section>}
     </div>

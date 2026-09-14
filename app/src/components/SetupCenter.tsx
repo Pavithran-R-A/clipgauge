@@ -5,7 +5,7 @@ import { api } from '../api'
 import type { GpuDiagnostics, JobSummary, LocalSetupInventory, ManagedAssetRow, SetupProgressEvent, YouTubeReadiness } from '../types'
 import { assetLifecycleLabel, diskState, formatBytes, formatDuration, formatRate, meaningfulEta, progressPercent } from '../setupFormatting'
 import { isLocalAiUnavailable, resolveSelectedLocalModel, summarizeSetupQueue, type SetupQueueSummary } from '../setupState'
-import { readCachedSetupInventory, writeCachedSetupInventory } from '../setupInventoryCache'
+import { isFreshSetupInventory, readCachedSetupInventory, writeCachedSetupInventory } from '../setupInventoryCache'
 import { loadErrorMessage, setupPhaseLabel, type SetupLoadState } from '../setupLifecycle'
 import { isLocalSetupInventory, isStorageCleanupPreview, isStorageCleanupResult, isYouTubeReadiness as isNativeYouTubeReadiness } from '../nativeValidation'
 import { friendlyErrorMessage } from '../errorMessaging'
@@ -25,9 +25,9 @@ type GpuCacheIdentity = {
 type GpuCacheRecord = { schema_version: number; app_version: string; identity: GpuCacheIdentity; value: GpuDiagnostics; verifiedAt: string }
 const GPU_CACHE_KEY = 'clipgauge.setup.gpu.v1'
 const GPU_CACHE_SCHEMA_VERSION = 1
-const GPU_CACHE_APP_VERSION = '0.5.17'
-const YOUTUBE_CACHE_SCHEMA_VERSION = 1
-const YOUTUBE_CACHE_APP_VERSION = '0.5.17'
+const GPU_CACHE_APP_VERSION = '0.5.18'
+const YOUTUBE_CACHE_SCHEMA_VERSION = 2
+const YOUTUBE_CACHE_APP_VERSION = '0.5.18'
 const GPU_CACHE_TTL_MS = 15 * 60 * 1000
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -80,13 +80,40 @@ function isYouTubeReadiness(value: unknown): value is YouTubeReadiness {
     && Array.isArray(value.checks)
 }
 
-function isYouTubeCache(value: unknown): value is { schema_version: number; app_version: string; value: YouTubeReadiness | null; verifiedAt: string } {
+type YouTubeCacheRecord = {
+  schema_version: number
+  app_version: string
+  value: YouTubeReadiness | null
+  verifiedAt?: string
+  dependencyCheckedAt?: string
+  providerSelfTestedAt?: string | null
+  publicTransferVerifiedAt?: string | null
+}
+
+function isTimestamp(value: unknown): value is string {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value))
+}
+
+function isYouTubeCache(value: unknown): value is YouTubeCacheRecord {
   return isRecord(value)
-    && value.schema_version === YOUTUBE_CACHE_SCHEMA_VERSION
+    && (value.schema_version === 1 || value.schema_version === YOUTUBE_CACHE_SCHEMA_VERSION)
     && value.app_version === YOUTUBE_CACHE_APP_VERSION
-    && typeof value.verifiedAt === 'string'
-    && Number.isFinite(Date.parse(value.verifiedAt))
+    && (isTimestamp(value.verifiedAt) || isTimestamp(value.dependencyCheckedAt))
+    && (value.providerSelfTestedAt === undefined || value.providerSelfTestedAt === null || isTimestamp(value.providerSelfTestedAt))
+    && (value.publicTransferVerifiedAt === undefined || value.publicTransferVerifiedAt === null || isTimestamp(value.publicTransferVerifiedAt))
     && (value.value === null || isYouTubeReadiness(value.value))
+}
+
+function youtubeDependencyTimestamp(value: YouTubeCacheRecord | null): string | null {
+  return value?.dependencyCheckedAt ?? value?.verifiedAt ?? value?.value?.dependency_checked_at ?? null
+}
+
+function youtubeSelfTestTimestamp(value: YouTubeCacheRecord | null): string | null {
+  return value?.providerSelfTestedAt ?? value?.value?.provider_self_tested_at ?? null
+}
+
+function youtubePublicTransferTimestamp(value: YouTubeCacheRecord | null): string | null {
+  return value?.publicTransferVerifiedAt ?? value?.value?.public_transfer_verified_at ?? value?.value?.public_compatibility?.verified_at ?? null
 }
 
 function readCached<T>(key: string, guard: (value: unknown) => value is T): T | null {
@@ -259,7 +286,9 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null)
   const [queueSummary, setQueueSummary] = useState<SetupQueueSummary>({ state: 'pending', completed: 0, failed: 0, cancelled: false })
   const [youtubeStatus, setYoutubeStatus] = useState<YouTubeReadiness | null>(cachedYouTube?.value ?? null)
-  const [youtubeVerifiedAt, setYoutubeVerifiedAt] = useState<string | null>(cachedYouTube?.verifiedAt ?? null)
+  const [youtubeDependencyCheckedAt, setYoutubeDependencyCheckedAt] = useState<string | null>(() => youtubeDependencyTimestamp(cachedYouTube))
+  const [youtubeSelfTestedAt, setYoutubeSelfTestedAt] = useState<string | null>(() => youtubeSelfTestTimestamp(cachedYouTube))
+  const [youtubePublicTransferAt, setYoutubePublicTransferAt] = useState<string | null>(() => youtubePublicTransferTimestamp(cachedYouTube))
   const [youtubeLoad, setYoutubeLoad] = useState<SetupLoadState<YouTubeReadiness | null>>(cachedYouTube ? { phase: 'ready', value: cachedYouTube.value } : { phase: 'loading' })
   const [youtubeBusy, setYoutubeBusy] = useState(false)
   const [youtubeApproved, setYoutubeApproved] = useState(false)
@@ -271,8 +300,12 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
   const [gpuBusy, setGpuBusy] = useState(false)
   const youtubeStatusCopy = (status: YouTubeReadiness | null) => {
     const copy = youtubeLoadCopy(status, youtubeLoad)
-    if (!youtubeVerifiedAt) return copy
-    return `${copy} Last public compatibility test: ${new Date(youtubeVerifiedAt).toLocaleString()}.`
+    const dependency = youtubeDependencyCheckedAt ? `Tools checked: ${new Date(youtubeDependencyCheckedAt).toLocaleString()}.` : 'Tools checked: not yet.'
+    const selfTest = youtubeSelfTestedAt ? `Provider self-test: ${new Date(youtubeSelfTestedAt).toLocaleString()}.` : 'Provider self-test: not run.'
+    const publicTransfer = youtubePublicTransferAt
+      ? `Last public YouTube transfer verified: ${new Date(youtubePublicTransferAt).toLocaleString()}${status?.public_download_verified ? '.' : ' (stale).'}`
+      : 'Last public YouTube transfer verified: not yet.'
+    return `${copy} ${dependency} ${selfTest} ${publicTransfer}`
   }
   const queueRef = useRef<string[][]>([])
   const outcomesRef = useRef<Array<'success' | 'failed' | 'cancelled'>>([])
@@ -287,8 +320,9 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
   const mountedRef = useRef(true)
 
   const refreshYouTube = (force = false) => {
-    if (!force && cachedYouTube?.verifiedAt && Date.now() - Date.parse(cachedYouTube.verifiedAt) < YOUTUBE_CACHE_TTL_MS) {
-      return Promise.resolve(cachedYouTube.value)
+    const cachedCheckedAt = youtubeDependencyTimestamp(cachedYouTube)
+    if (!force && cachedCheckedAt && Date.now() - Date.parse(cachedCheckedAt) < YOUTUBE_CACHE_TTL_MS) {
+      return Promise.resolve(cachedYouTube?.value ?? null)
     }
     const requestId = ++youtubeRequestRef.current
     setYoutubeLoad({ phase: 'loading' })
@@ -296,10 +330,14 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
       if (!mountedRef.current || requestId !== youtubeRequestRef.current) return
       if (value !== null && !isNativeYouTubeReadiness(value)) throw new Error('YouTube readiness data is malformed.')
       const next = value as YouTubeReadiness | null
-      const verifiedAt = new Date().toISOString()
+      const dependencyCheckedAt = next?.dependency_checked_at ?? new Date().toISOString()
+      const providerSelfTestedAt = next?.provider_self_tested_at ?? null
+      const publicTransferVerifiedAt = next?.public_transfer_verified_at ?? next?.public_compatibility?.verified_at ?? null
       setYoutubeStatus(next)
-      setYoutubeVerifiedAt(verifiedAt)
-      writeCached(YOUTUBE_CACHE_KEY, { schema_version: YOUTUBE_CACHE_SCHEMA_VERSION, app_version: YOUTUBE_CACHE_APP_VERSION, value: next, verifiedAt })
+      setYoutubeDependencyCheckedAt(dependencyCheckedAt)
+      setYoutubeSelfTestedAt(providerSelfTestedAt)
+      setYoutubePublicTransferAt(publicTransferVerifiedAt)
+      writeCached(YOUTUBE_CACHE_KEY, { schema_version: YOUTUBE_CACHE_SCHEMA_VERSION, app_version: YOUTUBE_CACHE_APP_VERSION, value: next, dependencyCheckedAt, providerSelfTestedAt, publicTransferVerifiedAt })
       setYoutubeLoad({ phase: 'ready', value: next })
     }).catch((error) => {
       if (!mountedRef.current || requestId !== youtubeRequestRef.current) return
@@ -346,7 +384,7 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
   useEffect(() => {
     mountedRef.current = true
     let disposed = false
-    void refresh()
+    void (isFreshSetupInventory(cachedInventoryValue) ? Promise.resolve(cachedInventoryValue) : refresh())
     void refreshYouTube()
     void refreshGpu()
     let stop: (() => void) | undefined
@@ -432,10 +470,14 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
       const next = api.setupToolYouTubeTest ? await api.setupToolYouTubeTest() : null
       if (!mountedRef.current || requestId !== youtubeRequestRef.current) return
       if (next !== null && !isNativeYouTubeReadiness(next)) throw new Error('YouTube readiness data is malformed.')
-      const verifiedAt = new Date().toISOString()
+      const dependencyCheckedAt = next?.dependency_checked_at ?? youtubeDependencyCheckedAt
+      const providerSelfTestedAt = next?.provider_self_tested_at ?? (next ? new Date().toISOString() : youtubeSelfTestedAt)
+      const publicTransferVerifiedAt = next?.public_transfer_verified_at ?? next?.public_compatibility?.verified_at ?? youtubePublicTransferAt
       setYoutubeStatus(next)
-      setYoutubeVerifiedAt(verifiedAt)
-      writeCached(YOUTUBE_CACHE_KEY, { schema_version: YOUTUBE_CACHE_SCHEMA_VERSION, app_version: YOUTUBE_CACHE_APP_VERSION, value: next, verifiedAt })
+      setYoutubeDependencyCheckedAt(dependencyCheckedAt)
+      setYoutubeSelfTestedAt(providerSelfTestedAt)
+      setYoutubePublicTransferAt(publicTransferVerifiedAt)
+      writeCached(YOUTUBE_CACHE_KEY, { schema_version: YOUTUBE_CACHE_SCHEMA_VERSION, app_version: YOUTUBE_CACHE_APP_VERSION, value: next, dependencyCheckedAt, providerSelfTestedAt, publicTransferVerifiedAt })
       setYoutubeLoad({ phase: 'ready', value: next })
     } catch (error) {
       if (!mountedRef.current || requestId !== youtubeRequestRef.current) return

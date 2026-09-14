@@ -75,8 +75,11 @@ def validate_quality_mode(value: str) -> str:
 
 def validate_quality_mode_for_provider(value: str, locality: str) -> str:
     mode = validate_quality_mode(value)
-    if mode == "private" and str(locality).strip().lower() != "local":
+    normalized_locality = str(locality).strip().lower()
+    if mode == "private" and normalized_locality != "local":
         raise ValueError("private mode requires a local provider; choose Balanced or Best Quality for cloud scoring")
+    if mode != "private" and normalized_locality != "cloud":
+        raise ValueError("balanced and best modes require a cloud provider; choose a cloud provider")
     return mode
 
 

@@ -20,6 +20,7 @@ import { readCachedSetupInventory, writeCachedSetupInventory } from './setupInve
 import { normalizeJobResults } from './jobResultsValidation'
 import { isInstagramStatus, isJobSummaryList, isLocalSetupInventory, isPreflightResult, isSetupState } from './nativeValidation'
 import { friendlyErrorMessage } from './errorMessaging'
+import { isCloudProvider } from './providerContract'
 import './styles.css'
 
 function readSavedProviderModel(provider: string): string | undefined {
@@ -40,7 +41,25 @@ function readSavedProviderEndpoint(provider: string): string | undefined {
 
 const SETUP_STATE_CACHE_KEY = 'clipgauge.setup.state.v1'
 const RESULTS_LOAD_FAILURE_MESSAGE = 'Your clips were created, but Review could not load them.'
-const CLOUD_PROVIDER_IDS = ['openrouter', 'gemini', 'groq', 'cloudflare', 'huggingface', 'cerebras', 'custom']
+const PROVIDER_QUALIFICATION_TTL_MS = 10 * 60 * 1000
+
+type SavedProviderQualification = { checkedAt: string; modelAvailable: boolean; modelCompatible: boolean; serviceReady: boolean; endpointReady: boolean }
+
+function readProviderQualification(provider: string): SavedProviderQualification | null {
+  try {
+    const raw = window.localStorage.getItem(`clipgauge.provider-readiness.${provider}`)
+    if (!raw) return null
+    const value: unknown = JSON.parse(raw)
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+    const record = value as Partial<SavedProviderQualification>
+    if (typeof record.checkedAt !== 'string' || !Number.isFinite(Date.parse(record.checkedAt))) return null
+    if (Date.now() - Date.parse(record.checkedAt) > PROVIDER_QUALIFICATION_TTL_MS) return null
+    if (typeof record.modelAvailable !== 'boolean' || typeof record.modelCompatible !== 'boolean' || typeof record.serviceReady !== 'boolean' || typeof record.endpointReady !== 'boolean') return null
+    return { checkedAt: record.checkedAt, modelAvailable: record.modelAvailable, modelCompatible: record.modelCompatible, serviceReady: record.serviceReady, endpointReady: record.endpointReady }
+  } catch {
+    return null
+  }
+}
 
 function isBooleanRecord(value: unknown): value is Record<string, boolean> {
   return typeof value === 'object'
@@ -100,6 +119,7 @@ const FRIENDLY_FAILURES: Record<string, string> = {
   ASR_CPU_COMPUTE_UNSUPPORTED: 'This computer cannot use the selected CPU speech mode. Repair speech recognition, then retry.',
   ASR_MODEL_LOAD_RESOURCE_EXHAUSTED: 'Speech recognition needs more working memory. Close other applications and retry in Low-memory mode.',
   ASR_TRANSCRIPTION_RESOURCE_EXHAUSTED: 'Speech recognition needs more working memory. Close other applications and retry in Low-memory mode.',
+  ASR_RESOURCE_LIMIT: 'This audio is too large for safe speech recognition on this computer. Try a shorter video or Low-memory mode.',
   ASR_MODEL_LOAD_FAILED: 'Speech recognition could not load its model. Repair speech recognition, then retry.',
   ASR_AUDIO_LOAD_FAILED: 'Speech recognition could not read this video audio. Retry the job or choose another video.',
   ASR_TRANSCRIPTION_FAILED: 'Speech recognition could not complete. Retry the job or repair speech recognition.',
@@ -137,16 +157,18 @@ export default function App() {
   const activeAttemptRef = useRef<string | null>(null)
   const attemptExpectationRef = useRef<AttemptExpectation | null>(null)
   const jobsRequestRef = useRef(0)
+  const resultsRequestRef = useRef(0)
   const mountedRef = useRef(true)
   const runStartedAtRef = useRef<number | null>(null)
   const lastElapsedSecondsRef = useRef<number | null>(null)
   const selectedLocalModelRef = useRef<string | null>(selectedLocalModelId)
   activeJobRef.current = activeJob
   selectedLocalModelRef.current = selectedLocalModelId
-  const cloudConfigured = CLOUD_PROVIDER_IDS.includes(selectedProvider)
+  const cloudConfigured = isCloudProvider(selectedProvider)
     && (selectedProvider === 'gemini'
       ? Boolean(setup?.has_gemini_key)
       : Boolean(setup?.provider_keys?.[selectedProvider] ?? setup?.provider_keys?.[`preset-${selectedProvider}`]))
+  const providerQualification = readProviderQualification(selectedProvider)
   const refreshSetupState = useCallback(() => {
     return api.setupState().then((state) => {
       if (!isSetupState(state) || !mountedRef.current) return false
@@ -157,11 +179,15 @@ export default function App() {
   }, [])
   const selectProvider = useCallback((provider: string) => {
     setSelectedProvider(provider)
-    if (!CLOUD_PROVIDER_IDS.includes(provider)) return
+    setRunNotice(null)
+    setRunError(null)
+    setRunErrorCode(null)
+    if (!isCloudProvider(provider)) return
     void refreshSetupState()
   }, [refreshSetupState])
 
   const prepareAttempt = useCallback((jobId: string | null) => {
+    resultsRequestRef.current += 1
     const previousAttemptId = activeAttemptRef.current
     attemptExpectationRef.current = { jobId, attemptId: null, previousAttemptId, awaitingJob: true }
     activeJobRef.current = jobId
@@ -172,11 +198,12 @@ export default function App() {
     setActiveDiagnosticId(null)
   }, [])
 
-  const loadResults = useCallback((jobId: string, diagnosticId?: string | null) => {
+  const loadResults = useCallback((jobId: string, diagnosticId?: string | null, failureMessage = RESULTS_LOAD_FAILURE_MESSAGE) => {
+    const requestId = ++resultsRequestRef.current
     setResultsLoadJobId(jobId)
     return api.jobResults(jobId).then((result) => {
       const checked = requireValidJobResults(result)
-      if (!mountedRef.current) return false
+      if (!mountedRef.current || requestId !== resultsRequestRef.current || activeJobRef.current !== jobId) return false
       setActiveDiagnosticId(checked.score?.diagnostic_id ?? diagnosticId ?? null)
       setResults(checked)
       setResultsLoadJobId(null)
@@ -184,7 +211,7 @@ export default function App() {
       setView('review')
       return true
     }).catch(() => {
-      if (mountedRef.current) setRunError(RESULTS_LOAD_FAILURE_MESSAGE)
+      if (mountedRef.current && requestId === resultsRequestRef.current && activeJobRef.current === jobId) setRunError(failureMessage)
       return false
     })
   }, [])
@@ -375,10 +402,12 @@ export default function App() {
       const blocked = preflight.checks.filter((check) => check.state === 'blocked')
       const warnings = preflight.checks.filter((check) => check.state === 'warning')
       if (preflight.state === 'blocked' || blocked.length) {
+        const preflightElapsed = lastElapsedSecondsRef.current ?? (runStartedAtRef.current ? Math.max(0, Math.floor((Date.now() - runStartedAtRef.current) / 1000)) : 0)
+        lastElapsedSecondsRef.current = preflightElapsed
         setRunning(false)
         setRunStartedAt(null)
         runStartedAtRef.current = null
-        setFinalElapsedSeconds(lastElapsedSecondsRef.current ?? 0)
+        setFinalElapsedSeconds(preflightElapsed)
         setRunState('FAILED')
         const first = blocked[0]
         setRunError(`${first?.message ?? 'This run needs a setup step first.'}${first?.remediation ? ` ${first.remediation}` : ''}`)
@@ -386,13 +415,6 @@ export default function App() {
       }
       if (warnings.length) setRunNotice(`Before you start: ${warnings.slice(0, 2).map((check) => check.message).join(' ')}`)
       if (!mountedRef.current) return
-      setRunning(true)
-      setRunState('RUNNING')
-      const startedAt = Date.now()
-      runStartedAtRef.current = startedAt
-      lastElapsedSecondsRef.current = null
-      setFinalElapsedSeconds(null)
-      setRunStartedAt(startedAt)
       await api.runJob(source, provider, captions, resolvedModel, resolvedEndpoint, resolvedAuth, secretHeader, browserSession, qualityMode, outputPreference)
     } catch (error) {
       if (!mountedRef.current) return
@@ -409,19 +431,16 @@ export default function App() {
   }, [prepareAttempt])
 
   const openJob = useCallback(async (jobId: string) => {
+    resultsRequestRef.current += 1
+    activeJobRef.current = jobId
+    setActiveJob(jobId)
+    setResults(null)
     try {
-      const result = requireValidJobResults(await api.jobResults(jobId))
+      const loaded = await loadResults(jobId, null, 'This session could not be opened. Retry from Sessions.')
       if (!mountedRef.current) return
-      setActiveJob(jobId)
-      setActiveDiagnosticId(result.score?.diagnostic_id ?? null)
-      setResults(result)
-      if (result.render?.outputs?.length || result.outcome === 'SUCCESS_NO_RECOMMENDATIONS') setView('review')
-    } catch (error) {
-      if (!mountedRef.current) return
-      setSection('create')
-      setRunError(friendlyErrorMessage(error, 'This session could not be opened. Retry from Sessions.'))
-    }
-  }, [])
+      if (!loaded && activeJobRef.current === jobId) setSection('create')
+    } catch { /* loadResults owns its user-facing error */ }
+  }, [loadResults])
 
   const resumeJobAction = useCallback(async (jobId: string, provider?: string, captions?: string, camera?: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, allowCpuAsrFallback = false, notice = 'Starting recovery…', qualityMode?: string, outputPreference?: string) => {
     prepareAttempt(jobId)
@@ -496,6 +515,7 @@ export default function App() {
   if (view === 'review' && results) return <Review results={results} onBack={() => { setSection('create'); setView('shell'); refreshJobs() }} onRestyle={(captions, camera) => resumeFromReview(results.job_id, captions, camera)} />
 
   function navigate(next: AppSection) {
+    resultsRequestRef.current += 1
     setRunError(null)
     setRunErrorCode(null)
     setRunNotice(null)
@@ -504,9 +524,9 @@ export default function App() {
   }
 
   let content
-  if (section === 'create') content = <Studio jobs={jobs} running={running} runState={runState} cancelling={cancelling} startedAt={runStartedAt} elapsedSeconds={finalElapsedSeconds} stages={stages} error={runError} errorCode={runErrorCode} notice={runNotice} resultsLoadFailed={Boolean(resultsLoadJobId)} onRetryResults={retryResults} onRun={startRun} localModelId={selectedLocalModelId ?? undefined} cloudConfigured={cloudConfigured} onContinueCpu={continueCpu} onRepairGpu={repairGpu} gpuRepairing={gpuRepairing} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { if (!mountedRef.current) return; setCancelling(false); setRunError(friendlyErrorMessage(error, 'The job could not be cancelled. Retry the action.')) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={selectProvider} onOpenJob={openJob} onResume={(id) => { void resumeJobAction(id) }} />
+  if (section === 'create') content = <Studio jobs={jobs} running={running} runState={runState} cancelling={cancelling} startedAt={runStartedAt} elapsedSeconds={finalElapsedSeconds} stages={stages} error={runError} errorCode={runErrorCode} notice={runNotice} resultsLoadFailed={Boolean(resultsLoadJobId)} onRetryResults={retryResults} onRun={startRun} localModelId={selectedLocalModelId ?? undefined} providerModel={selectedProvider === 'clipgauge-local' ? selectedLocalModelId ?? undefined : readSavedProviderModel(selectedProvider)} providerModelAvailable={providerQualification?.modelAvailable ?? (selectedProvider === 'clipgauge-local' ? undefined : false)} providerModelCompatible={providerQualification?.modelCompatible} providerServiceReady={providerQualification?.serviceReady ?? (selectedProvider === 'clipgauge-local' ? undefined : false)} providerEndpoint={selectedProvider === 'custom' || selectedProvider === 'cloudflare' ? readSavedProviderEndpoint(selectedProvider) : undefined} cloudConfigured={cloudConfigured} onContinueCpu={continueCpu} onRepairGpu={repairGpu} gpuRepairing={gpuRepairing} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { if (!mountedRef.current) return; setCancelling(false); setRunError(friendlyErrorMessage(error, 'The job could not be cancelled. Retry the action.')) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={selectProvider} onOpenJob={openJob} onResume={(id) => { void resumeJobAction(id) }} />
   else if (section === 'sessions') content = <Sessions jobs={jobs} onBack={() => setSection('create')} onOpenJob={openJob} onResume={resumeFromSessions} />
-  else if (section === 'setup') content = <SetupCenter jobs={jobs} onBack={() => setSection('create')} onUseLocal={(modelId) => { if (modelId) setSelectedLocalModelId(modelId); setSelectedProvider('clipgauge-local'); setSection('create') }} />
+  else if (section === 'setup') content = <SetupCenter jobs={jobs} onBack={() => setSection('create')} onUseLocal={(modelId) => { if (modelId) setSelectedLocalModelId(modelId); selectProvider('clipgauge-local'); setSection('create') }} />
   else if (section === 'providers') content = <ProviderCenter selectedProvider={selectedProvider} onSelectProvider={selectProvider} onSelectLocalModel={setSelectedLocalModelId} onBack={() => { void refreshSetupState(); setSection('create') }} onOpenSetup={() => setSection('setup')} />
   else if (section === 'integrations') content = <Integrations onBack={() => setSection('create')} onOpenLoop={() => setView('loop')} />
   else if (section === 'privacy') content = <PrivacyPanel provider={selectedProvider} onBack={() => setSection('create')} />

@@ -83,6 +83,45 @@ describe('v0.5 information architecture', () => {
     }
   })
 
+  it('does not commit a provider while browsing and going back', async () => {
+    const onSelectProvider = vi.fn()
+    const onBack = vi.fn()
+    render(<ProviderCenter selectedProvider="clipgauge-local" onSelectProvider={onSelectProvider} onBack={onBack} />)
+    await screen.findByRole('heading', { name: 'ClipGauge Local' })
+
+    await userEvent.click(screen.getAllByRole('button', { name: /Groq/ })[0])
+    await userEvent.click(screen.getByRole('button', { name: 'Back to Create' }))
+
+    expect(onSelectProvider).not.toHaveBeenCalled()
+    expect(onBack).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not commit browsing after testing and saving credentials', async () => {
+    const onSelectProvider = vi.fn()
+    mocks.testConnection.mockResolvedValueOnce({ state: 'PASS', provider: 'groq', message: 'Connected.' })
+    mocks.saveProviderKey.mockResolvedValueOnce(true)
+    render(<ProviderCenter selectedProvider="clipgauge-local" onSelectProvider={onSelectProvider} onBack={vi.fn()} />)
+    await screen.findByRole('heading', { name: 'ClipGauge Local' })
+    await userEvent.click(screen.getAllByRole('button', { name: /Groq/ })[0])
+    await userEvent.type(screen.getByLabelText('API key'), 'secret')
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await userEvent.click(screen.getByRole('button', { name: /Test connection/ }))
+
+    expect(onSelectProvider).not.toHaveBeenCalled()
+  })
+
+  it('commits only the final inspected provider', async () => {
+    const onSelectProvider = vi.fn()
+    render(<ProviderCenter selectedProvider="clipgauge-local" onSelectProvider={onSelectProvider} onBack={vi.fn()} />)
+    await screen.findByRole('heading', { name: 'ClipGauge Local' })
+    await userEvent.click(screen.getAllByRole('button', { name: /Groq/ })[0])
+    await userEvent.click(screen.getAllByRole('button', { name: /Gemini/ })[0])
+    await userEvent.click(screen.getByRole('button', { name: 'Use for next clip' }))
+
+    expect(onSelectProvider).toHaveBeenCalledTimes(1)
+    expect(onSelectProvider).toHaveBeenCalledWith('gemini')
+  })
+
   it('follows a provider selection changed by the parent', async () => {
     const view = render(<ProviderCenter selectedProvider="groq" onSelectProvider={vi.fn()} onBack={vi.fn()} />)
     expect(await screen.findByRole('heading', { name: 'Groq' })).toBeInTheDocument()
@@ -95,7 +134,7 @@ describe('v0.5 information architecture', () => {
   it('renders cached provider inventory before native refresh completes', () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.17',
+      app_version: '0.5.18',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: 1_700_000_000,
@@ -143,7 +182,7 @@ describe('v0.5 information architecture', () => {
   it('keeps cached provider readiness when native refresh fails', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.17',
+      app_version: '0.5.18',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: 1_700_000_000,
@@ -321,19 +360,19 @@ describe('v0.5 information architecture', () => {
   it('uses cached YouTube readiness without retesting on setup mount', async () => {
     window.localStorage.setItem('clipgauge.setup.youtube.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.17',
+      app_version: '0.5.18',
       value: { state: 'DEPENDENCIES_READY', ready: true, reason: 'Cached tools are ready.', actions: ['Test'], checks: [] },
       verifiedAt: new Date(Date.now() - 1000).toISOString()
     }))
     render(<SetupCenter onBack={vi.fn()} />)
-    expect(await screen.findByText(/Last public compatibility test/i)).toBeInTheDocument()
+    expect(await screen.findByText(/Last public YouTube transfer verified/i)).toBeInTheDocument()
     expect(mocks.youtubeReadiness).not.toHaveBeenCalled()
   })
 
   it('keeps cached YouTube actions when a manual test fails', async () => {
     window.localStorage.setItem('clipgauge.setup.youtube.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.17',
+      app_version: '0.5.18',
       value: { state: 'DEPENDENCIES_READY', ready: true, reason: 'Cached YouTube support needs installation.', actions: ['Install'], checks: [] },
       verifiedAt: new Date().toISOString()
     }))
@@ -366,7 +405,7 @@ describe('v0.5 information architecture', () => {
       cuda_runtime_ready: true,
       cudnn_runtime_ready: true
     }
-    window.localStorage.setItem('clipgauge.setup.gpu.v1', JSON.stringify({ schema_version: 1, app_version: '0.5.17', identity: { gpu_identity: ['Cached GPU'], driver_version: ['1.0'], cuda_runtime_fingerprint: '{}', cudnn_runtime_fingerprint: '{}', pipeline_environment_fingerprint: null }, value: cachedGpu, verifiedAt: new Date().toISOString() }))
+    window.localStorage.setItem('clipgauge.setup.gpu.v1', JSON.stringify({ schema_version: 1, app_version: '0.5.18', identity: { gpu_identity: ['Cached GPU'], driver_version: ['1.0'], cuda_runtime_fingerprint: '{}', cudnn_runtime_fingerprint: '{}', pipeline_environment_fingerprint: null }, value: cachedGpu, verifiedAt: new Date().toISOString() }))
     mocks.gpuDiagnostics.mockImplementation(() => new Promise(() => undefined))
     render(<SetupCenter onBack={vi.fn()} />)
     expect(screen.getByText('Cached GPU')).toBeInTheDocument()
@@ -406,7 +445,7 @@ describe('v0.5 information architecture', () => {
 
     const cached = JSON.parse(window.localStorage.getItem('clipgauge.setup.gpu.v1') ?? '{}')
     expect(cached.schema_version).toBe(1)
-    expect(cached.app_version).toBe('0.5.17')
+    expect(cached.app_version).toBe('0.5.18')
     expect(cached.identity).toMatchObject({
       gpu_identity: ['Test GPU'],
       driver_version: ['555.1'],
@@ -419,7 +458,7 @@ describe('v0.5 information architecture', () => {
   it('renders cached setup inventory before the native refresh completes', () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.17',
+      app_version: '0.5.18',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'cached-manifest',
       last_verified_at: Date.now() / 1000 - 60,
@@ -440,6 +479,32 @@ describe('v0.5 information architecture', () => {
     expect(screen.getByText('Ready · System')).toBeInTheDocument()
     expect(screen.getByText('ClipGauge Local is ready')).toBeInTheDocument()
     expect(screen.getByText(/Last verified:/)).toBeInTheDocument()
+  })
+
+  it('avoids a native inventory check while cached setup is fresh', () => {
+    window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
+      schema_version: 1,
+      app_version: '0.5.18',
+      platform: 'windows-x86_64',
+      runtime_manifest_digest: 'cached-manifest',
+      last_verified_at: Date.now() / 1000 - 60,
+      value: {
+        state: 'ready',
+        video_tools: { ready: true, source: 'system', capabilities: { starts: true, subtitles: true }, managed_download_needed: false, reason: 'Cached video tools.' },
+        local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/light' },
+        runtime: { installed: true },
+        models: [],
+        core_assets: [],
+        managed_assets: [],
+        storage: { required_bytes: 0, installed_bytes: 1, available_bytes: 1, breakdown: [] },
+        catalog: []
+      }
+    }))
+    mocks.setupInventory.mockClear()
+
+    render(<SetupCenter onBack={vi.fn()} />)
+
+    expect(mocks.setupInventory).not.toHaveBeenCalled()
   })
 
   it('does not trust setup inventory cached by another app version', async () => {
@@ -468,7 +533,7 @@ describe('v0.5 information architecture', () => {
   it('ignores cached inventory with malformed storage breakdown rows', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.17',
+      app_version: '0.5.18',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: Date.now() / 1000,
@@ -483,7 +548,7 @@ describe('v0.5 information architecture', () => {
   it('ignores cached inventory with managed assets missing identifiers', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.17',
+      app_version: '0.5.18',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: Date.now() / 1000,
@@ -660,6 +725,31 @@ describe('v0.5 information architecture', () => {
     render(<ProviderCenter selectedProvider="clipgauge-local" onSelectProvider={vi.fn()} onBack={vi.fn()} />)
     await userEvent.click(await screen.findByRole('button', { name: /Test connection/i }))
     await waitFor(() => expect(mocks.testConnection).toHaveBeenCalledWith('clipgauge-local', 'clipgauge-local/light', 'http://127.0.0.1:8080/v1', 'none'))
+  })
+
+  it('persists canonical readiness after a successful provider test', async () => {
+    mocks.setupState.mockResolvedValue({ has_gemini_key: false, onboarded: true, provider_keys: { groq: true } })
+    mocks.testConnection.mockResolvedValue({ state: 'PASS', provider: 'groq', message: 'Connected.' })
+    render(<ProviderCenter selectedProvider="groq" onSelectProvider={vi.fn()} onBack={vi.fn()} />)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Test connection' }))
+
+    await waitFor(() => expect(window.localStorage.getItem('clipgauge.provider-readiness.groq')).not.toBeNull())
+    expect(JSON.parse(window.localStorage.getItem('clipgauge.provider-readiness.groq') ?? '{}')).toMatchObject({
+      modelAvailable: true,
+      modelCompatible: true,
+      serviceReady: true,
+      endpointReady: true,
+    })
+  })
+
+  it('does not qualify a provider from saved credentials alone', async () => {
+    mocks.setupState.mockResolvedValue({ has_gemini_key: false, onboarded: true, provider_keys: { groq: true } })
+    render(<ProviderCenter selectedProvider="groq" onSelectProvider={vi.fn()} onBack={vi.fn()} />)
+
+    await screen.findByRole('heading', { name: 'Groq' })
+
+    expect(window.localStorage.getItem('clipgauge.provider-readiness.groq')).toBeNull()
   })
 
   it('refreshes and persists a compatible provider model selection', async () => {
@@ -906,6 +996,14 @@ describe('v0.5 information architecture', () => {
     await userEvent.type(endpoint, 'https://account.example/v1')
     expect(screen.getByRole('button', { name: 'Test connection' })).toBeEnabled()
     expect(stored.get('clipgauge.provider-endpoint.cloudflare')).toBe('https://account.example/v1')
+  })
+
+  it('requires a custom endpoint before testing', async () => {
+    render(<ProviderCenter selectedProvider="custom" onSelectProvider={vi.fn()} onBack={vi.fn()} />)
+
+    expect(await screen.findByLabelText('Endpoint')).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Test connection' })).toBeDisabled()
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter a custom endpoint')
   })
 
   it('persists custom model selection across Provider Center mounts', async () => {

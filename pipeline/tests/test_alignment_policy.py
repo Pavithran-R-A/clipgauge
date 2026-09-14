@@ -7,7 +7,7 @@ from clipgauge_pipeline.asr.alignment import (
     alignment_policy,
     fallback_word_alignment,
 )
-from clipgauge_pipeline.readiness import READINESS_SCHEMA_VERSION, contract
+from clipgauge_pipeline.readiness import READINESS_SCHEMA_VERSION, contract, provider_readiness
 
 
 def test_english_uses_verified_exact_alignment_policy():
@@ -38,6 +38,50 @@ def test_readiness_contract_is_versioned_and_honest():
     assert row["usable"] is False
     assert row["repair"] is True
     assert row["actual_additional_bytes"] == 0
+
+
+def test_provider_readiness_requires_model_capability_not_credential_only():
+    profile = type(
+        "Profile",
+        (),
+        {
+            "kind": "groq",
+            "locality": "cloud",
+            "model": "openai/gpt-oss-20b",
+            "auth_strategy": "bearer",
+            "endpoint_identity": "https://api.groq.com/openai/v1",
+        },
+    )()
+
+    result = provider_readiness(
+        profile,
+        credential_ready=True,
+        model_available=False,
+        model_compatible=False,
+    )
+
+    assert result["configured"] is False
+    assert result["can_best"] is False
+    assert "Choose a compatible model" in result["blocking_reasons"]
+
+
+def test_provider_readiness_requires_cloudflare_endpoint():
+    profile = type(
+        "Profile",
+        (),
+        {
+            "kind": "cloudflare",
+            "locality": "cloud",
+            "model": "@cf/meta/llama-3.1-8b-instruct",
+            "auth_strategy": "bearer",
+            "endpoint_identity": "",
+        },
+    )()
+
+    result = provider_readiness(profile, credential_ready=True, endpoint_ready=False)
+
+    assert result["configured"] is False
+    assert "Enter endpoint" in result["blocking_reasons"]
 
 
 def test_tamil_has_explicit_deterministic_fallback_without_model_download():

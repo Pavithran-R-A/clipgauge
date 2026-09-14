@@ -153,8 +153,25 @@ def test_private_cli_rejects_explicit_cloud_provider():
         secret_header=None,
     )
 
-    with pytest.raises(ValueError, match='private mode requires ClipGauge Local'):
+    with pytest.raises(ValueError, match='private mode requires a local provider'):
         cli._profile_for_quality_mode(args, 'private')
+
+
+@pytest.mark.parametrize('provider', ['ollama', 'lmstudio'])
+def test_private_cli_preserves_explicit_local_provider(provider):
+    args = SimpleNamespace(
+        provider=provider,
+        llm=None,
+        model='local-model',
+        endpoint=None,
+        auth=None,
+        secret_header=None,
+    )
+
+    profile = cli._profile_for_quality_mode(args, 'private')
+
+    assert profile.kind == provider
+    assert profile.locality == 'local'
 
 
 def test_provider_models_command_builds_a_valid_namespace(monkeypatch, capsys):

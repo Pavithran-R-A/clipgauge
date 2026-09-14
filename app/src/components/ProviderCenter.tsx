@@ -7,6 +7,7 @@ import { selectedLocalModel } from '../setupState'
 import { readCachedSetupInventory, writeCachedSetupInventory } from '../setupInventoryCache'
 import { isProviderInventory, isProviderModelsResult, isProviderTestResult, isSetupState } from '../nativeValidation'
 import { friendlyErrorMessage } from '../errorMessaging'
+import { evaluateProviderReadiness, type ProviderReadiness } from '../providerContract'
 
 interface Props {
   selectedProvider: string
@@ -79,6 +80,22 @@ function writeSavedEndpoint(providerId: string, endpoint: string): boolean {
   } catch {
     return false
   }
+}
+
+function writeProviderQualification(providerId: string, readiness: ProviderReadiness): void {
+  try {
+    window.localStorage.setItem(`clipgauge.provider-readiness.${providerId}`, JSON.stringify({
+      checkedAt: new Date().toISOString(),
+      modelAvailable: readiness.model_available,
+      modelCompatible: readiness.model_compatible,
+      serviceReady: readiness.can_private || readiness.can_hybrid || readiness.can_best,
+      endpointReady: readiness.endpoint_ready,
+    }))
+  } catch { /* optional browser storage */ }
+}
+
+function clearProviderQualification(providerId: string): void {
+  try { window.localStorage.removeItem(`clipgauge.provider-readiness.${providerId}`) } catch { /* optional browser storage */ }
 }
 
 function modelLabel(model: string) {
@@ -214,7 +231,6 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
   const active = useMemo(() => PROVIDERS.find((provider) => provider.id === activeId) ?? PROVIDERS[0], [activeId])
   const localReady = Boolean(inventory?.local_ai?.runtime_ready && inventory?.local_ai?.model_ready)
   const localModelId = selectedLocalModel(inventory)
-  const status = statusFor(active, setup, testResult, localReady, testing)
   const savedFromSetup = active.id === 'gemini' ? Boolean(setup?.has_gemini_key) : Boolean(setup?.provider_keys?.[active.id] ?? setup?.provider_keys?.[`preset-${active.id}`])
   const hasSavedCredential = active.credential && (saved || savedFromSetup)
   const selectedModel = active.id === 'custom' ? customModel : active.id === 'clipgauge-local' ? selectedModels[active.id] ?? localModelId ?? '' : selectedModels[active.id] ?? active.model
@@ -224,7 +240,42 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
   const selectedModelUnavailable = discoveredModels.length > 0 && !modelListExpired && !providerManagedAuto && !discoveredModels.some((model) => model.id === selectedModel)
   const selectedModelDescriptor = discoveredModels.find((model) => model.id === selectedModel)
   const selectedModelBlocked = selectedModelDescriptor?.compatibility === 'UNSUPPORTED' || selectedModelDescriptor?.compatibility === 'NO STRUCTURED OUTPUT' || selectedModelDescriptor?.available === false
-  const endpointMissing = active.id === 'cloudflare' && !customEndpoint.trim()
+  const endpointMissing = (active.id === 'cloudflare' || active.id === 'custom') && !customEndpoint.trim()
+
+  function readinessFor(candidateModels = discoveredModels, candidateTest: ProviderTestResult | null = testResult, candidateExpired = modelListExpired): ProviderReadiness {
+    const candidateDescriptor = candidateModels.find((model) => model.id === selectedModel)
+    const candidateBlocked = candidateDescriptor?.compatibility === 'UNSUPPORTED'
+      || candidateDescriptor?.compatibility === 'NO STRUCTURED OUTPUT'
+      || candidateDescriptor?.available === false
+    const candidateUnavailable = candidateModels.length > 0
+      && !candidateExpired
+      && !providerManagedAuto
+      && !candidateModels.some((model) => model.id === selectedModel)
+    const candidateHasUsableRoute = candidateModels.some((model) => model.compatibility !== 'UNSUPPORTED' && model.compatibility !== 'NO STRUCTURED OUTPUT' && model.available !== false)
+    const modelAvailable = active.id === 'clipgauge-local'
+      ? Boolean(selectedModel && localReady)
+      : candidateExpired
+        ? false
+        : candidateModels.length > 0
+          ? providerManagedAuto ? candidateHasUsableRoute : !candidateUnavailable
+          : candidateTest?.state === 'PASS'
+    const localModelReady = active.id === 'clipgauge-local' ? Boolean(selectedModel && inventory?.local_ai?.model_ready) : true
+    return evaluateProviderReadiness({
+      provider: active.id,
+      locality: active.locality,
+      model: selectedModel,
+      credentialReady: !active.credential || Boolean(hasSavedCredential),
+      endpointReady: active.id === 'cloudflare' || active.id === 'custom' ? Boolean(customEndpoint.trim()) : true,
+      modelAvailable,
+      modelCompatible: !candidateBlocked,
+      runtimeReady: active.id === 'clipgauge-local' ? Boolean(inventory?.local_ai?.runtime_ready) : true,
+      localModelReady,
+      serviceReady: active.id === 'clipgauge-local' ? localReady : candidateTest?.state === 'PASS',
+    })
+  }
+
+  const providerReadiness = readinessFor()
+  const status = statusFor(active, setup, testResult, localReady, testing)
 
 
   function selectProvider(id: string) {
@@ -232,7 +283,6 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
     connectionRequestRef.current += 1
     credentialRequestRef.current += 1
     setActiveId(id)
-    onSelectProvider(id)
     setCredential('')
     setSaved(false)
     setTestResult(null)
@@ -250,6 +300,7 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
       setSelectedModels((current) => ({ ...current, [providerId]: model }))
       setStorageMessage(null)
       setTestResult(null)
+      clearProviderQualification(providerId)
       const save = localSaveChainRef.current.then(() => api.saveLocalModel(model))
       localSaveChainRef.current = save.catch(() => undefined)
       void save.then(() => {
@@ -277,6 +328,7 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
     setSelectedModels((current) => ({ ...current, [active.id]: model }))
     setStorageMessage(writeSavedModel(active.id, model) ? null : 'Model selection could not be saved. Restore browser storage before restarting.')
     setTestResult(null)
+    clearProviderQualification(active.id)
   }
 
   async function refreshModels() {
@@ -291,6 +343,8 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
       const next = normalizeProviderModels(result.models)
       setModels((current) => ({ ...current, [providerId]: next }))
       setModelsFetchedAt((current) => ({ ...current, [providerId]: Date.now() }))
+      setTestResult(null)
+      writeProviderQualification(providerId, readinessFor(next, null, false))
       setModelsMessage(result.message ?? (next.length ? 'Models refreshed.' : 'No usable model list returned. Manual model entry remains available.'))
     } catch (error) {
       if (!mountedRef.current || requestId !== modelRequestRef.current || providerId !== active.id) return
@@ -314,6 +368,7 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
       setCredential('')
       setSaved(true)
       setTestResult(null)
+      clearProviderQualification(providerId)
       setSetup((current) => current ? { ...current, provider_keys: { ...(current.provider_keys ?? {}), [providerId]: providerId === 'gemini' ? Boolean(current.provider_keys?.[providerId]) : true }, has_gemini_key: providerId === 'gemini' ? true : current.has_gemini_key } : current)
     } catch (error) {
       if (mountedRef.current && requestId === credentialRequestRef.current && providerId === active.id) setTestResult({ state: 'FAIL', provider: providerId, message: friendlyErrorMessage(error, 'The credential could not be saved. Retry the action.') })
@@ -336,6 +391,7 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
       setSaved(false)
       setCredential('')
       setTestResult(null)
+      clearProviderQualification(providerId)
       setSetup((current) => current ? { ...current, has_gemini_key: providerId === 'gemini' ? false : current.has_gemini_key, provider_keys: { ...(current.provider_keys ?? {}), [providerId]: false, [`preset-${providerId}`]: false } } : current)
     } catch (error) {
       if (mountedRef.current && requestId === credentialRequestRef.current && providerId === active.id) setTestResult({ state: 'FAIL', provider: providerId, message: friendlyErrorMessage(error, 'The credential could not be removed. Retry the action.') })
@@ -357,6 +413,9 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
         const next = normalizeProviderModels(result.models)
         setModels((current) => ({ ...current, [active.id]: next }))
         setModelsFetchedAt((current) => ({ ...current, [active.id]: Date.now() }))
+        writeProviderQualification(providerId, readinessFor(next, result, false))
+      } else {
+        writeProviderQualification(providerId, readinessFor(discoveredModels, result))
       }
       setTestResult(result)
     } catch (error) {
@@ -379,7 +438,7 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
             {PROVIDERS.filter((provider) => provider.group === group).map((provider) => {
               const providerStatus = statusFor(provider, setup, provider.id === activeId ? testResult : null, localReady, provider.id === activeId && testing)
               const Icon = provider.locality === 'local' ? Cpu : Cloud
-              return <button type="button" className={`provider-card ${activeId === provider.id ? 'is-selected' : ''}`} key={provider.id} onClick={() => selectProvider(provider.id)} aria-pressed={activeId === provider.id}>
+              return <button type="button" className={`provider-card ${selectedProvider === provider.id ? 'is-selected' : ''}`} key={provider.id} onClick={() => selectProvider(provider.id)} aria-pressed={selectedProvider === provider.id}>
                 <span className="provider-icon"><Icon size={18} aria-hidden="true" /></span>
                 <span className="provider-card-copy"><strong>{provider.name}</strong><small>{provider.description}</small></span>
                 <span className={`provider-status tone-${providerStatus.tone}`}><span className="status-dot" aria-hidden="true" />{providerStatus.label}</span>
@@ -390,9 +449,10 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
         </section>
         <aside className="provider-detail" aria-labelledby="provider-detail-title">
           <div className="detail-topline"><span className={`status-pill tone-${status.tone}`}><span className="status-dot" aria-hidden="true" />{status.label}</span>{active.badge && <span className="soft-badge">{active.badge}</span>}</div>
-          <p className="section-eyebrow">Selected provider</p>
+          <p className="section-eyebrow">Inspected provider</p>
           <h2 id="provider-detail-title">{active.name}</h2>
           <p className="detail-description">{hasSavedCredential ? 'API key saved in your operating-system credential vault.' : active.id === 'openrouter' ? 'Auto Free chooses among currently available compatible free models. Results may vary between runs.' : active.detail}</p>
+          {providerReadiness.blocking_reasons.length > 0 && <p className="field-help readiness-summary">Provider setup: {providerReadiness.blocking_reasons.join(' · ')}.</p>}
           <div className="provider-facts">
             <div><span>Where it runs</span><strong>{active.locality === 'local' ? 'On this computer' : 'Over the internet'}</strong></div>
             <div><span>Privacy</span><strong>{active.locality === 'local' ? 'Video stays local' : 'You choose when to send a video'}</strong></div>
@@ -400,9 +460,9 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
           {active.credential && active.id !== 'custom' && <div className="field-stack"><label htmlFor="provider-credential"><KeyRound size={15} aria-hidden="true" /> API key</label><div className="input-with-action"><input id="provider-credential" type="password" value={credential} onChange={(event) => setCredential(event.target.value)} placeholder="Stored in your OS vault" autoComplete="off" /><button type="button" className="button button-secondary" onClick={saveCredential} disabled={!credential.trim()}><Save size={15} aria-hidden="true" />{saved ? 'Saved' : 'Save'}</button>{hasSavedCredential && <button type="button" className="button button-quiet" onClick={removeCredential}>Remove</button>}</div><p className="field-help">A saved key is not the same as a working connection. Use Test connection below.</p></div>}
           {active.id !== 'custom' && <div className="field-stack"><label htmlFor="provider-model">Model</label><select id="provider-model" aria-label="Model" value={selectedModel} onChange={(event) => selectModel(event.target.value)}><option value={selectedModel}>{selectedModel ? `${modelLabel(selectedModel)}${selectedModelDescriptor ? ` — ${selectedModelDescriptor.compatibility}` : ''}` : 'Choose a model'}</option>{discoveredModels.filter((model) => model.id !== selectedModel).map((model) => <option value={model.id} key={model.id} disabled={model.compatibility === 'UNSUPPORTED' || model.compatibility === 'NO STRUCTURED OUTPUT' || model.available === false}>{modelLabel(model.id)} — {model.compatibility}</option>)}</select><div className="detail-actions model-actions"><button type="button" className="button button-secondary" onClick={() => void refreshModels()} disabled={modelsLoading}>{modelsLoading ? 'Refreshing models…' : 'Refresh models'}</button>{modelListExpired && <span className="field-help" role="alert">Model list expired. Refresh before testing this provider.</span>}{providerManagedAuto && !selectedModelDescriptor && <span className="field-help" role="status">Auto Free selects the current compatible route during connection and scoring.</span>}{selectedModelUnavailable && <span className="field-help" role="alert">Selected model unavailable. Choose a listed model explicitly.</span>}{selectedModelBlocked && <span className="field-help" role="alert">Selected model cannot safely score. Choose a compatible listed model.</span>}</div>{modelsMessage && <p className="field-help" role="status">{modelsMessage}</p>}</div>}
           {selectedModelDescriptor && <section className="model-contract" aria-labelledby="model-contract-title"><div className="model-contract-heading"><h3 id="model-contract-title">Model capability contract</h3>{selectedModelDescriptor.deprecated && <span className="soft-badge">Deprecated</span>}</div><div className="contract-grid"><div><span>Compatibility</span><strong>{selectedModelDescriptor.compatibility}</strong></div><div><span>Availability</span><strong>{selectedModelDescriptor.available === false ? 'Unavailable' : selectedModelDescriptor.available === true ? 'Available' : 'Unknown'}</strong></div><div><span>Text input</span><strong>{capabilityLabel(selectedModelDescriptor.capabilities?.text)}</strong></div><div><span>Vision / image input</span><strong>{capabilityLabel(selectedModelDescriptor.capabilities?.vision)}</strong></div><div><span>Structured JSON</span><strong>{capabilityLabel(selectedModelDescriptor.capabilities?.structured_json)}</strong></div><div><span>JSON Schema</span><strong>{capabilityLabel(selectedModelDescriptor.capabilities?.json_schema)}</strong></div><div><span>Context window</span><strong>{contextLabel(selectedModelDescriptor.capabilities?.context_window)}</strong></div><div><span>Runs</span><strong>{selectedModelDescriptor.local ? 'Locally' : 'In the cloud'}</strong></div><div><span>Provider pricing</span><strong>{priceLabel(selectedModelDescriptor.price)}</strong></div></div>{selectedModelDescriptor.capabilities?.vision === false && <p className="field-help" role="alert">Visual scoring will use deterministic/local fallback for this model.</p>}</section>}
-          {active.id === 'custom' && <div className="custom-fields"><div className="field-stack"><label htmlFor="custom-endpoint"><Network size={15} aria-hidden="true" /> Endpoint</label><input id="custom-endpoint" value={customEndpoint} onChange={(event) => { setCustomEndpoint(event.target.value); setStorageMessage(writeSavedEndpoint('custom', event.target.value) ? null : 'Endpoint could not be saved. Restore browser storage before restarting.') }} placeholder="https://your-endpoint.example/v1" /></div><div className="field-stack"><label htmlFor="custom-model">Model</label><input id="custom-model" value={customModel} onChange={(event) => { setCustomModel(event.target.value); setStorageMessage(writeSavedModel('custom', event.target.value) ? null : 'Model selection could not be saved. Restore browser storage before restarting.') }} placeholder="Model name" /></div><div className="field-stack"><label htmlFor="custom-credential">Credential</label><input id="custom-credential" type="password" value={credential} onChange={(event) => setCredential(event.target.value)} placeholder="Stored in your OS vault" autoComplete="off" /><button type="button" className="button button-secondary" onClick={saveCredential} disabled={!credential.trim()}><Save size={15} aria-hidden="true" />Save credential</button>{hasSavedCredential && <button type="button" className="button button-quiet" onClick={removeCredential}>Remove credential</button>}</div></div>}
-          {active.id === 'cloudflare' && <div className="field-stack"><label htmlFor="cloudflare-endpoint"><Network size={15} aria-hidden="true" /> Endpoint</label><input id="cloudflare-endpoint" value={customEndpoint} onChange={(event) => { setCustomEndpoint(event.target.value); setStorageMessage(writeSavedEndpoint('cloudflare', event.target.value) ? null : 'Endpoint could not be saved. Restore browser storage before restarting.') }} placeholder="https://api.cloudflare.com/client/v4/accounts/..." /><p className="field-help">Use an OpenAI-compatible Cloudflare route for this account.</p>{endpointMissing && <p className="field-help" role="alert">Enter a Cloudflare endpoint before testing this provider.</p>}</div>}
-          <div className="detail-actions">{active.id === 'clipgauge-local' && !localReady ? <button type="button" className="button button-primary" onClick={() => { if (onOpenSetup) onOpenSetup(); else onBack() }}>Set up local AI<ChevronRight size={16} aria-hidden="true" /></button> : <button type="button" className="button button-primary" onClick={testConnection} disabled={testing || endpointMissing || modelListExpired || selectedModelUnavailable || selectedModelBlocked}>{testing ? 'Testing…' : 'Test connection'}<ChevronRight size={16} aria-hidden="true" /></button>}<button type="button" className="button button-secondary" onClick={() => { onSelectProvider(active.id); onBack() }}>Use for next clip</button></div>
+          {active.id === 'custom' && <div className="custom-fields"><div className="field-stack"><label htmlFor="custom-endpoint"><Network size={15} aria-hidden="true" /> Endpoint</label><input id="custom-endpoint" value={customEndpoint} onChange={(event) => { setCustomEndpoint(event.target.value); clearProviderQualification('custom'); setStorageMessage(writeSavedEndpoint('custom', event.target.value) ? null : 'Endpoint could not be saved. Restore browser storage before restarting.') }} placeholder="https://your-endpoint.example/v1" />{endpointMissing && <p className="field-help" role="alert">Enter a custom endpoint before testing this provider.</p>}</div><div className="field-stack"><label htmlFor="custom-model">Model</label><input id="custom-model" value={customModel} onChange={(event) => { setCustomModel(event.target.value); clearProviderQualification('custom'); setStorageMessage(writeSavedModel('custom', event.target.value) ? null : 'Model selection could not be saved. Restore browser storage before restarting.') }} placeholder="Model name" /></div><div className="field-stack"><label htmlFor="custom-credential">Credential</label><input id="custom-credential" type="password" value={credential} onChange={(event) => setCredential(event.target.value)} placeholder="Stored in your OS vault" autoComplete="off" /><button type="button" className="button button-secondary" onClick={saveCredential} disabled={!credential.trim()}><Save size={15} aria-hidden="true" />Save credential</button>{hasSavedCredential && <button type="button" className="button button-quiet" onClick={removeCredential}>Remove credential</button>}</div></div>}
+          {active.id === 'cloudflare' && <div className="field-stack"><label htmlFor="cloudflare-endpoint"><Network size={15} aria-hidden="true" /> Endpoint</label><input id="cloudflare-endpoint" value={customEndpoint} onChange={(event) => { setCustomEndpoint(event.target.value); clearProviderQualification('cloudflare'); setStorageMessage(writeSavedEndpoint('cloudflare', event.target.value) ? null : 'Endpoint could not be saved. Restore browser storage before restarting.') }} placeholder="https://api.cloudflare.com/client/v4/accounts/..." /><p className="field-help">Use an OpenAI-compatible Cloudflare route for this account.</p>{endpointMissing && <p className="field-help" role="alert">Enter a Cloudflare endpoint before testing this provider.</p>}</div>}
+          <div className="detail-actions">{active.id === 'clipgauge-local' && !localReady ? <button type="button" className="button button-primary" onClick={() => { if (onOpenSetup) onOpenSetup(); else onBack() }}>Set up local AI<ChevronRight size={16} aria-hidden="true" /></button> : <button type="button" className="button button-primary" onClick={testConnection} disabled={testing || endpointMissing || modelListExpired || selectedModelUnavailable || selectedModelBlocked || !providerReadiness.model_ready}>{testing ? 'Testing…' : 'Test connection'}<ChevronRight size={16} aria-hidden="true" /></button>}<button type="button" className="button button-secondary" onClick={() => { onSelectProvider(active.id); onBack() }}>Use for next clip</button></div>
           {testResult && <div className={`result-callout result-${testResult.state.toLowerCase()}`} role="status"><span className="result-icon">{testResult.state === 'PASS' ? <Check size={16} aria-hidden="true" /> : testResult.state === 'FAIL' ? <CircleAlert size={16} aria-hidden="true" /> : <WifiOff size={16} aria-hidden="true" />}</span><span><strong>{testResult.state === 'PASS' ? 'Connection ready' : testResult.state === 'FAIL' ? 'Connection needs attention' : 'Connection has limits'}</strong><small>{testResult.message ?? 'The provider returned no additional details.'}</small></span></div>}
           {storageMessage && <p className="field-help" role="alert">{storageMessage}</p>}
           <details className="advanced-disclosure"><summary><RotateCcw size={15} aria-hidden="true" /> Advanced settings</summary><div className="technical-grid"><span>Model ID</span><code>{active.id === 'custom' ? customModel || 'not set' : selectedModel || (active.id === 'clipgauge-local' ? 'selected model unavailable' : 'auto')}</code><span>Endpoint</span><code>{active.id === 'custom' ? customEndpoint || 'not set' : active.endpoint || 'provider-managed'}</code><span>Auth</span><code>{active.credential ? 'credential in OS vault' : 'none'}</code></div><p>These values are for troubleshooting and advanced provider configuration. Normal creator actions use the friendly provider name above.</p></details>
