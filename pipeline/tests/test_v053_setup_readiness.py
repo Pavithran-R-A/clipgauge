@@ -293,6 +293,7 @@ def test_youtube_install_repairs_empty_node_modules(tmp_path, monkeypatch):
     monkeypatch.setattr(youtube_compat, "node_path", lambda: node)
     monkeypatch.setattr(youtube_compat, "npm_path", lambda: npm)
     monkeypatch.setattr(youtube_compat, "server_home", lambda: server)
+    monkeypatch.setattr(youtube_compat, "_source_install_ready", lambda: True)
     monkeypatch.setattr(youtube_compat, "_provider_plugin_ready", lambda: True)
     monkeypatch.setattr(youtube_compat, "_build_ready", lambda _build: True)
     monkeypatch.setattr(youtube_compat, "_server_ready", lambda: True)
