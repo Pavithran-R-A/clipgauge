@@ -26,7 +26,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from .. import config, protocol
+from .. import config, protocol, resource_guard
 from . import artifacts
 
 SCHEMA = """
@@ -538,6 +538,28 @@ def run_stages(
     results: dict[str, dict] = {}
     set_job_status(job.id, "running")
     for stage in stage_list:
+        estimate = None
+        ingest_result = results.get("ingest")
+        if isinstance(ingest_result, dict):
+            stored_estimate = ingest_result.get("storage_estimate")
+            if isinstance(stored_estimate, dict):
+                estimate = stored_estimate
+        disk_decision = resource_guard.disk_headroom_decision(
+            job.source,
+            data_root=config.home_dir().parent,
+            estimate=estimate,
+        )
+        if disk_decision.blocked and stage.name in {"ingest", "asr", "render"}:
+            error = StageError(
+                disk_decision.message,
+                code="DISK_SPACE_LOW",
+                retryable=True,
+                stage=stage.name,
+                details=disk_decision.to_dict(),
+            )
+            mark_stage(job.id, stage.name, "failed", stage.schema_version, str(error))
+            set_job_status(job.id, "failed", f"{stage.name}: {error}")
+            raise error
         dependency_fingerprint = _dependency_fingerprint(stage, ctx, results)
         cached, issue = read_checkpoint_detailed(
             job,

@@ -24,6 +24,11 @@ export interface PipelineEvent {
   retryable?: boolean
   diagnostic_id?: string
   exit_code?: number | null
+  exit_code_decimal?: number | null
+  exit_code_hex?: string | null
+  allow_cpu_resume?: boolean
+  last_successful_stage?: string | null
+  last_active_stage?: string | null
   [key: string]: unknown
 }
 
@@ -162,6 +167,7 @@ export interface ClipLedger {
 }
 
 export interface Clip {
+  clip_id?: string
   start: number
   end: number
   score: number
@@ -193,6 +199,7 @@ export type ArtifactStatus =
 
 export interface RenderOutput {
   clip: number
+  clip_id?: string
   path: string | null
   artifact_status?: ArtifactStatus
   score: number
@@ -457,6 +464,8 @@ export interface LocalAiReadiness {
   runtime_ready: boolean
   model_ready: boolean
   selected_model_id?: string | null
+  preferred_model_id?: string | null
+  runnable_model_id?: string | null
   required_bytes: number
   action: string
   readiness?: ReadinessContract

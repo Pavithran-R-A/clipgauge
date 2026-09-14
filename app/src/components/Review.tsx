@@ -64,6 +64,16 @@ function confidenceLabel(value: string): string {
   return value || 'Not reported'
 }
 
+function clipIndexForOutput(output: RenderOutput, clips: Clip[]): number | null {
+  if (output.clip_id) {
+    const matchingIndexes = clips.reduce<number[]>((indexes, clip, index) => (
+      clip.clip_id === output.clip_id ? [...indexes, index] : indexes
+    ), [])
+    return matchingIndexes.length === 1 ? matchingIndexes[0] : null
+  }
+  return output.clip
+}
+
 function OtherMoments({ moments, jobId }: { moments: NonNullable<JobResults['score']>['borderline_candidates']; jobId: string }) {
   const [previewError, setPreviewError] = useState<string | null>(null)
   const mountedRef = useRef(true)
@@ -110,8 +120,9 @@ export default function Review({ results, onBack, onRestyle }: Props) {
 
   const pair = useMemo(() => {
     const out = outputs[selected]
-    const clip = out ? clips[out.clip] : undefined
-    return { out, clip }
+    const clipIndex = out ? clipIndexForOutput(out, clips) : null
+    const clip = clipIndex !== null && clipIndex >= 0 ? clips[clipIndex] : undefined
+    return { out, clip, clipIndex }
   }, [outputs, clips, selected])
 
   const artifactAvailable = Boolean(
@@ -125,8 +136,8 @@ export default function Review({ results, onBack, onRestyle }: Props) {
   useEffect(() => {
     let active = true
     setMediaUrl(null)
-    if (!artifactAvailable || !pair.out) return () => { active = false }
-    api.requestPlaybackUrl(results.job_id, 'render', pair.out.clip)
+    if (!artifactAvailable || !pair.out || pair.clipIndex === null) return () => { active = false }
+    api.requestPlaybackUrl(results.job_id, 'render', pair.clipIndex)
       .then((url) => {
         if (!isPlaybackUrl(url)) throw new Error('Playback URL is malformed.')
         if (active) setMediaUrl(url)
@@ -135,21 +146,26 @@ export default function Review({ results, onBack, onRestyle }: Props) {
         if (active) setMediaState('error')
       })
     return () => { active = false }
-  }, [artifactAvailable, pair.out?.clip, pair.out?.path, reloadKey, results.job_id])
+  }, [artifactAvailable, pair.clipIndex, pair.out?.clip, pair.out?.path, reloadKey, results.job_id])
 
   async function doExport(out: RenderOutput, clip: Clip) {
     if (!out.path || !artifactAvailable) return
+    const clipIndex = clipIndexForOutput(out, clips)
+    if (clipIndex === null) {
+      setExportError('This clip identity is stale. Reload the analysis before exporting.')
+      return
+    }
     setExportError(null)
     try {
       const suggestedTitle = `${results.ingest?.title ?? 'clip'} ${fmtTime(clip.start)}`
       const dest = await chooseExportDestination({
         jobId: results.job_id,
-        clip: out.clip,
+        clip: clipIndex,
         suggestedTitle,
       })
       if (!dest) return
       if (!mountedRef.current) return
-      setExported((prev) => ({ ...prev, [out.clip]: dest }))
+      setExported((prev) => ({ ...prev, [clipIndex]: dest }))
     } catch (error) {
       if (mountedRef.current) setExportError(friendlyErrorMessage(error, 'Export could not be completed. Retry the export.'))
     }
@@ -243,16 +259,18 @@ export default function Review({ results, onBack, onRestyle }: Props) {
 
       <div className="filmstrip">
         {outputs.map((out, i) => {
-          const clip = clips[out.clip]
+          const clipIndex = clipIndexForOutput(out, clips)
+          const clip = clipIndex === null ? undefined : clips[clipIndex]
           return (
             <button
-              key={out.clip}
+              key={`${out.clip_id ?? 'legacy'}-${i}`}
               className={`film-card ${i === selected ? 'film-on' : ''}`}
               onClick={() => setSelected(i)}
+              disabled={clipIndex === null}
               style={{ animationDelay: `${i * 50}ms` }}
             >
-              <span className="film-score mono">{Math.round(clip?.recommendation_score ?? clip?.score ?? out.score)}</span>
-              <span className="film-time mono">{clip ? fmtTime(clip.start) : ''}</span>
+              <span className="film-score mono">{clip ? Math.round(clip.recommendation_score ?? clip.score ?? out.score) : '—'}</span>
+              <span className="film-time mono">{clip ? fmtTime(clip.start) : 'Unavailable'}</span>
               <span className="film-platform">{out.best_platform}</span>
             </button>
           )
@@ -318,14 +336,14 @@ export default function Review({ results, onBack, onRestyle }: Props) {
               </div>
             )}
             <div className="monitor-actions">
-              <button className="btn-secondary" onClick={() => setEditing(pair.out!.clip)}>
+              <button className="btn-secondary" onClick={() => { if (pair.clipIndex !== null) setEditing(pair.clipIndex) }}>
                 Edit clip
               </button>
               <button className="btn-primary" aria-label="EXPORT MP4" onClick={() => doExport(pair.out!, pair.clip!)}>
-                {exported[pair.out.clip] ? 'Exported' : 'Export MP4'}
+                {exported[pair.clipIndex ?? -1] ? 'Exported' : 'Export MP4'}
               </button>
-              {exported[pair.out.clip] && (
-                <span className="mono export-path">{exported[pair.out.clip]}</span>
+              {exported[pair.clipIndex ?? -1] && (
+                <span className="mono export-path">{exported[pair.clipIndex ?? -1]}</span>
               )}
             </div>
             {exportError && <p className="inline-message" role="alert">{exportError}</p>}

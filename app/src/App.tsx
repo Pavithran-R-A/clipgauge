@@ -15,7 +15,7 @@ import SetupCenter from './components/SetupCenter'
 import Studio from './components/Studio'
 import SupportPage from './components/SupportPage'
 import { type CreatorRunState } from './creatorState'
-import { resolveSelectedLocalModel } from './setupState'
+import { resolvePreferredLocalModel, resolveRunnableLocalModel } from './setupState'
 import { readCachedSetupInventory, writeCachedSetupInventory } from './setupInventoryCache'
 import { normalizeJobResults } from './jobResultsValidation'
 import { isInstagramStatus, isJobSummaryList, isLocalSetupInventory, isPreflightResult, isSetupState } from './nativeValidation'
@@ -93,7 +93,12 @@ function writeCachedSetupState(value: SetupState) {
 
 function readCachedLocalModel(): string | undefined {
   const inventory = readCachedSetupInventory()
-  return inventory ? resolveSelectedLocalModel(inventory) : undefined
+  return inventory ? resolvePreferredLocalModel(inventory) : undefined
+}
+
+function readCachedRunnableLocalModel(): string | undefined {
+  const inventory = readCachedSetupInventory()
+  return inventory ? resolveRunnableLocalModel(inventory) : undefined
 }
 
 function requireValidJobResults(value: unknown): JobResults {
@@ -126,7 +131,15 @@ const FRIENDLY_FAILURES: Record<string, string> = {
   ASR_VAD_FAILED: 'Speech activity detection could not start. Repair speech recognition, then retry.',
   ASR_ALIGNMENT_FAILED: 'Word timing could not complete. Retry the job or repair speech recognition.',
   ASR_CHECKPOINT_WRITE: 'Speech recognition finished, but its checkpoint could not be saved. Retry the job.',
-  ASR_GPU_FALLBACK_REQUIRES_APPROVAL: 'GPU speech acceleration failed. Repair GPU acceleration, or explicitly continue in slower CPU mode.'
+  ASR_GPU_FALLBACK_REQUIRES_APPROVAL: 'GPU speech acceleration failed. Repair GPU acceleration, or explicitly continue in slower CPU mode.',
+  ASR_RESOURCE_HEADROOM_LOW: 'Speech recognition needs more available memory. Close applications, then retry in Low-memory mode.',
+  PIPELINE_RESOURCE_EXHAUSTED: 'ClipGauge stopped because system resources became insufficient. Close applications, free disk space, then retry.',
+  DISK_SPACE_LOW: 'This run needs more free disk space. Open Setup & Storage, then retry.',
+  LOCAL_MODEL_NOT_RUNNABLE: 'The selected local model is not verified yet. Open Setup & Storage and choose a ready model.',
+  PIPELINE_NATIVE_CRASH: 'The local pipeline stopped unexpectedly. Retry once and keep the diagnostic details for support.',
+  ASR_NATIVE_CRASH: 'Speech recognition stopped unexpectedly. Retry once, or continue with CPU recovery.',
+  CUDA_NATIVE_CRASH: 'CUDA speech processing stopped unexpectedly. Continue once in slower CPU mode, or repair GPU acceleration.',
+  WINDOWS_ACCESS_VIOLATION: 'Windows stopped speech processing unexpectedly. Continue once in slower CPU mode, then keep the diagnostic details.'
 }
 
 export default function App() {
@@ -151,6 +164,8 @@ export default function App() {
   const [finalElapsedSeconds, setFinalElapsedSeconds] = useState<number | null>(null)
   const [selectedProvider, setSelectedProvider] = useState('clipgauge-local')
   const [selectedLocalModelId, setSelectedLocalModelId] = useState<string | null>(() => readCachedLocalModel() ?? null)
+  const [runnableLocalModelId, setRunnableLocalModelId] = useState<string | null>(() => readCachedRunnableLocalModel() ?? null)
+  const [cpuResumeAvailable, setCpuResumeAvailable] = useState(false)
   const [gpuRepairing, setGpuRepairing] = useState(false)
   const unlistenRef = useRef<(() => void) | null>(null)
   const activeJobRef = useRef<string | null>(null)
@@ -186,6 +201,15 @@ export default function App() {
     void refreshSetupState()
   }, [refreshSetupState])
 
+  const syncLocalModel = useCallback((modelId: string) => {
+    setSelectedLocalModelId(modelId)
+    void api.setupInventory(modelId).then((inventory) => {
+      if (!mountedRef.current || !isLocalSetupInventory(inventory)) return
+      writeCachedSetupInventory(inventory)
+      setRunnableLocalModelId(resolveRunnableLocalModel(inventory) ?? null)
+    }).catch(() => undefined)
+  }, [])
+
   const prepareAttempt = useCallback((jobId: string | null) => {
     resultsRequestRef.current += 1
     const previousAttemptId = activeAttemptRef.current
@@ -196,6 +220,7 @@ export default function App() {
     setResults(null)
     setResultsLoadJobId(null)
     setActiveDiagnosticId(null)
+    setCpuResumeAvailable(false)
   }, [])
 
   const loadResults = useCallback((jobId: string, diagnosticId?: string | null, failureMessage = RESULTS_LOAD_FAILURE_MESSAGE) => {
@@ -313,14 +338,17 @@ export default function App() {
         runStartedAtRef.current = null
         refreshJobs()
         if (payload.code === 'CANCELLED') {
+          setCpuResumeAvailable(false)
           setRunState('CANCELLED')
           setRunError(null)
           setRunNotice(payload.message ?? 'Job cancelled. Completed work remains available to resume.')
         } else if (payload.ok && activeJobRef.current) {
+          setCpuResumeAvailable(false)
           setRunState('SUCCEEDED')
           setRunNotice(payload.code === 'NO_RECOMMENDED_CLIPS' ? (payload.message ?? 'No recommended clips were found.') : null)
           void loadResults(activeJobRef.current, payload.diagnostic_id)
         } else if (!payload.ok) {
+          setCpuResumeAvailable(payload.allow_cpu_resume === true)
           setRunState('FAILED')
           setRunErrorCode(payload.code ?? null)
           setRunNotice(null)
@@ -329,6 +357,7 @@ export default function App() {
           setRunError(`${friendly ?? payload.message ?? 'The video could not be processed.'}${diagnostic}`)
         }
       } else if (payload.event === 'result') {
+        setCpuResumeAvailable(false)
         const resultElapsed = typeof payload.elapsed_seconds === 'number' && Number.isFinite(payload.elapsed_seconds)
           ? payload.elapsed_seconds
           : lastElapsedSecondsRef.current ?? (runStartedAtRef.current ? Math.max(0, Math.floor((Date.now() - runStartedAtRef.current) / 1000)) : 0)
@@ -353,7 +382,11 @@ export default function App() {
         setRunStartedAt(null)
         runStartedAtRef.current = null
         setRunNotice(null)
-        setRunError('The video stopped before finishing. Retry the job and keep the diagnostic details for support.')
+        setRunErrorCode(payload.code ?? 'PIPELINE_NATIVE_CRASH')
+        setCpuResumeAvailable(payload.allow_cpu_resume === true)
+        const friendly = payload.code ? FRIENDLY_FAILURES[payload.code] : undefined
+        const diagnostic = payload.diagnostic_id ? ` Technical details: ${payload.diagnostic_id}.` : ''
+        setRunError(`${friendly ?? payload.message ?? 'The video stopped unexpectedly.'}${diagnostic}`)
       }
     }).then((unlisten) => { if (disposed) unlisten(); else unlistenRef.current = unlisten }).catch(() => {
       if (!disposed) setRunError('Pipeline events are unavailable. Restart ClipGauge and retry.')
@@ -379,20 +412,28 @@ export default function App() {
     try {
       const savedModel = provider !== 'clipgauge-local' ? readSavedProviderModel(provider) : undefined
       const resolvedLocalModel = async () => {
-        if (selectedLocalModelRef.current) return selectedLocalModelRef.current
         const inventory = await api.setupInventory()
         if (!mountedRef.current) return undefined
         if (!isLocalSetupInventory(inventory)) return undefined
         writeCachedSetupInventory(inventory)
-        const discovered = resolveSelectedLocalModel(inventory)
-        if (discovered) {
-          selectedLocalModelRef.current = discovered
-          setSelectedLocalModelId(discovered)
-        }
-        return discovered
+        const preferred = resolvePreferredLocalModel(inventory)
+        const runnable = resolveRunnableLocalModel(inventory)
+        setSelectedLocalModelId(preferred ?? null)
+        setRunnableLocalModelId(runnable ?? null)
+        selectedLocalModelRef.current = preferred ?? null
+        return runnable
       }
-      const resolvedModel = model ?? savedModel ?? (provider === 'clipgauge-local' ? await resolvedLocalModel() : undefined)
+      const resolvedModel = provider === 'clipgauge-local' ? await resolvedLocalModel() : model ?? savedModel
       if (!mountedRef.current) return
+      if (provider === 'clipgauge-local' && !resolvedModel) {
+        setRunning(false)
+        setRunStartedAt(null)
+        runStartedAtRef.current = null
+        setRunState('FAILED')
+        setRunErrorCode('LOCAL_MODEL_NOT_RUNNABLE')
+        setRunError('Choose a verified, runnable local model in Setup & Storage first.')
+        return
+      }
       const endpointConfigured = provider === 'custom' || provider === 'cloudflare'
       const resolvedEndpoint = endpoint ?? (endpointConfigured ? readSavedProviderEndpoint(provider) : undefined)
       const resolvedAuth = auth ?? (endpointConfigured ? 'bearer' : undefined)
@@ -524,10 +565,10 @@ export default function App() {
   }
 
   let content
-  if (section === 'create') content = <Studio jobs={jobs} running={running} runState={runState} cancelling={cancelling} startedAt={runStartedAt} elapsedSeconds={finalElapsedSeconds} stages={stages} error={runError} errorCode={runErrorCode} notice={runNotice} resultsLoadFailed={Boolean(resultsLoadJobId)} onRetryResults={retryResults} onRun={startRun} localModelId={selectedLocalModelId ?? undefined} providerModel={selectedProvider === 'clipgauge-local' ? selectedLocalModelId ?? undefined : readSavedProviderModel(selectedProvider)} providerModelAvailable={providerQualification?.modelAvailable ?? (selectedProvider === 'clipgauge-local' ? undefined : false)} providerModelCompatible={providerQualification?.modelCompatible} providerServiceReady={providerQualification?.serviceReady ?? (selectedProvider === 'clipgauge-local' ? undefined : false)} providerEndpoint={selectedProvider === 'custom' || selectedProvider === 'cloudflare' ? readSavedProviderEndpoint(selectedProvider) : undefined} cloudConfigured={cloudConfigured} onContinueCpu={continueCpu} onRepairGpu={repairGpu} gpuRepairing={gpuRepairing} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { if (!mountedRef.current) return; setCancelling(false); setRunError(friendlyErrorMessage(error, 'The job could not be cancelled. Retry the action.')) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={selectProvider} onOpenJob={openJob} onResume={(id) => { void resumeJobAction(id) }} />
+  if (section === 'create') content = <Studio jobs={jobs} running={running} runState={runState} cancelling={cancelling} startedAt={runStartedAt} elapsedSeconds={finalElapsedSeconds} stages={stages} error={runError} errorCode={runErrorCode} cpuResumeAvailable={cpuResumeAvailable} notice={runNotice} resultsLoadFailed={Boolean(resultsLoadJobId)} onRetryResults={retryResults} onRun={startRun} localModelId={selectedLocalModelId ?? undefined} providerModel={selectedProvider === 'clipgauge-local' ? selectedLocalModelId ?? undefined : readSavedProviderModel(selectedProvider)} providerModelAvailable={providerQualification?.modelAvailable ?? (selectedProvider === 'clipgauge-local' ? Boolean(runnableLocalModelId && runnableLocalModelId === selectedLocalModelId) : false)} providerModelCompatible={providerQualification?.modelCompatible} providerServiceReady={providerQualification?.serviceReady ?? (selectedProvider === 'clipgauge-local' ? Boolean(runnableLocalModelId) : false)} providerEndpoint={selectedProvider === 'custom' || selectedProvider === 'cloudflare' ? readSavedProviderEndpoint(selectedProvider) : undefined} cloudConfigured={cloudConfigured} onContinueCpu={continueCpu} onRepairGpu={repairGpu} gpuRepairing={gpuRepairing} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { if (!mountedRef.current) return; setCancelling(false); setRunError(friendlyErrorMessage(error, 'The job could not be cancelled. Retry the action.')) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={selectProvider} onOpenJob={openJob} onResume={(id) => { void resumeJobAction(id) }} />
   else if (section === 'sessions') content = <Sessions jobs={jobs} onBack={() => setSection('create')} onOpenJob={openJob} onResume={resumeFromSessions} />
-  else if (section === 'setup') content = <SetupCenter jobs={jobs} onBack={() => setSection('create')} onUseLocal={(modelId) => { if (modelId) setSelectedLocalModelId(modelId); selectProvider('clipgauge-local'); setSection('create') }} />
-  else if (section === 'providers') content = <ProviderCenter selectedProvider={selectedProvider} onSelectProvider={selectProvider} onSelectLocalModel={setSelectedLocalModelId} onBack={() => { void refreshSetupState(); setSection('create') }} onOpenSetup={() => setSection('setup')} />
+  else if (section === 'setup') content = <SetupCenter jobs={jobs} onBack={() => setSection('create')} onLocalModelSaved={syncLocalModel} onUseLocal={(modelId) => { if (modelId) syncLocalModel(modelId); selectProvider('clipgauge-local'); setSection('create') }} />
+  else if (section === 'providers') content = <ProviderCenter selectedProvider={selectedProvider} onSelectProvider={selectProvider} onSelectLocalModel={syncLocalModel} onBack={() => { void refreshSetupState(); setSection('create') }} onOpenSetup={() => setSection('setup')} />
   else if (section === 'integrations') content = <Integrations onBack={() => setSection('create')} onOpenLoop={() => setView('loop')} />
   else if (section === 'privacy') content = <PrivacyPanel provider={selectedProvider} onBack={() => setSection('create')} />
   else if (section === 'help') content = <SupportPage onBack={() => setSection('create')} onNavigate={(next) => setSection(next)} provider={selectedProvider} currentJobId={activeJob} currentDiagnosticId={activeDiagnosticId} />

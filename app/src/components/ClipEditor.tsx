@@ -30,6 +30,7 @@ interface EditContext {
   ok: boolean
   error?: string
   diagnostic_id?: string
+  clip_id?: string
   window: { start: number; end: number }
   media_path: string
   probe: { width: number; height: number }
@@ -41,6 +42,8 @@ interface EditContext {
   events: { type: string; start: number; end: number }[]
   auto_cuts: Cut[]
   run_caption_preset: string
+  degraded_features?: string[]
+  warnings?: string[]
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -75,44 +78,71 @@ function isEditState(value: unknown): value is EditState {
       && typeof overlay.phrase === 'string')
 }
 
-function isEditContext(value: unknown): value is EditContext {
-  if (!isRecord(value) || value.ok !== true) return false
+function parseEditContext(value: unknown): EditContext | null {
+  if (!isRecord(value) || value.ok !== true) return null
   const windowRange = value.window
   const probe = value.probe
   const trajectory = value.trajectory
-  return isRecord(windowRange)
-    && isFiniteNumber(windowRange.start)
-    && isFiniteNumber(windowRange.end)
-    && typeof value.media_path === 'string'
-    && isRecord(probe)
-    && isFiniteNumber(probe.width)
-    && isFiniteNumber(probe.height)
-    && (trajectory === null || (isRecord(trajectory)
+  const words = value.words === undefined ? [] : value.words
+  const rms = value.rms === undefined ? [] : value.rms
+  const events = value.events === undefined ? [] : value.events
+  const autoCuts = value.auto_cuts === undefined ? [] : value.auto_cuts
+  const degraded = value.degraded_features === undefined ? [] : value.degraded_features
+  const warnings = value.warnings === undefined ? [] : value.warnings
+  if (!isRecord(windowRange)
+    || !isFiniteNumber(windowRange.start)
+    || !isFiniteNumber(windowRange.end)
+    || typeof value.media_path !== 'string'
+    || !isRecord(probe)
+    || !isFiniteNumber(probe.width)
+    || !isFiniteNumber(probe.height)
+    || !(trajectory === undefined || trajectory === null || (isRecord(trajectory)
       && isFiniteNumber(trajectory.fps)
       && Array.isArray(trajectory.frames)
       && trajectory.frames.every((frame) => Array.isArray(frame) && frame.every(isFiniteNumber))))
-    && isEditState(value.edit)
-    && Array.isArray(value.words)
-    && value.words.every((word) => isRecord(word)
+    || !isEditState(value.edit)
+    || !Array.isArray(words)
+    || !words.every((word) => isRecord(word)
       && typeof word.word === 'string'
       && isFiniteNumber(word.start)
       && isFiniteNumber(word.end)
       && (word.speaker === undefined || Number.isInteger(word.speaker)))
-    && Array.isArray(value.rms)
-    && value.rms.every(isFiniteNumber)
-    && isFiniteNumber(value.rms_grid)
-    && Array.isArray(value.events)
-    && value.events.every((event) => isRecord(event)
+    || !Array.isArray(rms)
+    || !rms.every(isFiniteNumber)
+    || (value.rms_grid !== undefined && (!isFiniteNumber(value.rms_grid) || value.rms_grid <= 0))
+    || !Array.isArray(events)
+    || !events.every((event) => isRecord(event)
       && typeof event.type === 'string'
       && isFiniteNumber(event.start)
       && isFiniteNumber(event.end))
-    && Array.isArray(value.auto_cuts)
-    && value.auto_cuts.every((cut) => isRecord(cut)
+    || !Array.isArray(autoCuts)
+    || !autoCuts.every((cut) => isRecord(cut)
       && isFiniteNumber(cut.start)
       && isFiniteNumber(cut.end)
       && typeof cut.kept === 'boolean'
       && typeof cut.reason === 'string')
-    && typeof value.run_caption_preset === 'string'
+    || (value.run_caption_preset !== undefined && typeof value.run_caption_preset !== 'string')
+    || !Array.isArray(degraded)
+    || !degraded.every((feature) => typeof feature === 'string')
+    || !Array.isArray(warnings)
+    || !warnings.every((warning) => typeof warning === 'string')) return null
+  return {
+    ok: true,
+    clip_id: typeof value.clip_id === 'string' ? value.clip_id : undefined,
+    window: { start: windowRange.start, end: windowRange.end },
+    media_path: value.media_path,
+    probe: { width: probe.width, height: probe.height },
+    trajectory: trajectory === undefined || trajectory === null ? null : { fps: trajectory.fps as number, frames: trajectory.frames as number[][] },
+    edit: value.edit,
+    words: words as Word[],
+    rms: rms as number[],
+    rms_grid: value.rms_grid === undefined ? 0.1 : value.rms_grid as number,
+    events: events as EditContext['events'],
+    auto_cuts: autoCuts as Cut[],
+    run_caption_preset: typeof value.run_caption_preset === 'string' ? value.run_caption_preset : 'classic',
+    degraded_features: degraded as string[],
+    warnings: warnings as string[],
+  }
 }
 
 const PRESETS = ['classic', 'beast', 'hormozi', 'minimal', 'karaoke-pop']
@@ -177,12 +207,13 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
           setError(diagnostic ? `${message} Diagnostic ID: ${diagnostic}.` : message)
           return
         }
-        if (!isEditContext(c)) {
+        const parsed = parseEditContext(c)
+        if (!parsed) {
           setError('Editor data is malformed for this clip. Retry the session.')
           return
         }
-        setCtx(c)
-        setEdit(c.edit)
+        setCtx(parsed)
+        setEdit(parsed.edit)
       })
       .catch((e) => { if (mountedRef.current && requestId === contextRequestRef.current) setError(friendlyErrorMessage(e, 'Editor data is unavailable for this clip. Retry the session.')) })
     return () => { if (requestId === contextRequestRef.current) contextRequestRef.current += 1 }
@@ -371,7 +402,7 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
     if (!ctx || !ctx.rms.length) return ''
     const max = Math.max(...ctx.rms, 0.001)
     const pts = ctx.rms.map((v, i) => {
-      const x = (i / (ctx.rms.length - 1)) * 100
+      const x = ctx.rms.length === 1 ? 50 : (i / (ctx.rms.length - 1)) * 100
       return `${x.toFixed(2)},${(30 - (v / max) * 28).toFixed(1)}`
     })
     return `M0,30 L${pts.join(' L')} L100,30 Z`
@@ -518,6 +549,12 @@ export default function ClipEditor({ jobId, clipIndex, onClose, onRendered }: Pr
       </header>
       {rendering && <p className="mono editor-msg">{renderMsg}</p>}
       {error && <p className="mono editor-err">{error}</p>}
+      {ctx.degraded_features?.length ? (
+        <div className="editor-degraded" role="status" data-testid="editor-degraded">
+          <strong>Some analysis signals are unavailable.</strong>
+          <span>{ctx.warnings?.join(' ') ?? 'Safe editor fallbacks are active.'}</span>
+        </div>
+      ) : null}
 
       {/* vertical output monitor: the 9:16 frame, camera-trajectory-following */}
       <div className="monitor-src-wrap">

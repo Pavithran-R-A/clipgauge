@@ -134,14 +134,14 @@ describe('v0.5 information architecture', () => {
   it('renders cached provider inventory before native refresh completes', () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.18',
+      app_version: '0.5.19',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: 1_700_000_000,
       value: {
         state: 'ready',
-        local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/balanced', required_bytes: 0, action: 'Ready' },
-        models: [{ asset_id: 'clipgauge-local/balanced' }],
+        local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/balanced', preferred_model_id: 'clipgauge-local/balanced', runnable_model_id: 'clipgauge-local/balanced', required_bytes: 0, action: 'Ready' },
+        models: [{ asset_id: 'clipgauge-local/balanced', installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } }],
         runtime: {},
         core_assets: [],
         storage: {},
@@ -167,7 +167,7 @@ describe('v0.5 information architecture', () => {
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       runtime: {},
-      models: [],
+      models: [{ asset_id: 'clipgauge-local/light', installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } }],
       core_assets: [],
       managed_assets: [],
       storage: {},
@@ -182,14 +182,14 @@ describe('v0.5 information architecture', () => {
   it('keeps cached provider readiness when native refresh fails', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.18',
+      app_version: '0.5.19',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: 1_700_000_000,
       value: {
         state: 'ready',
-        local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/balanced', required_bytes: 0, action: 'Ready' },
-        models: [{ asset_id: 'clipgauge-local/balanced' }],
+        local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/balanced', preferred_model_id: 'clipgauge-local/balanced', runnable_model_id: 'clipgauge-local/balanced', required_bytes: 0, action: 'Ready' },
+        models: [{ asset_id: 'clipgauge-local/balanced', installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } }],
         runtime: {},
         core_assets: [],
         storage: {},
@@ -324,7 +324,7 @@ describe('v0.5 information architecture', () => {
     mocks.setupInventory.mockResolvedValue({
       state: 'setup-required',
       runtime: {},
-      models: [],
+      models: [{ asset_id: 'clipgauge-local/light', installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } }],
       core_assets: [],
       storage: { required_bytes: 2 * 1024 ** 3, installed_bytes: 0, available_bytes: 700 * 1024 ** 2 },
       catalog: []
@@ -360,7 +360,7 @@ describe('v0.5 information architecture', () => {
   it('uses cached YouTube readiness without retesting on setup mount', async () => {
     window.localStorage.setItem('clipgauge.setup.youtube.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.18',
+      app_version: '0.5.19',
       value: { state: 'DEPENDENCIES_READY', ready: true, reason: 'Cached tools are ready.', actions: ['Test'], checks: [] },
       verifiedAt: new Date(Date.now() - 1000).toISOString()
     }))
@@ -372,7 +372,7 @@ describe('v0.5 information architecture', () => {
   it('keeps cached YouTube actions when a manual test fails', async () => {
     window.localStorage.setItem('clipgauge.setup.youtube.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.18',
+      app_version: '0.5.19',
       value: { state: 'DEPENDENCIES_READY', ready: true, reason: 'Cached YouTube support needs installation.', actions: ['Install'], checks: [] },
       verifiedAt: new Date().toISOString()
     }))
@@ -405,7 +405,7 @@ describe('v0.5 information architecture', () => {
       cuda_runtime_ready: true,
       cudnn_runtime_ready: true
     }
-    window.localStorage.setItem('clipgauge.setup.gpu.v1', JSON.stringify({ schema_version: 1, app_version: '0.5.18', identity: { gpu_identity: ['Cached GPU'], driver_version: ['1.0'], cuda_runtime_fingerprint: '{}', cudnn_runtime_fingerprint: '{}', pipeline_environment_fingerprint: null }, value: cachedGpu, verifiedAt: new Date().toISOString() }))
+    window.localStorage.setItem('clipgauge.setup.gpu.v1', JSON.stringify({ schema_version: 1, app_version: '0.5.19', identity: { gpu_identity: ['Cached GPU'], driver_version: ['1.0'], cuda_runtime_fingerprint: '{}', cudnn_runtime_fingerprint: '{}', pipeline_environment_fingerprint: null }, value: cachedGpu, verifiedAt: new Date().toISOString() }))
     mocks.gpuDiagnostics.mockImplementation(() => new Promise(() => undefined))
     render(<SetupCenter onBack={vi.fn()} />)
     expect(screen.getByText('Cached GPU')).toBeInTheDocument()
@@ -445,7 +445,7 @@ describe('v0.5 information architecture', () => {
 
     const cached = JSON.parse(window.localStorage.getItem('clipgauge.setup.gpu.v1') ?? '{}')
     expect(cached.schema_version).toBe(1)
-    expect(cached.app_version).toBe('0.5.18')
+    expect(cached.app_version).toBe('0.5.19')
     expect(cached.identity).toMatchObject({
       gpu_identity: ['Test GPU'],
       driver_version: ['555.1'],
@@ -458,16 +458,16 @@ describe('v0.5 information architecture', () => {
   it('renders cached setup inventory before the native refresh completes', () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.18',
+      app_version: '0.5.19',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'cached-manifest',
       last_verified_at: Date.now() / 1000 - 60,
       value: {
       state: 'ready',
       video_tools: { ready: true, source: 'system', capabilities: { starts: true, subtitles: true }, managed_download_needed: false, reason: 'Cached video tools.' },
-      local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/light' },
+      local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/light', preferred_model_id: 'clipgauge-local/light', runnable_model_id: 'clipgauge-local/light' },
       runtime: { installed: true },
-      models: [],
+      models: [{ asset_id: 'clipgauge-local/light', installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } }],
       core_assets: [],
       managed_assets: [],
       storage: { required_bytes: 0, installed_bytes: 1, available_bytes: 1, breakdown: [] },
@@ -484,7 +484,7 @@ describe('v0.5 information architecture', () => {
   it('avoids a native inventory check while cached setup is fresh', () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.18',
+      app_version: '0.5.19',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'cached-manifest',
       last_verified_at: Date.now() / 1000 - 60,
@@ -493,7 +493,7 @@ describe('v0.5 information architecture', () => {
         video_tools: { ready: true, source: 'system', capabilities: { starts: true, subtitles: true }, managed_download_needed: false, reason: 'Cached video tools.' },
         local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/light' },
         runtime: { installed: true },
-        models: [],
+        models: [{ asset_id: 'clipgauge-local/light', installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } }],
         core_assets: [],
         managed_assets: [],
         storage: { required_bytes: 0, installed_bytes: 1, available_bytes: 1, breakdown: [] },
@@ -533,7 +533,7 @@ describe('v0.5 information architecture', () => {
   it('ignores cached inventory with malformed storage breakdown rows', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.18',
+      app_version: '0.5.19',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: Date.now() / 1000,
@@ -548,7 +548,7 @@ describe('v0.5 information architecture', () => {
   it('ignores cached inventory with managed assets missing identifiers', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.18',
+      app_version: '0.5.19',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: Date.now() / 1000,
@@ -715,10 +715,10 @@ describe('v0.5 information architecture', () => {
 
   it('tests the exact selected local model identity', async () => {
     mocks.setupInventory.mockResolvedValue({
-      local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/light' },
+      local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/light', preferred_model_id: 'clipgauge-local/light', runnable_model_id: 'clipgauge-local/light' },
       models: [
-        { asset_id: 'clipgauge-local/light', display_name: 'Lightweight', size_bytes: 1 },
-        { asset_id: 'clipgauge-local/balanced', display_name: 'Balanced', size_bytes: 2 }
+        { asset_id: 'clipgauge-local/light', display_name: 'Lightweight', size_bytes: 1, installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } },
+        { asset_id: 'clipgauge-local/balanced', display_name: 'Balanced', size_bytes: 2, installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } }
       ]
     })
     mocks.testConnection.mockResolvedValue({ state: 'PASS', provider: 'clipgauge-local', message: 'Verified.' })
@@ -779,8 +779,8 @@ describe('v0.5 information architecture', () => {
       state: 'ready',
       local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/balanced', required_bytes: 0, action: 'Ready' },
       models: [
-        { asset_id: 'clipgauge-local/light', display_name: 'Lightweight', size_bytes: 1 },
-        { asset_id: 'clipgauge-local/balanced', display_name: 'Balanced', size_bytes: 2 }
+        { asset_id: 'clipgauge-local/light', display_name: 'Lightweight', size_bytes: 1, installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } },
+        { asset_id: 'clipgauge-local/balanced', display_name: 'Balanced', size_bytes: 2, installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } }
       ],
       runtime: {},
       core_assets: [],
@@ -815,8 +815,8 @@ describe('v0.5 information architecture', () => {
       state: 'ready',
       local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/balanced', required_bytes: 0, action: 'Ready' },
       models: [
-        { asset_id: 'clipgauge-local/light', display_name: 'Lightweight', size_bytes: 1 },
-        { asset_id: 'clipgauge-local/balanced', display_name: 'Balanced', size_bytes: 2 }
+        { asset_id: 'clipgauge-local/light', display_name: 'Lightweight', size_bytes: 1, installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } },
+        { asset_id: 'clipgauge-local/balanced', display_name: 'Balanced', size_bytes: 2, installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } }
       ],
       runtime: {},
       core_assets: [],
@@ -852,8 +852,8 @@ describe('v0.5 information architecture', () => {
       state: 'ready',
       local_ai: { state: 'ready', runtime_ready: true, model_ready: true, selected_model_id: 'clipgauge-local/balanced', required_bytes: 0, action: 'Ready' },
       models: [
-        { asset_id: 'clipgauge-local/light', display_name: 'Lightweight', size_bytes: 1 },
-        { asset_id: 'clipgauge-local/balanced', display_name: 'Balanced', size_bytes: 2 }
+        { asset_id: 'clipgauge-local/light', display_name: 'Lightweight', size_bytes: 1, installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } },
+        { asset_id: 'clipgauge-local/balanced', display_name: 'Balanced', size_bytes: 2, installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } }
       ],
       runtime: {},
       core_assets: [],
@@ -1157,7 +1157,7 @@ describe('v0.5 information architecture', () => {
       { asset_id: 'model:asr:test', display_name: 'Speech', purpose: 'Speech recognition', size_bytes: 0, installed: true, license: 'MIT' },
       { asset_id: 'model:panns:test', display_name: 'Audio analysis', purpose: 'Audio analysis', size_bytes: 0, installed: true, license: 'MIT' }
     ]
-    const inventory = { state: 'ready', video_tools: { ready: true, source: 'system', managed_download_needed: false }, local_ai: { state: 'setup-required', runtime_ready: false, model_ready: false, selected_model_id: 'clipgauge-local/balanced', required_bytes: 2300000000, action: 'Install ClipGauge Local' }, runtime: { installed: false }, models: [{ asset_id: 'clipgauge-local/balanced', display_name: 'Balanced', size_bytes: 2300000000 }], core_assets: [], managed_assets: readyAssets, storage: { required_bytes: 0, installed_bytes: 0, available_bytes: null, assets: [], consent_required: false }, catalog: [] }
+    const inventory = { state: 'ready', video_tools: { ready: true, source: 'system', managed_download_needed: false }, local_ai: { state: 'setup-required', runtime_ready: false, model_ready: false, selected_model_id: 'clipgauge-local/balanced', preferred_model_id: 'clipgauge-local/balanced', runnable_model_id: null, required_bytes: 2300000000, action: 'Install ClipGauge Local' }, runtime: { installed: false }, models: [{ asset_id: 'clipgauge-local/balanced', display_name: 'Balanced', size_bytes: 2300000000, installed: false, lifecycle_state: 'DOWNLOAD_REQUIRED', readiness: { verified: false, usable: false } }], core_assets: [], managed_assets: readyAssets, storage: { required_bytes: 0, installed_bytes: 0, available_bytes: null, assets: [], consent_required: false }, catalog: [] }
     mocks.setupInventory.mockResolvedValue(inventory)
     const { unmount: unmountSetup } = render(<SetupCenter onBack={vi.fn()} />)
     expect(await screen.findByRole('heading', { name: 'Ready to create clips' })).toBeInTheDocument()
@@ -1172,7 +1172,7 @@ describe('v0.5 information architecture', () => {
     expect(onOpenSetup).toHaveBeenCalledOnce()
     expect(onBack).not.toHaveBeenCalled()
     unmount()
-    const mixedInventory = { ...inventory, local_ai: { ...inventory.local_ai, state: 'ready', runtime_ready: true, model_ready: true, action: 'Ready' } }
+    const mixedInventory = { ...inventory, local_ai: { ...inventory.local_ai, state: 'ready', runtime_ready: true, model_ready: true, preferred_model_id: 'clipgauge-local/balanced', runnable_model_id: 'clipgauge-local/balanced', action: 'Ready' }, models: [{ ...inventory.models[0], installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } }] }
     mocks.setupInventory.mockResolvedValue(mixedInventory)
     render(<ProviderCenter selectedProvider="clipgauge-local" onSelectProvider={vi.fn()} onBack={vi.fn()} onOpenSetup={vi.fn()} />)
     expect((await screen.findAllByText('Ready')).length).toBeGreaterThan(0)

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isLocalAiUnavailable, resolveSelectedLocalModel, selectedLocalModel, shouldAdvanceSetupQueue, summarizeSetupQueue } from './setupState'
+import { isLocalAiUnavailable, resolvePreferredLocalModel, resolveRunnableLocalModel, resolveSelectedLocalModel, selectedLocalModel, shouldAdvanceSetupQueue, summarizeSetupQueue } from './setupState'
 
 describe('setup lifecycle guards', () => {
   it('advances only after successful terminal events', () => {
@@ -61,5 +61,38 @@ describe('setup queue aggregation', () => {
       models: [{ asset_id: 'clipgauge-local/qwen3-1.7b-q8_0' }]
     }
     expect(resolveSelectedLocalModel(inventory)).toBe('clipgauge-local/qwen3-1.7b-q8_0')
+  })
+
+  it('separates preferred selection from runnable state', () => {
+    const inventory = {
+      local_ai: {
+        preferred_model_id: 'clipgauge-local/qwen3-4b-q4_k_m',
+        runnable_model_id: null,
+      },
+      models: [
+        { asset_id: 'clipgauge-local/qwen3-4b-q4_k_m', lifecycle_state: 'DOWNLOAD_REQUIRED', installed: false },
+        { asset_id: 'clipgauge-local/qwen3-1.7b-q8_0', lifecycle_state: 'VERIFIED', installed: true },
+      ],
+    }
+
+    expect(resolvePreferredLocalModel(inventory)).toBe('clipgauge-local/qwen3-4b-q4_k_m')
+    expect(resolveRunnableLocalModel(inventory)).toBeUndefined()
+  })
+
+  it('accepts only the selected verified model as runnable', () => {
+    const inventory = {
+      local_ai: {
+        preferred_model_id: 'clipgauge-local/qwen3-1.7b-q8_0',
+        runnable_model_id: 'clipgauge-local/qwen3-1.7b-q8_0',
+      },
+      models: [{
+        asset_id: 'clipgauge-local/qwen3-1.7b-q8_0',
+        lifecycle_state: 'VERIFIED',
+        installed: true,
+        readiness: { verified: true, usable: true },
+      }],
+    }
+
+    expect(resolveRunnableLocalModel(inventory)).toBe('clipgauge-local/qwen3-1.7b-q8_0')
   })
 })

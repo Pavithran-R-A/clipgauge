@@ -1589,8 +1589,7 @@ pub fn native_inventory(
     let selected_id = selected_model(home, requested_model);
     let selected = local_models
         .iter()
-        .find(|model| model.asset_id == selected_id)
-        .or_else(|| local_models.first());
+        .find(|model| model.asset_id == selected_id);
     let selected_id = selected
         .map(|model| model.asset_id.clone())
         .unwrap_or(selected_id);
@@ -1607,6 +1606,11 @@ pub fn native_inventory(
                 .unwrap_or(false)
         })
         .unwrap_or(false);
+    let runnable_model_id = if model_ready {
+        Some(selected_id.clone())
+    } else {
+        None
+    };
     let local_state = if runtime_spec.is_none() {
         "unavailable"
     } else if runtime_ready && model_ready {
@@ -1680,6 +1684,8 @@ pub fn native_inventory(
         "selected_runtime": manifest_asset(&manifest, "llama-server", &selected_runtime_key)
             .map(|record| text(record.get("backend"), "cpu")),
         "selected_model": selected_id.clone(),
+        "preferred_model_id": selected_id.clone(),
+        "runnable_model_id": runnable_model_id.clone(),
         "actual_additional_bytes": (if runtime_ready { 0 } else { runtime_spec.map(|spec| spec.size_bytes).unwrap_or_default() }) + (if model_ready { 0 } else { selected.map(|model| model.size_bytes).unwrap_or_default() }),
     });
     let _ = installed_cache.save(home);
@@ -1723,6 +1729,8 @@ pub fn native_inventory(
             "runtime_ready": runtime_ready,
             "model_ready": model_ready,
             "selected_model_id": selected_id,
+            "preferred_model_id": local_readiness["preferred_model_id"].clone(),
+            "runnable_model_id": runnable_model_id,
             "required_bytes": (if runtime_ready { 0 } else { runtime_spec.map(|spec| spec.size_bytes).unwrap_or_default() }) + (if model_ready { 0 } else { selected.map(|model| model.size_bytes).unwrap_or_default() }),
             "action": if runtime_spec.is_none() { "Unavailable on this platform" } else if runtime_ready && model_ready { "Ready" } else if runtime_ready { "Download selected model" } else { "Install ClipGauge Local" },
             "readiness": local_readiness,

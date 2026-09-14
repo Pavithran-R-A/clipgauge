@@ -17,7 +17,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from . import __version__, config, downloads, environment, local_runtime, protocol, readiness, runtime, setup_models, storage, storage_estimate
+from . import __version__, config, downloads, environment, local_runtime, protocol, readiness, resource_guard, runtime, setup_models, storage, storage_estimate
 from .jobs import queue
 from .render import ffmpeg_bin
 from .scoring import providers as providers_mod
@@ -92,6 +92,14 @@ def _progress_printer(jsonl: bool, job_id: str | None = None, attempt_id: str | 
             accelerator = os.environ.get("CLIPGAUGE_ACCELERATOR")
             if accelerator:
                 event["accelerator"] = protocol.safe_message(accelerator, limit=80)
+            resource_snapshot = os.environ.get("CLIPGAUGE_RESOURCE_SNAPSHOT")
+            if resource_snapshot:
+                try:
+                    parsed_snapshot = json.loads(resource_snapshot)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    parsed_snapshot = None
+                if isinstance(parsed_snapshot, dict):
+                    event["resource_snapshot"] = parsed_snapshot
             print(json.dumps(event), flush=True)
         else:
             pct = f"{fraction * 100:5.1f}%" if fraction >= 0 else "  ...."
@@ -114,47 +122,42 @@ def _disk_warning(source: str | None = None) -> str | None:
         free_bytes = shutil.disk_usage(config.home_dir().parent).free
     except OSError:
         return "Free disk space could not be measured. Check storage before a long run."
-    source_bytes = 0
-    if source and not source.startswith(("http://", "https://")):
-        try:
-            source_bytes = max(0, Path(source).stat().st_size)
-        except OSError:
-            source_bytes = 0
-    estimate = storage_estimate.for_source(source_bytes)
+    estimate = _source_storage_estimate(source)
     required_threshold = max(4 * 1024**3, int(estimate["required_bytes"]))
     if free_bytes < required_threshold:
-        estimate_label = f" Source estimate is {required_threshold / 1024**3:.1f} GiB." if source_bytes else ""
-        return f"Only {free_bytes / 1024**3:.1f} GiB is free.{estimate_label} Long analysis may need more storage; review Setup & Storage before continuing."
+        return (
+            f"Only {free_bytes / 1024**3:.1f} GiB is free. "
+            f"Source estimate: approximately {required_threshold / 1024**3:.1f} GiB. "
+            "Review Setup & Storage before continuing."
+        )
     return None
 
 
 def _disk_block(source: str | None = None, *, score_only: bool = False) -> str | None:
     """Stop a run before job work when storage is unsafe."""
-    try:
-        free_bytes = shutil.disk_usage(config.home_dir().parent).free
-    except OSError:
-        return "Free disk space could not be measured. Check storage before starting."
-    source_bytes = 0
+    estimate = _source_storage_estimate(source, score_only=score_only)
+    decision = resource_guard.disk_headroom_decision(
+        source,
+        data_root=config.home_dir().parent,
+        estimate=estimate,
+        score_only=score_only,
+    )
+    if not decision.blocked:
+        return None
+    return decision.message
+
+
+def _source_storage_estimate(source: str | None, *, score_only: bool = False) -> dict[str, object]:
+    """Return a conservative estimate without network calls."""
+    if score_only:
+        return storage_estimate.for_cached_score()
     if source and not source.startswith(("http://", "https://")):
         try:
             source_bytes = max(0, Path(source).stat().st_size)
         except OSError:
             source_bytes = 0
-    estimate = (
-        storage_estimate.for_cached_score()
-        if score_only
-        else storage_estimate.for_source(source_bytes)
-    )
-    minimum_safe = (
-        storage_estimate.CACHED_SCORE_MIN_SAFE_BYTES
-        if score_only
-        else storage_estimate.MIN_SAFE_BYTES
-    )
-    required_threshold = max(minimum_safe, int(estimate["required_bytes"]))
-    if free_bytes >= required_threshold:
-        return None
-    estimate = f" Source estimate is {required_threshold / 1024**3:.1f} GiB." if source_bytes else ""
-    return f"Only {free_bytes / 1024**3:.1f} GiB is free.{estimate} Free disk space before starting this run."
+        return storage_estimate.for_source(source_bytes)
+    return storage_estimate.for_url_metadata(None)
 
 
 def _preflight_terminal(jsonl: bool, job_id: str | None, code: str, message: str, retryable: bool = False) -> int:
@@ -931,8 +934,9 @@ def cmd_edit(args: argparse.Namespace) -> int:
     job_dir = Path(job.dir)
 
     if args.edit_cmd == "context":
-        print(json.dumps({"ok": True, **rc.context_for_clip(job_dir, args.clip)}))
-        return 0
+        result = rc.context_for_clip_result(job_dir, args.clip)
+        print(json.dumps(result))
+        return 0 if result.get("ok") else 1
 
     if args.edit_cmd == "suggest-visuals":
         score = json.loads((job_dir / "score.json").read_text())["data"]

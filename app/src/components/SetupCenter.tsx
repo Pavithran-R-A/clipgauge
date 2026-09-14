@@ -4,13 +4,13 @@ import { listen } from '@tauri-apps/api/event'
 import { api } from '../api'
 import type { GpuDiagnostics, JobSummary, LocalSetupInventory, ManagedAssetRow, SetupProgressEvent, YouTubeReadiness } from '../types'
 import { assetLifecycleLabel, diskState, formatBytes, formatDuration, formatRate, meaningfulEta, progressPercent } from '../setupFormatting'
-import { isLocalAiUnavailable, resolveSelectedLocalModel, summarizeSetupQueue, type SetupQueueSummary } from '../setupState'
+import { isLocalAiUnavailable, resolvePreferredLocalModel, resolveRunnableLocalModel, summarizeSetupQueue, type SetupQueueSummary } from '../setupState'
 import { isFreshSetupInventory, readCachedSetupInventory, writeCachedSetupInventory } from '../setupInventoryCache'
 import { loadErrorMessage, setupPhaseLabel, type SetupLoadState } from '../setupLifecycle'
 import { isLocalSetupInventory, isStorageCleanupPreview, isStorageCleanupResult, isYouTubeReadiness as isNativeYouTubeReadiness } from '../nativeValidation'
 import { friendlyErrorMessage } from '../errorMessaging'
 
-interface Props { onBack: () => void; onUseLocal?: (modelId?: string) => void; jobs?: JobSummary[] }
+interface Props { onBack: () => void; onUseLocal?: (modelId?: string) => void; onLocalModelSaved?: (modelId: string) => void; jobs?: JobSummary[] }
 
 type Group = { id: string; title: string; description: string; prefixes: string[]; required: boolean }
 type GpuUiState = 'CHECKING' | 'READY' | 'CPU_ONLY' | 'UNAVAILABLE' | 'DEGRADED' | 'REPAIR_REQUIRED'
@@ -25,9 +25,9 @@ type GpuCacheIdentity = {
 type GpuCacheRecord = { schema_version: number; app_version: string; identity: GpuCacheIdentity; value: GpuDiagnostics; verifiedAt: string }
 const GPU_CACHE_KEY = 'clipgauge.setup.gpu.v1'
 const GPU_CACHE_SCHEMA_VERSION = 1
-const GPU_CACHE_APP_VERSION = '0.5.18'
+const GPU_CACHE_APP_VERSION = '0.5.19'
 const YOUTUBE_CACHE_SCHEMA_VERSION = 2
-const YOUTUBE_CACHE_APP_VERSION = '0.5.18'
+const YOUTUBE_CACHE_APP_VERSION = '0.5.19'
 const GPU_CACHE_TTL_MS = 15 * 60 * 1000
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -264,10 +264,11 @@ function statusHasRepair(status: YouTubeReadiness | null): boolean {
 
 function modelLabel(model: Record<string, unknown>, index: number): string {
   const name = String(model.display_name ?? model.asset_id ?? `Local model ${index + 1}`)
-  return name.toLowerCase().includes('balanced') ? 'Balanced' : name.toLowerCase().includes('light') ? 'Lightweight' : name
+  const id = String(model.asset_id ?? '').toLowerCase()
+  return id.includes('4b') || name.toLowerCase().includes('balanced') ? 'Balanced' : id.includes('1.7b') || name.toLowerCase().includes('light') ? 'Lightweight' : name
 }
 
-export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
+export default function SetupCenter({ onBack, onUseLocal, onLocalModelSaved, jobs = [] }: Props) {
   const cachedInventoryValue = readCachedSetupInventory()
   const cachedGpu = readCached(GPU_CACHE_KEY, isGpuCache)
   const cachedYouTube = readCached(YOUTUBE_CACHE_KEY, isYouTubeCache)
@@ -283,7 +284,7 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
   const [message, setMessage] = useState<string | null>(null)
   const [lastArgs, setLastArgs] = useState<string[] | null>(null)
   const [showDetails, setShowDetails] = useState(false)
-  const [selectedModelId, setSelectedModelId] = useState<string | null>(null)
+  const [selectedModelId, setSelectedModelId] = useState<string | null>(() => resolvePreferredLocalModel(cachedInventoryValue) ?? null)
   const [queueSummary, setQueueSummary] = useState<SetupQueueSummary>({ state: 'pending', completed: 0, failed: 0, cancelled: false })
   const [youtubeStatus, setYoutubeStatus] = useState<YouTubeReadiness | null>(cachedYouTube?.value ?? null)
   const [youtubeDependencyCheckedAt, setYoutubeDependencyCheckedAt] = useState<string | null>(() => youtubeDependencyTimestamp(cachedYouTube))
@@ -355,7 +356,7 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
       setInventory(next)
       writeCachedSetupInventory(next)
       setInventoryLoad({ phase: 'ready', value: next })
-      setSelectedModelId((current) => resolveSelectedLocalModel(next, current) ?? null)
+      setSelectedModelId((current) => resolvePreferredLocalModel(next, current) ?? null)
     }).catch((error) => {
       if (mountedRef.current && requestId === inventoryRequestRef.current) setInventoryLoad({ phase: 'error', message: loadErrorMessage(error) })
     })
@@ -436,7 +437,7 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
   }, [startedAt])
 
   const models = inventory?.models ?? []
-  const selectedModel = models.find((model) => String(model.asset_id) === selectedModelId) ?? models[0]
+  const selectedModel = models.find((model) => String(model.asset_id) === selectedModelId)
   const groups = useMemo(() => GROUPS.map((group) => ({ ...group, rows: assetsFor(inventory, group), state: groupState(assetsFor(inventory, group)), size: groupSize(assetsFor(inventory, group)) })), [inventory])
   const requiredGroups = groups.filter((group) => group.required && !group.state.ready)
   const missingGroupTotal = requiredGroups.reduce((sum, group) => sum + (group.size ?? 0), 0)
@@ -444,7 +445,7 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
   const selectedLifecycle = String(selectedModel?.lifecycle_state ?? '')
   const optionalLabel = selectedLifecycle === 'VERIFIED' ? 'Installed · 0 B additional' : selectedLifecycle === 'NEEDS_REPAIR' ? 'Needs repair' : selectedModelSize > 0 ? `${formatBytes(selectedModelSize)} additional` : 'Size calculated during setup'
   const allReady = inventoryLoad.phase === 'ready' && requiredGroups.length === 0
-  const localReady = Boolean(inventory?.local_ai?.runtime_ready && inventory?.local_ai?.model_ready)
+  const localReady = Boolean(inventory?.local_ai?.runtime_ready && resolveRunnableLocalModel(inventory))
   const localUnavailable = isLocalAiUnavailable(inventory)
   const localRuntimeReady = Boolean(inventory?.local_ai?.runtime_ready)
   const localModelReady = Boolean(inventory?.local_ai?.model_ready)
@@ -581,13 +582,20 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
 
   function selectModel(modelId: string) {
     const requestId = ++modelSaveRequestRef.current
+    const previousModelId = selectedModelId
     setSelectedModelId(modelId)
     const save = localSaveChainRef.current.then(() => api.saveLocalModel?.(modelId))
     localSaveChainRef.current = save.catch(() => undefined)
-    void save.catch(() => {
-      if (mountedRef.current && requestId === modelSaveRequestRef.current) setMessage('Local model choice could not be saved. Retry before installing.')
+    void save.then(() => {
+      if (!mountedRef.current || requestId !== modelSaveRequestRef.current) return
+      onLocalModelSaved?.(modelId)
+      void refresh(modelId)
+    }).catch(() => {
+      if (mountedRef.current && requestId === modelSaveRequestRef.current) {
+        setSelectedModelId(previousModelId)
+        setMessage('Local model choice could not be saved. Retry before installing.')
+      }
     })
-    void refresh(modelId)
   }
 
   async function installYouTube() {
@@ -652,7 +660,7 @@ export default function SetupCenter({ onBack, onUseLocal, jobs = [] }: Props) {
           <section className="card-surface gpu-diagnostics" aria-live="polite"><div className="section-heading"><div><p className="section-eyebrow">Speech acceleration</p><h2>GPU diagnostics</h2><p className="section-caption">Optional performance capability. CPU processing remains available.</p></div><span className={`status-pill tone-${gpuStatus.state === 'READY' ? 'ready' : gpuStatus.state === 'CPU_ONLY' || gpuStatus.state === 'UNAVAILABLE' ? 'neutral' : 'warning'}`}><span className="status-dot" aria-hidden="true" />{gpuStatus.state}</span></div><p className="inline-message" role="status">{gpuStatus.reason}</p>{gpuLoad.phase === 'error' && <button type="button" className="button button-secondary" onClick={() => void refreshGpu(true)} disabled={gpuBusy}>Retry GPU diagnostics</button>}{gpuDiagnostics && <details className="gpu-details"><summary>Show GPU details</summary><div className="technical-table"><div className="technical-row"><span><strong>GPU</strong><small>{gpuDiagnostics.hardware?.nvidia?.gpus?.[0]?.name ?? 'Not detected'}</small></span><span>{gpuDiagnostics.hardware?.nvidia?.gpus?.[0]?.driver ? `Driver ${gpuDiagnostics.hardware.nvidia.gpus[0].driver}` : 'Unavailable'}</span><span>{gpuDiagnostics.hardware?.nvidia?.verified ? 'Verified' : 'Unavailable'}</span></div><div className="technical-row"><span><strong>Transcription</strong><small>CTranslate2 CUDA</small></span><span>{gpuDiagnostics.hardware?.cuda_ctranslate2?.compute_types?.join(', ') ?? 'Unavailable'}</span><span>{gpuDiagnostics.hardware?.cuda_ctranslate2?.verified ? 'Ready' : 'CPU fallback'}</span></div><div className="technical-row"><span><strong>Word alignment</strong><small>PyTorch / WhisperX</small></span><span>{gpuDiagnostics.hardware?.pytorch_cuda?.compiled_cuda ? `CUDA ${gpuDiagnostics.hardware.pytorch_cuda.compiled_cuda}` : 'CPU build'}</span><span>{gpuDiagnostics.hardware?.pytorch_cuda?.verified ? 'Ready' : 'CPU alignment'}</span></div><div className="technical-row"><span><strong>Managed libraries</strong><small>Approved CUDA and cuDNN files</small></span><span>{gpuDiagnostics.cuda_runtime_ready && gpuDiagnostics.cudnn_runtime_ready ? 'Verified' : 'Repair needed'}</span><span>{gpuDiagnostics.environment?.state ?? 'Unknown'}</span></div></div></details>}<div className="detail-actions"><button type="button" className="button button-secondary" onClick={repairGpu} disabled={gpuBusy}>{gpuBusy ? 'Repairing GPU acceleration…' : 'Repair GPU acceleration'}</button><button type="button" className="button button-quiet" onClick={() => void refreshGpu(true)} disabled={gpuBusy}>Refresh diagnostics</button></div></section>
       <section className="card-surface storage-breakdown-section"><div className="section-heading"><div><p className="section-eyebrow">Storage breakdown</p><h2>What uses disk space</h2><p className="section-caption">Sessions and source media stay untouched. Cleanup requires an explicit action and confirmation.</p></div></div><div className="storage-breakdown-grid">{(inventory?.storage?.breakdown ?? []).map((row) => <div className="summary-row" key={row.category}><span>{row.display_name}</span><strong>{formatBytes(row.bytes)}</strong></div>)}</div><div className="detail-actions storage-cleanup-actions"><button type="button" className="button button-secondary" onClick={() => void cleanupStorage('safe-cache')} disabled={cleanupBusy !== null}>{cleanupBusy === 'safe-cache' ? 'Checking…' : 'Clear safe cache'}</button><button type="button" className="button button-secondary" onClick={() => void cleanupStorage('obsolete-runtime-archives')} disabled={cleanupBusy !== null}>{cleanupBusy === 'obsolete-runtime-archives' ? 'Checking…' : 'Remove obsolete runtime archives'}</button><button type="button" className="button button-secondary" onClick={() => void cleanupStorage('session')} disabled={cleanupBusy !== null || !sessionId.trim()}>{cleanupBusy === 'session' ? 'Checking…' : 'Delete session'}</button><button type="button" className="button button-secondary" onClick={() => void cleanupStorage('failed-session')} disabled={cleanupBusy !== null || !sessionId.trim()}>{cleanupBusy === 'failed-session' ? 'Checking…' : 'Delete failed session'}</button></div></section>
       <section className="component-section"><div className="section-heading"><div><p className="section-eyebrow">What ClipGauge uses</p><h2>One clear list</h2></div><span className="section-caption">{queueSummary.state === 'complete' ? 'Setup complete' : 'No hidden downloads'}</span></div><div className="component-grid">{groups.map((group) => <article className="component-card" key={group.id}><div className="component-card-heading"><span className="component-icon"><HardDrive size={17} aria-hidden="true" /></span><div><h3>{group.title}</h3><p>{group.description}</p></div><span className={`status-pill tone-${group.state.tone}`}><span className="status-dot" aria-hidden="true" />{group.state.label}</span></div><div className="component-card-footer"><span>{group.size ? formatBytes(group.size) : 'Size calculated during setup'}</span>{group.state.ready && <span className="reuse-note"><Check size={14} aria-hidden="true" /> {group.state.label.includes('System') ? 'System component reused' : 'Reused for future videos'}</span>}</div>{group.id === 'youtube' && <div className="component-card-actions"><span className="component-card-action-copy">{youtubeStatusCopy(youtubeStatus)}</span>{youtubeNeedsInstall && <label className="consent-line" htmlFor="youtube-approval"><input id="youtube-approval" type="checkbox" checked={youtubeApproved} onChange={(event) => setYoutubeApproved(event.target.checked)} /><span>I approve YouTube support installation.</span></label>}<div className="detail-actions">{youtubeNeedsInstall && <button type="button" className="button button-primary" onClick={installYouTube} disabled={!canInstallYouTube}>{statusHasRepair(youtubeStatus) ? 'Repair YouTube support' : 'Install YouTube support'}</button>}<button type="button" className="button button-secondary" onClick={testYouTube} disabled={youtubeBusy}>{youtubeBusy ? 'Testing…' : 'Test YouTube support'}</button></div></div>}</article>)}</div></section>
-      <section className="card-surface local-model-section"><div className="section-heading"><div><p className="section-eyebrow">Optional local AI</p><h2>Choose one model</h2><p className="section-caption">Score clips completely on this computer. Only the model you choose counts toward this estimate.</p></div><span className="soft-badge">{optionalLabel}</span></div><div className="model-choice-grid">{models.length ? models.map((model, index) => { const id = String(model.asset_id); const selected = id === String(selectedModel?.asset_id); return <label className={`model-choice ${selected ? 'is-selected' : ''}`} key={id}><input type="radio" name="local-model" value={id} checked={selected} onChange={() => selectModel(id)} /><span><strong>{modelLabel(model, index)}{index === 1 && <em>Recommended</em>}</strong><small>{model.purpose ?? 'A local model for clip scoring.'}</small><b>{(model as { lifecycle_label?: string }).lifecycle_label ?? 'Download required'}</b><span className="model-download-note">{Number((model as { required_download_bytes?: number }).required_download_bytes ?? model.size_bytes) > 0 ? `${formatBytes(Number((model as { required_download_bytes?: number }).required_download_bytes ?? model.size_bytes))} additional download` : 'No additional download required'}</span></span><span className="choice-check"><Check size={15} aria-hidden="true" /></span></label> }) : <p className="empty-state">Local model choices will appear after the component catalog loads.</p>}</div></section>
+      <section className="card-surface local-model-section"><div className="section-heading"><div><p className="section-eyebrow">Optional local AI</p><h2>Choose one model</h2><p className="section-caption">Score clips completely on this computer. Only the model you choose counts toward this estimate.</p></div><span className="soft-badge">{optionalLabel}</span></div><div className="model-choice-grid">{models.length ? models.map((model, index) => { const id = String(model.asset_id); const selected = id === String(selectedModel?.asset_id); const recommended = id.toLowerCase().includes('4b'); return <label className={`model-choice ${selected ? 'is-selected' : ''}`} key={id}><input type="radio" name="local-model" value={id} checked={selected} onChange={() => selectModel(id)} /><span><strong>{modelLabel(model, index)}{recommended && <em>Recommended</em>}</strong><small>{model.purpose ?? 'A local model for clip scoring.'}</small><b>{(model as { lifecycle_label?: string }).lifecycle_label ?? 'Download required'}</b><span className="model-download-note">{Number((model as { required_download_bytes?: number }).required_download_bytes ?? model.size_bytes) > 0 ? `${formatBytes(Number((model as { required_download_bytes?: number }).required_download_bytes ?? model.size_bytes))} additional download` : 'No additional download required'}</span></span><span className="choice-check"><Check size={15} aria-hidden="true" /></span></label> }) : <p className="empty-state">Local model choices will appear after the component catalog loads.</p>}</div></section>
       <section className="card-surface local-install-action"><div className="section-heading"><div><p className="section-eyebrow">Local scoring</p><h2>{localReady ? 'ClipGauge Local is ready' : 'Run scoring locally'}</h2><p className="section-caption">Runs completely on this computer. No API key. Install the engine and the one model you choose.</p></div><span className={`status-pill tone-${localReady ? 'ready' : 'warning'}`}><span className="status-dot" aria-hidden="true" />{localStateLabel}</span></div>{localReady ? <button type="button" className="button button-secondary" onClick={() => onUseLocal?.(selectedModelId ?? String(selectedModel?.asset_id ?? ''))}>Use ClipGauge Local</button> : <div className="setup-install-row"><label className="consent-line" htmlFor="local-approval"><input id="local-approval" type="checkbox" checked={localApproved} onChange={(event) => setLocalApproved(event.target.checked)} /><span>I approve this optional local-AI download.</span></label><button type="button" className="button button-primary" onClick={installLocal} disabled={!canInstallLocal}>{busy ? 'Installing…' : inventory?.local_ai?.action ?? 'Install ClipGauge Local'}</button></div>}</section>
       {progress && <section className="download-tray card-surface" aria-live="polite"><div className="download-tray-head"><div><p className="section-eyebrow">Download progress</p><h2>{progress.display_name ?? progress.operation ?? 'Preparing setup'}</h2></div><button type="button" className="button button-secondary" onClick={cancel} disabled={!operationId}><Square size={14} aria-hidden="true" /> Cancel</button></div><p className="download-message">{progress.message ?? 'Preparing verified components…'}</p><div className="progress-facts"><span>{currentTotal > 0 ? `${formatBytes(currentDone)} / ${formatBytes(currentTotal)}` : 'Calculating size…'}</span>{setupPercent != null && <span>{setupPercent}%</span>}{formatRate(progress.bytes_per_second) && <span>{formatRate(progress.bytes_per_second)}</span>}{setupEta && <span>{setupEta} remaining</span>}<span>{formatDuration(elapsed)} elapsed</span>{progress.one_time_download && <span>One-time download</span>}</div><div className="progress-track" role="progressbar" aria-label="Setup download progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={setupPercent ?? undefined}><div className={`progress-fill ${setupPercent == null ? 'is-indeterminate' : ''}`} style={setupPercent != null ? { width: `${setupPercent}%` } : undefined} /></div>{!busy && progress.event === 'terminal' && lastArgs && <button type="button" className="button button-secondary" onClick={retry}><RotateCcw size={15} aria-hidden="true" /> Retry component</button>}</section>}
       <section className="advanced-panel"><button type="button" className="advanced-toggle" onClick={() => setShowDetails((value) => !value)} aria-expanded={showDetails}><ChevronDown size={16} className={showDetails ? 'is-open' : ''} aria-hidden="true" /> Advanced component details</button>{showDetails && <div className="technical-table"><div className="technical-table-head"><span>Component</span><span>Download</span><span>State</span></div>{(inventory?.managed_assets ?? []).map((asset) => <div className="technical-row" key={asset.asset_id}><span><strong>{asset.display_name}</strong><small>{asset.asset_id} · {asset.license}</small></span><code>{asset.size_bytes > 0 ? formatBytes(asset.size_bytes) : 'unknown'}</code><span>{assetLifecycleLabel(asset)}</span></div>)}</div>}</section>

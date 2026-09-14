@@ -63,7 +63,7 @@ describe('Studio output controls', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /Balanced \/ Hybrid/i }))
 
-    expect(screen.getAllByText(/OpenRouter Free - openrouter\/free/)).toHaveLength(2)
+    expect(screen.getAllByText(/OpenRouter Free - Auto Free route/)).toHaveLength(2)
   })
 
   it.each([
@@ -182,6 +182,33 @@ describe('Studio output controls', () => {
         stages={{}}
         error={null}
         errorCode={null}
+        notice={null}
+        onRun={vi.fn()}
+        onCancel={vi.fn()}
+        onContinueCpu={vi.fn()}
+        onNavigate={vi.fn()}
+        selectedProvider="clipgauge-local"
+        onSelectProvider={vi.fn()}
+        onOpenJob={vi.fn()}
+        onResume={vi.fn()}
+      />
+    )
+
+    expect(screen.getByText('1:23 elapsed')).toBeInTheDocument()
+  })
+
+  it('floors fractional elapsed seconds consistently', () => {
+    render(
+      <Studio
+        jobs={[]}
+        running={false}
+        runState="FAILED"
+        cancelling={false}
+        startedAt={null}
+        elapsedSeconds={83.9}
+        stages={{}}
+        error="failed"
+        errorCode="FAILED"
         notice={null}
         onRun={vi.fn()}
         onCancel={vi.fn()}

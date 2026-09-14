@@ -3,7 +3,7 @@ import { confirm } from '@tauri-apps/plugin-dialog'
 import { Check, ChevronRight, CircleAlert, Cloud, Cpu, ExternalLink, KeyRound, Network, RotateCcw, Save, ShieldCheck, WifiOff } from 'lucide-react'
 import { api } from '../api'
 import type { LocalSetupInventory, ProviderModel, ProviderTestResult, SetupState } from '../types'
-import { selectedLocalModel } from '../setupState'
+import { resolveRunnableLocalModel, selectedLocalModel } from '../setupState'
 import { readCachedSetupInventory, writeCachedSetupInventory } from '../setupInventoryCache'
 import { isProviderInventory, isProviderModelsResult, isProviderTestResult, isSetupState } from '../nativeValidation'
 import { friendlyErrorMessage } from '../errorMessaging'
@@ -99,6 +99,8 @@ function clearProviderQualification(providerId: string): void {
 }
 
 function modelLabel(model: string) {
+  if (model.includes('1.7b')) return 'Lightweight local model'
+  if (model.includes('4b')) return 'Balanced local model'
   return model === 'openrouter/free' ? 'Auto Free' : model
 }
 
@@ -229,8 +231,9 @@ export default function ProviderCenter({ selectedProvider, onSelectLocalModel, o
   }, [activeId])
 
   const active = useMemo(() => PROVIDERS.find((provider) => provider.id === activeId) ?? PROVIDERS[0], [activeId])
-  const localReady = Boolean(inventory?.local_ai?.runtime_ready && inventory?.local_ai?.model_ready)
   const localModelId = selectedLocalModel(inventory)
+  const runnableLocalModelId = resolveRunnableLocalModel(inventory)
+  const localReady = Boolean(inventory?.local_ai?.runtime_ready && runnableLocalModelId && runnableLocalModelId === localModelId)
   const savedFromSetup = active.id === 'gemini' ? Boolean(setup?.has_gemini_key) : Boolean(setup?.provider_keys?.[active.id] ?? setup?.provider_keys?.[`preset-${active.id}`])
   const hasSavedCredential = active.credential && (saved || savedFromSetup)
   const selectedModel = active.id === 'custom' ? customModel : active.id === 'clipgauge-local' ? selectedModels[active.id] ?? localModelId ?? '' : selectedModels[active.id] ?? active.model
