@@ -16,7 +16,7 @@ mod sidecar;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
@@ -1073,6 +1073,97 @@ fn write_bridge_diagnostic(tail: &str) -> String {
     diagnostics::diagnostic_id()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeExitClassification {
+    code: &'static str,
+    allow_cpu_resume: bool,
+    reason: &'static str,
+}
+
+fn raw_exit_status(status: &ExitStatus) -> Option<u32> {
+    status.code().map(|value| value as u32)
+}
+
+fn exit_code_hex(value: Option<u32>) -> Option<String> {
+    value.map(|code| format!("0x{code:08X}"))
+}
+
+fn classify_native_exit(
+    stage: Option<&str>,
+    accelerator: Option<&str>,
+    stderr: &str,
+    raw_status: Option<u32>,
+) -> NativeExitClassification {
+    let lower = stderr.to_ascii_lowercase();
+    let is_asr = stage == Some("asr");
+    let is_cuda = format!("{} {}", accelerator.unwrap_or_default(), lower).contains("cuda");
+    let is_resource = [
+        "memory allocation",
+        "out of memory",
+        "out-of-memory",
+        "cannot allocate",
+        "bad alloc",
+        "resource exhausted",
+        "commit limit",
+        "disk full",
+    ]
+    .iter()
+    .any(|term| lower.contains(term));
+    let code = match raw_status {
+        Some(0xC0000005) => "WINDOWS_ACCESS_VIOLATION",
+        _ if is_resource => "PIPELINE_RESOURCE_EXHAUSTED",
+        _ if is_asr && is_cuda => "CUDA_NATIVE_CRASH",
+        _ if is_asr => "ASR_NATIVE_CRASH",
+        _ => "PIPELINE_NATIVE_CRASH",
+    };
+    let reason = match code {
+        "WINDOWS_ACCESS_VIOLATION" => "Windows reported an access violation.",
+        "PIPELINE_RESOURCE_EXHAUSTED" => "The process reported a resource allocation failure.",
+        "CUDA_NATIVE_CRASH" => "CUDA-backed ASR stopped without a terminal event.",
+        "ASR_NATIVE_CRASH" => "ASR stopped without a terminal event.",
+        _ => "The pipeline stopped without a terminal event.",
+    };
+    NativeExitClassification {
+        code,
+        allow_cpu_resume: is_asr && is_cuda && !is_resource,
+        reason,
+    }
+}
+
+struct NativeExitDiagnosticContext<'a> {
+    job_id: Option<&'a str>,
+    attempt_id: Option<&'a str>,
+    process_id: u32,
+    last_stage: Option<&'a str>,
+    last_successful_stage: Option<&'a str>,
+    last_event: Option<&'a Value>,
+    status: Option<&'a ExitStatus>,
+    classification: &'a NativeExitClassification,
+    stderr: &'a str,
+}
+
+fn write_native_exit_diagnostic(context: &NativeExitDiagnosticContext<'_>) -> String {
+    let raw_status = context.status.and_then(raw_exit_status);
+    let payload = json!({
+        "diagnostic_schema_version": 2,
+        "job_id": context.job_id,
+        "attempt_id": context.attempt_id,
+        "process_id": context.process_id,
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "last_successful_stage": context.last_successful_stage,
+        "last_active_stage": context.last_stage,
+        "last_event": context.last_event,
+        "exit_code_decimal": raw_status,
+        "exit_code_hex": exit_code_hex(raw_status),
+        "classification": context.classification.code,
+        "allow_cpu_resume": context.classification.allow_cpu_resume,
+        "stderr_tail": diagnostics::redact(context.stderr),
+    });
+    write_bridge_diagnostic(
+        &serde_json::to_string_pretty(&payload).unwrap_or_else(|_| context.stderr.to_string()),
+    )
+}
+
 fn canonical_provider_id(value: &str) -> Result<String, String> {
     let kind = value.trim().to_ascii_lowercase();
     let kind = kind.strip_prefix("preset-").unwrap_or(&kind);
@@ -1248,7 +1339,14 @@ fn stream_pipeline(
             tail
         })
     });
+    let process_id = child.id();
     let mut completion_payload: Option<Value> = None;
+    let mut observed_job_id: Option<String> = None;
+    let mut observed_attempt_id: Option<String> = None;
+    let mut last_stage: Option<String> = None;
+    let mut last_successful_stage: Option<String> = None;
+    let mut last_accelerator: Option<String> = None;
+    let mut last_event: Option<Value> = None;
     if let Some(stdout) = child.stdout.take() {
         let mut reader = BufReader::new(stdout);
         let mut line = Vec::with_capacity(8192);
@@ -1260,6 +1358,26 @@ fn stream_pipeline(
                 continue;
             }
             if let Ok(value) = serde_json::from_slice::<Value>(&line) {
+                if let Some(job_id) = value.get("job_id").and_then(Value::as_str) {
+                    observed_job_id = Some(job_id.to_string());
+                }
+                if let Some(attempt_id) = value.get("attempt_id").and_then(Value::as_str) {
+                    observed_attempt_id = Some(attempt_id.to_string());
+                }
+                if let Some(stage) = value.get("stage").and_then(Value::as_str) {
+                    last_stage = Some(stage.to_string());
+                    if value
+                        .get("fraction")
+                        .and_then(Value::as_f64)
+                        .is_some_and(|fraction| fraction >= 1.0)
+                    {
+                        last_successful_stage = Some(stage.to_string());
+                    }
+                }
+                if let Some(accelerator) = value.get("accelerator").and_then(Value::as_str) {
+                    last_accelerator = Some(accelerator.to_string());
+                }
+                last_event = Some(value.clone());
                 if is_completion_payload(&value) {
                     completion_payload = Some(value);
                     continue;
@@ -1318,20 +1436,55 @@ fn stream_pipeline(
             let _ = state.finish(&key, false);
         }
         write_lifecycle_snapshot(&processes, &key);
-        let exit_code = status.as_ref().ok().and_then(|s| s.code());
-        let diagnostic_id = write_bridge_diagnostic(&stderr_tail.text());
+        let status_ref = status.as_ref().ok();
+        let raw_status = status_ref.and_then(raw_exit_status);
+        let stderr = stderr_tail.text();
+        let classification = classify_native_exit(
+            last_stage.as_deref(),
+            last_accelerator.as_deref(),
+            &stderr,
+            raw_status,
+        );
+        let diagnostic_id = write_native_exit_diagnostic(&NativeExitDiagnosticContext {
+            job_id: observed_job_id.as_deref(),
+            attempt_id: observed_attempt_id.as_deref(),
+            process_id,
+            last_stage: last_stage.as_deref(),
+            last_successful_stage: last_successful_stage.as_deref(),
+            last_event: last_event.as_ref(),
+            status: status_ref,
+            classification: &classification,
+            stderr: &stderr,
+        });
+        let message = if classification.allow_cpu_resume {
+            format!(
+                "{} Continue once in slower CPU mode, then keep the diagnostic ID for support.",
+                classification.reason
+            )
+        } else {
+            format!(
+                "{} Retry the job and keep the diagnostic ID for support.",
+                classification.reason
+            )
+        };
+        let active_stage = last_stage.clone().unwrap_or_else(|| "pipeline".to_string());
         emit_terminal(
             app,
             json!({
                 "event": "terminal",
                 "protocol_version": 2,
                 "ok": false,
-                "stage": "pipeline",
-                "code": "PIPELINE_EXIT_WITHOUT_TERMINAL",
-                "message": "The local pipeline stopped before reporting a complete result. Retry the job or use the diagnostic ID for support.",
+                "stage": active_stage,
+                "code": classification.code,
+                "message": message,
                 "retryable": true,
                 "diagnostic_id": diagnostic_id,
-                "exit_code": exit_code,
+                "exit_code": raw_status,
+                "exit_code_decimal": raw_status,
+                "exit_code_hex": exit_code_hex(raw_status),
+                "allow_cpu_resume": classification.allow_cpu_resume,
+                "last_successful_stage": last_successful_stage,
+                "last_active_stage": last_stage,
             }),
         );
     }
@@ -2371,14 +2524,42 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::packaged_resource_dir;
     use super::{
-        append_output_preference_arg, canonical_provider_id, generate_support_bundle_at,
-        ig_connect_args, ig_failure_message, instagram_connection_from_json,
-        instagram_connection_is_valid, is_completion_payload, migrate_legacy_data_from,
-        privacy_summary, read_bounded_line, selected_provider_env, setup_start_failure_message,
-        spawn_blocking_result, valid_setup_tool_args, valid_start_setup_args,
-        validate_browser_session, ResumeJobRequest, RunJobRequest,
+        append_output_preference_arg, canonical_provider_id, classify_native_exit,
+        generate_support_bundle_at, ig_connect_args, ig_failure_message,
+        instagram_connection_from_json, instagram_connection_is_valid, is_completion_payload,
+        migrate_legacy_data_from, privacy_summary, read_bounded_line, selected_provider_env,
+        setup_start_failure_message, spawn_blocking_result, valid_setup_tool_args,
+        valid_start_setup_args, validate_browser_session, ResumeJobRequest, RunJobRequest,
     };
     use serde_json::json;
+
+    #[test]
+    fn native_asr_exit_keeps_windows_code_and_cpu_recovery() {
+        let result = classify_native_exit(
+            Some("asr"),
+            Some("cuda/int8_float16"),
+            "tokenizers.pyd stopped unexpectedly",
+            Some(0xC0000005),
+        );
+        assert_eq!(result.code, "WINDOWS_ACCESS_VIOLATION");
+        assert!(result.allow_cpu_resume);
+        assert_eq!(
+            super::exit_code_hex(Some(0xC0000005)),
+            Some("0xC0000005".to_string())
+        );
+    }
+
+    #[test]
+    fn resource_text_overrides_native_crash_guess() {
+        let result = classify_native_exit(
+            Some("asr"),
+            Some("cuda/int8_float16"),
+            "memory allocation failed",
+            Some(0xC0000409),
+        );
+        assert_eq!(result.code, "PIPELINE_RESOURCE_EXHAUSTED");
+        assert!(!result.allow_cpu_resume);
+    }
 
     #[test]
     fn sidecar_json_lines_are_bounded_and_recover_after_oversize_input() {

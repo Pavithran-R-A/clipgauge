@@ -79,7 +79,25 @@ beforeEach(() => {
   mocks.api.igStatus.mockResolvedValue({ connected: false })
   mocks.api.igSync.mockResolvedValue({})
   mocks.api.jobResults.mockResolvedValue({ job_id: '20260818-155237-c6b118' })
-  mocks.api.setupInventory.mockResolvedValue({})
+  mocks.api.setupInventory.mockResolvedValue({
+    state: 'ready',
+    platform: 'windows-x86_64',
+    runtime_manifest_digest: 'manifest-default',
+    local_ai: {
+      state: 'ready',
+      runtime_ready: true,
+      model_ready: true,
+      selected_model_id: 'clipgauge-local/balanced',
+      preferred_model_id: 'clipgauge-local/balanced',
+      runnable_model_id: 'clipgauge-local/balanced',
+      readiness: { verified: true, usable: true },
+    },
+    models: [{ asset_id: 'clipgauge-local/balanced', installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } }],
+    runtime: {},
+    core_assets: [],
+    storage: {},
+    catalog: [],
+  })
   mocks.api.preflight.mockResolvedValue({ state: 'blocked', selected_llm: 'local', checks: [{ state: 'blocked', message: 'setup required' }] })
   mocks.api.cancelJob.mockResolvedValue(undefined)
   mocks.api.resumeJob.mockResolvedValue(undefined)
@@ -115,17 +133,17 @@ describe('application navigation handoffs', () => {
     expect(await screen.findByRole('button', { name: 'Setup & Storage' })).toBeInTheDocument()
   })
 
-  it('reuses the cached local model without another inventory scan', async () => {
+  it('revalidates the cached local model before running', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.18',
+      app_version: '0.5.19',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: 1_700_000_000,
       value: {
         state: 'ready',
-        local_ai: { selected_model_id: 'clipgauge-local/balanced' },
-        models: [{ asset_id: 'clipgauge-local/balanced' }],
+        local_ai: { selected_model_id: 'clipgauge-local/balanced', preferred_model_id: 'clipgauge-local/balanced', runnable_model_id: 'clipgauge-local/balanced', runtime_ready: true, model_ready: true },
+        models: [{ asset_id: 'clipgauge-local/balanced', installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } }],
         runtime: {},
         core_assets: [],
         storage: {},
@@ -139,24 +157,24 @@ describe('application navigation handoffs', () => {
 
     await waitFor(() => expect(mocks.api.preflight).toHaveBeenCalledWith(
       'clipgauge-local',
-      'clipgauge-local/balanced',
+      'clipgauge-local/qwen3-4b-q4_k_m',
       undefined,
       undefined,
       undefined,
       'C:\\Videos\\source.mp4',
       'private',
     ))
-    expect(mocks.api.setupInventory).not.toHaveBeenCalled()
+    expect(mocks.api.setupInventory).toHaveBeenCalledTimes(2)
   })
 
   it('does not reuse a local model from an incomplete inventory envelope', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.18',
+      app_version: '0.5.19',
       value: {
         state: 'ready',
-        local_ai: { selected_model_id: 'clipgauge-local/balanced' },
-        models: [{ asset_id: 'clipgauge-local/balanced' }],
+        local_ai: { selected_model_id: 'clipgauge-local/balanced', preferred_model_id: 'clipgauge-local/balanced', runnable_model_id: 'clipgauge-local/balanced', runtime_ready: true, model_ready: true },
+        models: [{ asset_id: 'clipgauge-local/balanced', installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } }],
         runtime: {},
         core_assets: [],
         storage: {},
@@ -168,7 +186,7 @@ describe('application navigation handoffs', () => {
 
     await userEvent.click(await screen.findByTestId('create-job'))
 
-    await waitFor(() => expect(mocks.api.setupInventory).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(mocks.api.setupInventory).toHaveBeenCalledTimes(2))
   })
 
   it('retains a natively discovered local model for later runs', async () => {
@@ -176,8 +194,8 @@ describe('application navigation handoffs', () => {
       state: 'ready',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
-      local_ai: { selected_model_id: 'clipgauge-local/balanced' },
-      models: [{ asset_id: 'clipgauge-local/balanced' }],
+      local_ai: { selected_model_id: 'clipgauge-local/balanced', preferred_model_id: 'clipgauge-local/balanced', runnable_model_id: 'clipgauge-local/balanced', runtime_ready: true, model_ready: true },
+      models: [{ asset_id: 'clipgauge-local/balanced', installed: true, lifecycle_state: 'VERIFIED', readiness: { verified: true, usable: true } }],
       runtime: {},
       core_assets: [],
       storage: {},
@@ -190,7 +208,7 @@ describe('application navigation handoffs', () => {
     await waitFor(() => expect(mocks.api.runJob).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(JSON.parse(window.localStorage.getItem('clipgauge.setup.inventory.v1') ?? '{}')).toMatchObject({
       schema_version: 1,
-      app_version: '0.5.18',
+      app_version: '0.5.19',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       value: { local_ai: { selected_model_id: 'clipgauge-local/balanced' } },
@@ -200,10 +218,10 @@ describe('application navigation handoffs', () => {
 
     await userEvent.click(screen.getByTestId('create-job'))
     await waitFor(() => expect(mocks.api.runJob).toHaveBeenCalledTimes(2))
-    expect(mocks.api.setupInventory).toHaveBeenCalledTimes(1)
+    expect(mocks.api.setupInventory).toHaveBeenCalledTimes(3)
     expect(mocks.api.preflight).toHaveBeenLastCalledWith(
       'clipgauge-local',
-      'clipgauge-local/balanced',
+      'clipgauge-local/qwen3-4b-q4_k_m',
       undefined,
       undefined,
       undefined,
@@ -341,7 +359,9 @@ describe('structured pipeline terminal events', () => {
   it('clears stale run notices when the provider changes', async () => {
     render(<App />)
     await waitFor(() => expect(mocks.pipelineHandler).toBeDefined())
-    mocks.pipelineHandler?.({ payload: { event: 'terminal', ok: false, code: 'CANCELLED', message: 'Old provider warning.' } })
+    await act(async () => {
+      mocks.pipelineHandler?.({ payload: { event: 'terminal', ok: false, code: 'CANCELLED', message: 'Old provider warning.' } })
+    })
     expect(await screen.findByTestId('studio-notice')).toHaveTextContent('Old provider warning.')
 
     await userEvent.click(screen.getByRole('button', { name: 'AI Providers' }))

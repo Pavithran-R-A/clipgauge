@@ -247,7 +247,7 @@ pub fn export_clip(
 
 #[cfg(test)]
 mod tests {
-    use super::{export_clip, export_clip_to, job_results, source_media_artifact};
+    use super::{export_clip, export_clip_to, job_results, render_artifact, source_media_artifact};
     use serde_json::json;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -344,6 +344,31 @@ mod tests {
             result["render"]["outputs"][0]["artifact_status"],
             "available"
         );
+    }
+
+    #[test]
+    fn resolves_render_artifact_by_persisted_clip_number() {
+        let home = fixture();
+        let job = home.join("jobs/20260818-155237-c6b118");
+        fs::write(job.join("clips/clip_03.mp4"), b"three").unwrap();
+        fs::write(job.join("clips/clip_07.mp4"), b"seven").unwrap();
+        let checkpoint = json!({
+            "data": {
+                "outputs": [
+                    {"clip": 7, "path": "clips/clip_07.mp4"},
+                    {"clip": 3, "path": "clips/clip_03.mp4"}
+                ]
+            }
+        });
+        fs::write(
+            job.join("render.json"),
+            serde_json::to_vec(&checkpoint).unwrap(),
+        )
+        .unwrap();
+
+        let artifact = render_artifact(&home, "20260818-155237-c6b118", 7).unwrap();
+
+        assert_eq!(fs::read(artifact).unwrap(), b"seven");
     }
 
     #[test]

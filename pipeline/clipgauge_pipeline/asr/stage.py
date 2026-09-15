@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import gc
+import json
 import os
 import re
 import sys
 import time
 from pathlib import Path
 
-from .. import config, downloads, hardware, protocol, runtime
+from .. import config, downloads, hardware, protocol, resource_guard, runtime
 from ..jobs import queue
 from ..jobs.queue import Stage, StageContext, StageError
 from ..models import managed
@@ -308,6 +309,36 @@ class AsrStage(Stage):
         transcription_compute_type = selected_compute_type
         alignment_device = devices["alignment_device"]
         acceleration = hardware.asr_readiness(capabilities)
+        headroom = resource_guard.asr_headroom_decision(
+            capabilities,
+            selected_device=selected_device,
+        )
+        if headroom.blocked:
+            raise StageError(
+                headroom.message,
+                code=headroom.code or "ASR_RESOURCE_HEADROOM_LOW",
+                retryable=True,
+                stage=self.name,
+                details={
+                    **headroom.to_dict(),
+                    "failing_asr_substep": "ASR_RESOURCE_PREFLIGHT",
+                    "hardware": capabilities,
+                },
+            )
+        os.environ["CLIPGAUGE_ACCELERATOR"] = f"{selected_device}/{selected_compute_type}"
+        os.environ["CLIPGAUGE_RESOURCE_SNAPSHOT"] = json.dumps(
+            {
+                "ram_bytes": capabilities.get("ram_bytes"),
+                "available_ram_bytes": capabilities.get("available_ram_bytes"),
+                "total_page_file_bytes": capabilities.get("total_page_file_bytes"),
+                "available_page_file_bytes": capabilities.get("available_page_file_bytes"),
+                "nvidia": capabilities.get("nvidia"),
+                "cuda_ctranslate2": capabilities.get("cuda_ctranslate2"),
+                "pytorch_cuda": capabilities.get("pytorch_cuda"),
+                "whisperx_alignment": capabilities.get("whisperx_alignment"),
+            }
+        )
+        ctx.emit(-1, "Speech recognition resources verified.")
         fallback_reason = None
         fallback_stages: list[str] = []
         allow_cpu_fallback = bool(getattr(ctx.settings, "allow_cpu_asr_fallback", False))

@@ -15,12 +15,12 @@ import SetupCenter from './components/SetupCenter'
 import Studio from './components/Studio'
 import SupportPage from './components/SupportPage'
 import { type CreatorRunState } from './creatorState'
-import { resolveSelectedLocalModel } from './setupState'
+import { normalizeLocalModelState, readSavedLocalModel, writeSavedLocalModel, type LocalModelState } from './localModelState'
 import { readCachedSetupInventory, writeCachedSetupInventory } from './setupInventoryCache'
 import { normalizeJobResults } from './jobResultsValidation'
 import { isInstagramStatus, isJobSummaryList, isLocalSetupInventory, isPreflightResult, isSetupState } from './nativeValidation'
 import { friendlyErrorMessage } from './errorMessaging'
-import { isCloudProvider } from './providerContract'
+import { isCloudProvider, type QualityMode } from './providerContract'
 import './styles.css'
 
 function readSavedProviderModel(provider: string): string | undefined {
@@ -37,6 +37,24 @@ function readSavedProviderEndpoint(provider: string): string | undefined {
   } catch {
     return undefined
   }
+}
+
+function readSavedValue(key: string): string | undefined {
+  try { return window.localStorage.getItem(key) ?? undefined } catch { return undefined }
+}
+
+function writeSavedValue(key: string, value: string): void {
+  try { window.localStorage.setItem(key, value) } catch { /* optional browser storage */ }
+}
+
+function readQualityMode(): QualityMode {
+  const value = readSavedValue('clipgauge.quality-mode.v1')
+  return value === 'balanced' || value === 'best' ? value : 'private'
+}
+
+function readCloudProvider(): string {
+  const value = readSavedValue('clipgauge.cloud-provider.v1')
+  return value && isCloudProvider(value) ? value : 'openrouter'
 }
 
 const SETUP_STATE_CACHE_KEY = 'clipgauge.setup.state.v1'
@@ -91,11 +109,6 @@ function writeCachedSetupState(value: SetupState) {
   try { window.localStorage.setItem(SETUP_STATE_CACHE_KEY, JSON.stringify(value)) } catch { /* optional browser storage */ }
 }
 
-function readCachedLocalModel(): string | undefined {
-  const inventory = readCachedSetupInventory()
-  return inventory ? resolveSelectedLocalModel(inventory) : undefined
-}
-
 function requireValidJobResults(value: unknown): JobResults {
   const normalized = normalizeJobResults(value)
   if (!normalized) throw new Error('Saved session results are malformed. Retry the session or run the video again.')
@@ -126,7 +139,15 @@ const FRIENDLY_FAILURES: Record<string, string> = {
   ASR_VAD_FAILED: 'Speech activity detection could not start. Repair speech recognition, then retry.',
   ASR_ALIGNMENT_FAILED: 'Word timing could not complete. Retry the job or repair speech recognition.',
   ASR_CHECKPOINT_WRITE: 'Speech recognition finished, but its checkpoint could not be saved. Retry the job.',
-  ASR_GPU_FALLBACK_REQUIRES_APPROVAL: 'GPU speech acceleration failed. Repair GPU acceleration, or explicitly continue in slower CPU mode.'
+  ASR_GPU_FALLBACK_REQUIRES_APPROVAL: 'GPU speech acceleration failed. Repair GPU acceleration, or explicitly continue in slower CPU mode.',
+  ASR_RESOURCE_HEADROOM_LOW: 'Speech recognition needs more available memory. Close applications, then retry in Low-memory mode.',
+  PIPELINE_RESOURCE_EXHAUSTED: 'ClipGauge stopped because system resources became insufficient. Close applications, free disk space, then retry.',
+  DISK_SPACE_LOW: 'This run needs more free disk space. Open Setup & Storage, then retry.',
+  LOCAL_MODEL_NOT_RUNNABLE: 'The selected local model is not verified yet. Open Setup & Storage and choose a ready model.',
+  PIPELINE_NATIVE_CRASH: 'The local pipeline stopped unexpectedly. Retry once and keep the diagnostic details for support.',
+  ASR_NATIVE_CRASH: 'Speech recognition stopped unexpectedly. Retry once, or continue with CPU recovery.',
+  CUDA_NATIVE_CRASH: 'CUDA speech processing stopped unexpectedly. Continue once in slower CPU mode, or repair GPU acceleration.',
+  WINDOWS_ACCESS_VIOLATION: 'Windows stopped speech processing unexpectedly. Continue once in slower CPU mode, then keep the diagnostic details.'
 }
 
 export default function App() {
@@ -149,8 +170,13 @@ export default function App() {
   const [runNotice, setRunNotice] = useState<string | null>(null)
   const [resultsLoadJobId, setResultsLoadJobId] = useState<string | null>(null)
   const [finalElapsedSeconds, setFinalElapsedSeconds] = useState<number | null>(null)
-  const [selectedProvider, setSelectedProvider] = useState('clipgauge-local')
-  const [selectedLocalModelId, setSelectedLocalModelId] = useState<string | null>(() => readCachedLocalModel() ?? null)
+  const [selectedProvider, setSelectedProvider] = useState(() => readSavedValue('clipgauge.selected-provider.v1') ?? 'clipgauge-local')
+  const [selectedLocalProvider, setSelectedLocalProvider] = useState(() => readSavedValue('clipgauge.local-provider.v1') ?? 'clipgauge-local')
+  const [selectedCloudProvider, setSelectedCloudProvider] = useState(readCloudProvider)
+  const [selectedCloudModel, setSelectedCloudModel] = useState<string | null>(() => readSavedProviderModel(readCloudProvider()) ?? null)
+  const [qualityMode, setQualityMode] = useState<QualityMode>(readQualityMode)
+  const [localModelState, setLocalModelState] = useState<LocalModelState>(() => normalizeLocalModelState(readCachedSetupInventory(), readSavedLocalModel()))
+  const [cpuResumeAvailable, setCpuResumeAvailable] = useState(false)
   const [gpuRepairing, setGpuRepairing] = useState(false)
   const unlistenRef = useRef<(() => void) | null>(null)
   const activeJobRef = useRef<string | null>(null)
@@ -161,14 +187,12 @@ export default function App() {
   const mountedRef = useRef(true)
   const runStartedAtRef = useRef<number | null>(null)
   const lastElapsedSecondsRef = useRef<number | null>(null)
-  const selectedLocalModelRef = useRef<string | null>(selectedLocalModelId)
   activeJobRef.current = activeJob
-  selectedLocalModelRef.current = selectedLocalModelId
-  const cloudConfigured = isCloudProvider(selectedProvider)
-    && (selectedProvider === 'gemini'
+  const cloudConfigured = Boolean(isCloudProvider(selectedCloudProvider)
+    && (selectedCloudProvider === 'gemini'
       ? Boolean(setup?.has_gemini_key)
-      : Boolean(setup?.provider_keys?.[selectedProvider] ?? setup?.provider_keys?.[`preset-${selectedProvider}`]))
-  const providerQualification = readProviderQualification(selectedProvider)
+      : Boolean(setup?.provider_keys?.[selectedCloudProvider] ?? setup?.provider_keys?.[`preset-${selectedCloudProvider}`])))
+  const providerQualification = readProviderQualification(selectedCloudProvider)
   const refreshSetupState = useCallback(() => {
     return api.setupState().then((state) => {
       if (!isSetupState(state) || !mountedRef.current) return false
@@ -177,14 +201,52 @@ export default function App() {
       return true
     }).catch(() => false)
   }, [])
+
+  const refreshLocalModelState = useCallback(async (modelId?: string): Promise<LocalModelState | null> => {
+    setLocalModelState((current) => ({ ...current, loading: true, error: null }))
+    try {
+      const inventory = await api.setupInventory(modelId)
+      if (!isLocalSetupInventory(inventory)) throw new Error('Setup inventory is malformed. Open Setup and retry.')
+      writeCachedSetupInventory(inventory)
+      const next = normalizeLocalModelState(inventory, readSavedLocalModel())
+      setLocalModelState(next)
+      return next
+    } catch (error) {
+      const message = friendlyErrorMessage(error, 'Local model state could not be refreshed. Open Setup and retry.')
+      setLocalModelState((current) => ({ ...current, loading: false, error: message }))
+      return null
+    }
+  }, [])
+
+  const saveAndRefreshLocalModel = useCallback(async (modelId: string) => {
+    await api.saveLocalModel(modelId)
+    writeSavedLocalModel(modelId)
+    const next = await refreshLocalModelState(modelId)
+    if (!next) throw new Error('Local model state could not be refreshed after saving.')
+  }, [refreshLocalModelState])
+
   const selectProvider = useCallback((provider: string) => {
     setSelectedProvider(provider)
+    writeSavedValue('clipgauge.selected-provider.v1', provider)
     setRunNotice(null)
     setRunError(null)
     setRunErrorCode(null)
-    if (!isCloudProvider(provider)) return
-    void refreshSetupState()
-  }, [refreshSetupState])
+    if (isCloudProvider(provider)) {
+      setSelectedCloudProvider(provider)
+      writeSavedValue('clipgauge.cloud-provider.v1', provider)
+      setSelectedCloudModel(readSavedProviderModel(provider) ?? null)
+      void refreshSetupState()
+    } else {
+      setSelectedLocalProvider(provider)
+      writeSavedValue('clipgauge.local-provider.v1', provider)
+      void refreshLocalModelState()
+    }
+  }, [refreshLocalModelState, refreshSetupState])
+
+  const selectQualityMode = useCallback((mode: QualityMode) => {
+    setQualityMode(mode)
+    writeSavedValue('clipgauge.quality-mode.v1', mode)
+  }, [])
 
   const prepareAttempt = useCallback((jobId: string | null) => {
     resultsRequestRef.current += 1
@@ -196,6 +258,7 @@ export default function App() {
     setResults(null)
     setResultsLoadJobId(null)
     setActiveDiagnosticId(null)
+    setCpuResumeAvailable(false)
   }, [])
 
   const loadResults = useCallback((jobId: string, diagnosticId?: string | null, failureMessage = RESULTS_LOAD_FAILURE_MESSAGE) => {
@@ -227,6 +290,7 @@ export default function App() {
   useEffect(() => {
     mountedRef.current = true
     let active = true
+    void refreshLocalModelState()
     api.setupState().then((state) => {
       if (!active) return
       if (!isSetupState(state)) throw new Error('Setup state is malformed.')
@@ -236,7 +300,7 @@ export default function App() {
     }).catch(() => { if (active && !cachedSetupState) setView('onboarding') })
     refreshJobs()
     return () => { active = false; mountedRef.current = false }
-  }, [cachedSetupState, refreshJobs])
+  }, [cachedSetupState, refreshJobs, refreshLocalModelState])
 
   useEffect(() => {
     const report = (message: string) => {
@@ -313,14 +377,17 @@ export default function App() {
         runStartedAtRef.current = null
         refreshJobs()
         if (payload.code === 'CANCELLED') {
+          setCpuResumeAvailable(false)
           setRunState('CANCELLED')
           setRunError(null)
           setRunNotice(payload.message ?? 'Job cancelled. Completed work remains available to resume.')
         } else if (payload.ok && activeJobRef.current) {
+          setCpuResumeAvailable(false)
           setRunState('SUCCEEDED')
           setRunNotice(payload.code === 'NO_RECOMMENDED_CLIPS' ? (payload.message ?? 'No recommended clips were found.') : null)
           void loadResults(activeJobRef.current, payload.diagnostic_id)
         } else if (!payload.ok) {
+          setCpuResumeAvailable(payload.allow_cpu_resume === true)
           setRunState('FAILED')
           setRunErrorCode(payload.code ?? null)
           setRunNotice(null)
@@ -329,6 +396,7 @@ export default function App() {
           setRunError(`${friendly ?? payload.message ?? 'The video could not be processed.'}${diagnostic}`)
         }
       } else if (payload.event === 'result') {
+        setCpuResumeAvailable(false)
         const resultElapsed = typeof payload.elapsed_seconds === 'number' && Number.isFinite(payload.elapsed_seconds)
           ? payload.elapsed_seconds
           : lastElapsedSecondsRef.current ?? (runStartedAtRef.current ? Math.max(0, Math.floor((Date.now() - runStartedAtRef.current) / 1000)) : 0)
@@ -353,7 +421,11 @@ export default function App() {
         setRunStartedAt(null)
         runStartedAtRef.current = null
         setRunNotice(null)
-        setRunError('The video stopped before finishing. Retry the job and keep the diagnostic details for support.')
+        setRunErrorCode(payload.code ?? 'PIPELINE_NATIVE_CRASH')
+        setCpuResumeAvailable(payload.allow_cpu_resume === true)
+        const friendly = payload.code ? FRIENDLY_FAILURES[payload.code] : undefined
+        const diagnostic = payload.diagnostic_id ? ` Technical details: ${payload.diagnostic_id}.` : ''
+        setRunError(`${friendly ?? payload.message ?? 'The video stopped unexpectedly.'}${diagnostic}`)
       }
     }).then((unlisten) => { if (disposed) unlisten(); else unlistenRef.current = unlisten }).catch(() => {
       if (!disposed) setRunError('Pipeline events are unavailable. Restart ClipGauge and retry.')
@@ -378,21 +450,18 @@ export default function App() {
     prepareAttempt(null)
     try {
       const savedModel = provider !== 'clipgauge-local' ? readSavedProviderModel(provider) : undefined
-      const resolvedLocalModel = async () => {
-        if (selectedLocalModelRef.current) return selectedLocalModelRef.current
-        const inventory = await api.setupInventory()
-        if (!mountedRef.current) return undefined
-        if (!isLocalSetupInventory(inventory)) return undefined
-        writeCachedSetupInventory(inventory)
-        const discovered = resolveSelectedLocalModel(inventory)
-        if (discovered) {
-          selectedLocalModelRef.current = discovered
-          setSelectedLocalModelId(discovered)
-        }
-        return discovered
-      }
-      const resolvedModel = model ?? savedModel ?? (provider === 'clipgauge-local' ? await resolvedLocalModel() : undefined)
+      const refreshedLocalState = provider === 'clipgauge-local' ? await refreshLocalModelState() : null
+      const resolvedModel = provider === 'clipgauge-local' ? refreshedLocalState?.runnableModelId ?? undefined : model ?? savedModel
       if (!mountedRef.current) return
+      if (provider === 'clipgauge-local' && !resolvedModel) {
+        setRunning(false)
+        setRunStartedAt(null)
+        runStartedAtRef.current = null
+        setRunState('FAILED')
+        setRunErrorCode('LOCAL_MODEL_NOT_RUNNABLE')
+        setRunError('Choose a verified, runnable local model in Setup & Storage first.')
+        return
+      }
       const endpointConfigured = provider === 'custom' || provider === 'cloudflare'
       const resolvedEndpoint = endpoint ?? (endpointConfigured ? readSavedProviderEndpoint(provider) : undefined)
       const resolvedAuth = auth ?? (endpointConfigured ? 'bearer' : undefined)
@@ -428,7 +497,7 @@ export default function App() {
       setRunError(friendlyErrorMessage(error, 'The video could not be processed. Retry the job.'))
       setRunErrorCode(null)
     }
-  }, [prepareAttempt])
+  }, [prepareAttempt, refreshLocalModelState])
 
   const openJob = useCallback(async (jobId: string) => {
     resultsRequestRef.current += 1
@@ -524,12 +593,12 @@ export default function App() {
   }
 
   let content
-  if (section === 'create') content = <Studio jobs={jobs} running={running} runState={runState} cancelling={cancelling} startedAt={runStartedAt} elapsedSeconds={finalElapsedSeconds} stages={stages} error={runError} errorCode={runErrorCode} notice={runNotice} resultsLoadFailed={Boolean(resultsLoadJobId)} onRetryResults={retryResults} onRun={startRun} localModelId={selectedLocalModelId ?? undefined} providerModel={selectedProvider === 'clipgauge-local' ? selectedLocalModelId ?? undefined : readSavedProviderModel(selectedProvider)} providerModelAvailable={providerQualification?.modelAvailable ?? (selectedProvider === 'clipgauge-local' ? undefined : false)} providerModelCompatible={providerQualification?.modelCompatible} providerServiceReady={providerQualification?.serviceReady ?? (selectedProvider === 'clipgauge-local' ? undefined : false)} providerEndpoint={selectedProvider === 'custom' || selectedProvider === 'cloudflare' ? readSavedProviderEndpoint(selectedProvider) : undefined} cloudConfigured={cloudConfigured} onContinueCpu={continueCpu} onRepairGpu={repairGpu} gpuRepairing={gpuRepairing} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { if (!mountedRef.current) return; setCancelling(false); setRunError(friendlyErrorMessage(error, 'The job could not be cancelled. Retry the action.')) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={selectProvider} onOpenJob={openJob} onResume={(id) => { void resumeJobAction(id) }} />
+  if (section === 'create') content = <Studio jobs={jobs} running={running} runState={runState} cancelling={cancelling} startedAt={runStartedAt} elapsedSeconds={finalElapsedSeconds} stages={stages} error={runError} errorCode={runErrorCode} cpuResumeAvailable={cpuResumeAvailable} notice={runNotice} resultsLoadFailed={Boolean(resultsLoadJobId)} onRetryResults={retryResults} onRun={startRun} localModelId={selectedLocalProvider === 'clipgauge-local' ? localModelState.preferredModelId ?? undefined : undefined} localModelReady={selectedLocalProvider === 'clipgauge-local' ? Boolean(localModelState.runnableModelId && localModelState.runnableModelId === localModelState.preferredModelId) : undefined} localModelLoading={selectedLocalProvider === 'clipgauge-local' ? localModelState.loading : false} localModelError={selectedLocalProvider === 'clipgauge-local' ? localModelState.error : null} selectedLocalProvider={selectedLocalProvider} selectedCloudProvider={selectedCloudProvider} selectedCloudModel={selectedCloudModel} cloudModelAvailable={providerQualification?.modelAvailable} cloudModelCompatible={providerQualification?.modelCompatible} cloudServiceReady={providerQualification?.serviceReady} cloudConfigured={cloudConfigured} providerEndpoint={selectedCloudProvider === 'custom' || selectedCloudProvider === 'cloudflare' ? readSavedProviderEndpoint(selectedCloudProvider) : undefined} qualityMode={qualityMode} onQualityModeChange={selectQualityMode} onContinueCpu={continueCpu} onRepairGpu={repairGpu} gpuRepairing={gpuRepairing} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { if (!mountedRef.current) return; setCancelling(false); setRunError(friendlyErrorMessage(error, 'The job could not be cancelled. Retry the action.')) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={selectProvider} onOpenJob={openJob} onResume={(id) => { void resumeJobAction(id) }} />
   else if (section === 'sessions') content = <Sessions jobs={jobs} onBack={() => setSection('create')} onOpenJob={openJob} onResume={resumeFromSessions} />
-  else if (section === 'setup') content = <SetupCenter jobs={jobs} onBack={() => setSection('create')} onUseLocal={(modelId) => { if (modelId) setSelectedLocalModelId(modelId); selectProvider('clipgauge-local'); setSection('create') }} />
-  else if (section === 'providers') content = <ProviderCenter selectedProvider={selectedProvider} onSelectProvider={selectProvider} onSelectLocalModel={setSelectedLocalModelId} onBack={() => { void refreshSetupState(); setSection('create') }} onOpenSetup={() => setSection('setup')} />
+  else if (section === 'setup') content = <SetupCenter jobs={jobs} localModelState={localModelState} onRefreshLocalModelState={refreshLocalModelState} onSaveLocalModel={saveAndRefreshLocalModel} onBack={() => { void refreshLocalModelState(); setSection('create') }} onUseLocal={(modelId) => { if (typeof modelId === 'string' && modelId !== localModelState.preferredModelId) void saveAndRefreshLocalModel(modelId); selectProvider('clipgauge-local'); selectQualityMode('private'); setSection('create') }} />
+  else if (section === 'providers') content = <ProviderCenter selectedProvider={selectedProvider} localModelState={localModelState} onRefreshLocalModelState={refreshLocalModelState} onSaveLocalModel={saveAndRefreshLocalModel} onSelectCloudModel={(provider, model) => { setSelectedCloudProvider(provider); setSelectedCloudModel(model); writeSavedValue('clipgauge.cloud-provider.v1', provider); writeSavedValue(`clipgauge.provider-model.${provider}`, model) }} onSelectProvider={selectProvider} onBack={() => { void refreshSetupState(); void refreshLocalModelState(); setSection('create') }} onOpenSetup={() => setSection('setup')} />
   else if (section === 'integrations') content = <Integrations onBack={() => setSection('create')} onOpenLoop={() => setView('loop')} />
-  else if (section === 'privacy') content = <PrivacyPanel provider={selectedProvider} onBack={() => setSection('create')} />
+  else if (section === 'privacy') content = <PrivacyPanel provider={qualityMode === 'private' ? selectedLocalProvider : selectedCloudProvider} onBack={() => setSection('create')} />
   else if (section === 'help') content = <SupportPage onBack={() => setSection('create')} onNavigate={(next) => setSection(next)} provider={selectedProvider} currentJobId={activeJob} currentDiagnosticId={activeDiagnosticId} />
   else content = <About onBack={() => setSection('create')} />
 

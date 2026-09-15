@@ -6,6 +6,7 @@ import type { Clip, JobResults, RenderOutput } from '../types'
 import ClipEditor from './ClipEditor'
 import { isPlaybackUrl } from '../nativeValidation'
 import { friendlyErrorMessage } from '../errorMessaging'
+import { providerLocality } from '../providerContract'
 
 const RESTYLE_PRESETS = ['classic', 'beast', 'hormozi', 'minimal', 'karaoke-pop']
 const CAMERA_MODES: [string, string][] = [
@@ -64,6 +65,47 @@ function confidenceLabel(value: string): string {
   return value || 'Not reported'
 }
 
+function clipIndexForOutput(output: RenderOutput, clips: Clip[]): number | null {
+  if (output.clip_id) {
+    const matchingIndexes = clips.reduce<number[]>((indexes, clip, index) => (
+      clip.clip_id === output.clip_id ? [...indexes, index] : indexes
+    ), [])
+    return matchingIndexes.length === 1 ? matchingIndexes[0] : null
+  }
+  return output.clip
+}
+
+interface ReviewClipPair {
+  out: RenderOutput
+  scoreClip: Clip
+  scoreClipIndex: number
+  renderClipNumber: number
+  identity: string
+}
+
+function pairForOutput(output: RenderOutput, clips: Clip[]): ReviewClipPair | null {
+  const scoreClipIndex = clipIndexForOutput(output, clips)
+  if (scoreClipIndex === null || scoreClipIndex < 0) return null
+  const scoreClip = clips[scoreClipIndex]
+  if (!scoreClip) return null
+  return {
+    out: output,
+    scoreClip,
+    scoreClipIndex,
+    renderClipNumber: output.clip,
+    identity: output.clip_id ?? `render:${output.clip}`,
+  }
+}
+
+function clipCountLabel(count: number): string {
+  return `${count} clip${count === 1 ? '' : 's'}`
+}
+
+function scoringLocality(results: JobResults): string {
+  const provider = results.score?.provider_kind ?? results.score?.llm_mode ?? ''
+  return providerLocality(provider) === 'local' ? 'scored locally' : 'AI-assisted scoring'
+}
+
 function OtherMoments({ moments, jobId }: { moments: NonNullable<JobResults['score']>['borderline_candidates']; jobId: string }) {
   const [previewError, setPreviewError] = useState<string | null>(null)
   const mountedRef = useRef(true)
@@ -90,7 +132,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
   const outputs = results.render?.outputs ?? []
   const clips = results.score?.clips ?? []
   const [selected, setSelected] = useState(0)
-  const [exported, setExported] = useState<Record<number, string>>({})
+  const [exported, setExported] = useState<Record<string, string>>({})
   const currentPreset = results.render?.caption_preset ?? 'classic'
   const [restylePreset, setRestylePreset] = useState(currentPreset)
   const [restyleCamera, setRestyleCamera] = useState('cut')
@@ -110,23 +152,22 @@ export default function Review({ results, onBack, onRestyle }: Props) {
 
   const pair = useMemo(() => {
     const out = outputs[selected]
-    const clip = out ? clips[out.clip] : undefined
-    return { out, clip }
+    return out ? pairForOutput(out, clips) : null
   }, [outputs, clips, selected])
 
   const artifactAvailable = Boolean(
-    pair.out?.path && (pair.out.artifact_status === undefined || pair.out.artifact_status === 'available')
+    pair?.out.path && (pair.out.artifact_status === undefined || pair.out.artifact_status === 'available')
   )
 
   useEffect(() => {
     setMediaState(artifactAvailable ? 'loading' : 'error')
-  }, [artifactAvailable, pair.out?.path, pair.out?.artifact_status, reloadKey])
+  }, [artifactAvailable, pair?.out.path, pair?.out.artifact_status, reloadKey])
 
   useEffect(() => {
     let active = true
     setMediaUrl(null)
-    if (!artifactAvailable || !pair.out) return () => { active = false }
-    api.requestPlaybackUrl(results.job_id, 'render', pair.out.clip)
+    if (!artifactAvailable || !pair) return () => { active = false }
+    api.requestPlaybackUrl(results.job_id, 'render', pair.renderClipNumber)
       .then((url) => {
         if (!isPlaybackUrl(url)) throw new Error('Playback URL is malformed.')
         if (active) setMediaUrl(url)
@@ -135,21 +176,21 @@ export default function Review({ results, onBack, onRestyle }: Props) {
         if (active) setMediaState('error')
       })
     return () => { active = false }
-  }, [artifactAvailable, pair.out?.clip, pair.out?.path, reloadKey, results.job_id])
+  }, [artifactAvailable, pair?.renderClipNumber, pair?.out.path, reloadKey, results.job_id])
 
-  async function doExport(out: RenderOutput, clip: Clip) {
-    if (!out.path || !artifactAvailable) return
+  async function doExport(clipPair: ReviewClipPair) {
+    if (!clipPair.out.path || !artifactAvailable) return
     setExportError(null)
     try {
-      const suggestedTitle = `${results.ingest?.title ?? 'clip'} ${fmtTime(clip.start)}`
+      const suggestedTitle = `${results.ingest?.title ?? 'clip'} ${fmtTime(clipPair.scoreClip.start)}`
       const dest = await chooseExportDestination({
         jobId: results.job_id,
-        clip: out.clip,
+        clip: clipPair.renderClipNumber,
         suggestedTitle,
       })
       if (!dest) return
       if (!mountedRef.current) return
-      setExported((prev) => ({ ...prev, [out.clip]: dest }))
+      setExported((prev) => ({ ...prev, [clipPair.identity]: dest }))
     } catch (error) {
       if (mountedRef.current) setExportError(friendlyErrorMessage(error, 'Export could not be completed. Retry the export.'))
     }
@@ -201,7 +242,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
         <div className="review-title-block">
           <h1 className="review-title">{results.ingest?.title ?? results.job_id}</h1>
           <p className="review-sub mono">
-            {outputs.length} clips · {results.score?.llm_mode === 'ollama' ? 'scored locally' : 'AI-assisted scoring'} ·{' '}
+            {clipCountLabel(outputs.length)} · {scoringLocality(results)} ·{' '}
             {results.candidates?.heatmap_present ? 'replay signals included' : 'audio and visual signals'}
           </p>
         </div>
@@ -243,16 +284,18 @@ export default function Review({ results, onBack, onRestyle }: Props) {
 
       <div className="filmstrip">
         {outputs.map((out, i) => {
-          const clip = clips[out.clip]
+          const clipPair = pairForOutput(out, clips)
+          const clip = clipPair?.scoreClip
           return (
             <button
-              key={out.clip}
+              key={`${out.clip_id ?? 'legacy'}-${i}`}
               className={`film-card ${i === selected ? 'film-on' : ''}`}
               onClick={() => setSelected(i)}
+              disabled={clipPair === null}
               style={{ animationDelay: `${i * 50}ms` }}
             >
-              <span className="film-score mono">{Math.round(clip?.recommendation_score ?? clip?.score ?? out.score)}</span>
-              <span className="film-time mono">{clip ? fmtTime(clip.start) : ''}</span>
+              <span className="film-score mono">{clip ? Math.round(clip.recommendation_score ?? clip.score ?? out.score) : '—'}</span>
+              <span className="film-time mono">{clip ? fmtTime(clip.start) : 'Unavailable'}</span>
               <span className="film-platform">{out.best_platform}</span>
             </button>
           )
@@ -260,7 +303,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
       </div>
       <OtherMoments moments={borderline} jobId={results.job_id} />
 
-      {pair.out && pair.clip && (
+      {pair && (
         <div className="bay">
           <div className="monitor-wrap">
             {artifactAvailable && pair.out.path ? (
@@ -318,14 +361,14 @@ export default function Review({ results, onBack, onRestyle }: Props) {
               </div>
             )}
             <div className="monitor-actions">
-              <button className="btn-secondary" onClick={() => setEditing(pair.out!.clip)}>
+              <button className="btn-secondary" onClick={() => setEditing(pair.scoreClipIndex)}>
                 Edit clip
               </button>
-              <button className="btn-primary" aria-label="EXPORT MP4" onClick={() => doExport(pair.out!, pair.clip!)}>
-                {exported[pair.out.clip] ? 'Exported' : 'Export MP4'}
+              <button className="btn-primary" aria-label="EXPORT MP4" onClick={() => doExport(pair)}>
+                {exported[pair.identity] ? 'Exported' : 'Export MP4'}
               </button>
-              {exported[pair.out.clip] && (
-                <span className="mono export-path">{exported[pair.out.clip]}</span>
+              {exported[pair.identity] && (
+                <span className="mono export-path">{exported[pair.identity]}</span>
               )}
             </div>
             {exportError && <p className="inline-message" role="alert">{exportError}</p>}
@@ -335,11 +378,11 @@ export default function Review({ results, onBack, onRestyle }: Props) {
             <p className="audit-kicker">WHY THIS CLIP</p>
             <div className="audit-score-row">
               <div>
-                <span className="audit-big mono">{Math.round(pair.clip.recommendation_score ?? pair.clip.score)}</span>
+                <span className="audit-big mono">{Math.round(pair.scoreClip.recommendation_score ?? pair.scoreClip.score)}</span>
                 <span className="audit-score-caption">Recommendation score</span>
               </div>
               <div className="audit-platforms">
-                {Object.entries(pair.clip.platform_scores).map(([platform, value]) => (
+                {Object.entries(pair.scoreClip.platform_scores).map(([platform, value]) => (
                   <div className="platform-row" key={platform}>
                     <span className="platform-name">{platform}</span>
                     <div className="platform-bar">
@@ -350,13 +393,13 @@ export default function Review({ results, onBack, onRestyle }: Props) {
                 ))}
               </div>
             </div>
-            <div className="audit-tier"><span>Quality tier</span><strong>{qualityTier(Number(pair.clip.recommendation_score ?? pair.clip.score))}</strong><span>Recommendation confidence</span><strong>{confidenceLabel(pair.clip.confidence)}</strong><span>Platform fit</span><strong>{Math.round(pair.clip.platform_score ?? pair.clip.score)}/100</strong></div>
+            <div className="audit-tier"><span>Quality tier</span><strong>{qualityTier(Number(pair.scoreClip.recommendation_score ?? pair.scoreClip.score))}</strong><span>Recommendation confidence</span><strong>{confidenceLabel(pair.scoreClip.confidence)}</strong><span>Platform fit</span><strong>{Math.round(pair.scoreClip.platform_score ?? pair.scoreClip.score)}/100</strong></div>
             <p className="audit-score-note">This is a 0–100 ranking signal, not a probability.</p>
-            <p className="audit-summary">{pair.clip.summary}</p>
+            <p className="audit-summary">{pair.scoreClip.summary}</p>
 
             <p className="audit-label">SIGNAL BREAKDOWN</p>
             <div className="subs">
-              {Object.entries(pair.clip.subscores).map(([name, value]) => (
+              {Object.entries(pair.scoreClip.subscores).map(([name, value]) => (
                 <div className="sub-row" key={name}>
                   <span className="sub-name">{name.replace('_', ' ')}</span>
                   <div className="sub-bar">
@@ -367,11 +410,11 @@ export default function Review({ results, onBack, onRestyle }: Props) {
               ))}
             </div>
 
-            {pair.clip.adjustments.length > 0 && (
+            {pair.scoreClip.adjustments.length > 0 && (
               <>
                 <p className="audit-label">WHAT CHANGED THE SCORE</p>
                 <div className="ledger">
-                  {pair.clip.adjustments.map((adj, i) => (
+                  {pair.scoreClip.adjustments.map((adj, i) => (
                     <div className="ledger-row" key={i}>
                       <span className={`ledger-factor mono ${adjustmentDirection(adj)}`}>
                         {adjustmentLabel(adj)}
@@ -386,46 +429,46 @@ export default function Review({ results, onBack, onRestyle }: Props) {
               </>
             )}
 
-            {pair.clip.ledger && (
+            {pair.scoreClip.ledger && (
               <>
                 <p className="audit-label">SCORING DETAILS</p>
                 <div className="ledger ledger-explain" data-testid="clip-ledger">
                   <div className="ledger-row">
-                    <span className="ledger-factor mono">{Math.round(pair.clip.ledger.recommendation_score ?? pair.clip.ledger.score)}</span>
+                    <span className="ledger-factor mono">{Math.round(pair.scoreClip.ledger.recommendation_score ?? pair.scoreClip.ledger.score)}</span>
                     <div>
                       <span className="ledger-rule">Recommendation score</span>
-                      <span className="ledger-reason">Platform fit and short-form quality for {pair.clip.best_platform}</span>
+                      <span className="ledger-reason">Platform fit and short-form quality for {pair.scoreClip.best_platform}</span>
                     </div>
                   </div>
-                  {pair.clip.platform_score !== undefined && pair.clip.short_quality_score !== undefined && (
+                  {pair.scoreClip.platform_score !== undefined && pair.scoreClip.short_quality_score !== undefined && (
                     <div className="ledger-row">
-                      <span className="ledger-factor mono">{Math.round(pair.clip.platform_score)}</span>
+                      <span className="ledger-factor mono">{Math.round(pair.scoreClip.platform_score)}</span>
                       <div>
                         <span className="ledger-rule">Platform fit</span>
-                        <span className="ledger-reason">Short-form quality: {Math.round(pair.clip.short_quality_score)}</span>
+                        <span className="ledger-reason">Short-form quality: {Math.round(pair.scoreClip.short_quality_score)}</span>
                       </div>
                     </div>
                   )}
                   <div className="ledger-row">
-                    <span className="ledger-factor mono">{Math.round(pair.clip.ledger.composition.curve_score)}</span>
+                    <span className="ledger-factor mono">{Math.round(pair.scoreClip.ledger.composition.curve_score)}</span>
                     <div>
                       <span className="ledger-rule">Signal mix</span>
                       <span className="ledger-reason">
-                        arousal {Math.round(pair.clip.ledger.composition.arousal_pct * 100)}% ·{' '}
-                        {pair.clip.ledger.composition.heatmap_pct === null
+                        arousal {Math.round(pair.scoreClip.ledger.composition.arousal_pct * 100)}% ·{' '}
+                        {pair.scoreClip.ledger.composition.heatmap_pct === null
                           ? 'no replay heatmap'
-                          : `replay ${Math.round(pair.clip.ledger.composition.heatmap_pct * 100)}%`} ·{' '}
-                        {pair.clip.ledger.composition.visual_evidence ? 'visual evidence present' : 'visual evidence unavailable'}
+                          : `replay ${Math.round(pair.scoreClip.ledger.composition.heatmap_pct * 100)}%`} ·{' '}
+                        {pair.scoreClip.ledger.composition.visual_evidence ? 'visual evidence present' : 'visual evidence unavailable'}
                       </span>
                     </div>
                   </div>
                   <div className="ledger-row">
-                    <span className="ledger-factor mono">v{pair.clip.ledger.provenance.scoring_config_version}</span>
+                    <span className="ledger-factor mono">v{pair.scoreClip.ledger.provenance.scoring_config_version}</span>
                     <div>
                       <span className="ledger-rule">Scoring source</span>
                       <span className="ledger-reason">
-                        {pair.clip.ledger.provenance.model} · {pair.clip.ledger.provenance.llm_mode} ·{' '}
-                        {pair.clip.ledger.provenance.arousal_source}
+                        {pair.scoreClip.ledger.provenance.model} · {pair.scoreClip.ledger.provenance.llm_mode} ·{' '}
+                        {pair.scoreClip.ledger.provenance.arousal_source}
                       </span>
                     </div>
                   </div>
@@ -435,13 +478,13 @@ export default function Review({ results, onBack, onRestyle }: Props) {
 
             <p className="audit-label">SIGNALS USED</p>
             <div className="signals">
-              {pair.clip.signals_fired.map((signal) => (
+              {pair.scoreClip.signals_fired.map((signal) => (
                 <span className="sig sig-on" key={signal}>
                   <span className="led led-on" />
                   {SIGNAL_LABELS[signal] ?? signal}
                 </span>
               ))}
-              {pair.clip.signals_missing.map((signal) => (
+              {pair.scoreClip.signals_missing.map((signal) => (
                 <span className="sig sig-off" key={signal}>
                   <span className="led led-off" />
                   {SIGNAL_LABELS[signal] ?? signal}
@@ -449,18 +492,18 @@ export default function Review({ results, onBack, onRestyle }: Props) {
               ))}
             </div>
 
-            {pair.clip.music && (
+            {pair.scoreClip.music && (
               <>
                 <p className="audit-label">MUSIC DIRECTION</p>
                 <div className="music-card">
                   <p className="music-main">
-                    <span className="signal-accent">{pair.clip.music.genre}</span> ·{' '}
-                    {pair.clip.music.mood} · <span className="mono">{pair.clip.music.bpm_range} bpm</span>
+                    <span className="signal-accent">{pair.scoreClip.music.genre}</span> ·{' '}
+                    {pair.scoreClip.music.mood} · <span className="mono">{pair.scoreClip.music.bpm_range} bpm</span>
                   </p>
-                  <p className="music-theme">{pair.clip.music.theme}</p>
+                  <p className="music-theme">{pair.scoreClip.music.theme}</p>
                   <p className="music-alt">
                     also try:{' '}
-                    {pair.clip.music.alternatives
+                    {pair.scoreClip.music.alternatives
                       .map((alt) => `${alt.genre} (${alt.bpm_range})`)
                       .join(' / ')}
                   </p>
@@ -469,7 +512,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
             )}
 
             <p className="audit-fine mono">
-              confidence: {pair.clip.confidence} · captions: {results.render?.caption_preset} ·{' '}
+              confidence: {pair.scoreClip.confidence} · captions: {results.render?.caption_preset} ·{' '}
               {pair.out.words} words · {pair.out.event_tags} event tags
             </p>
           </aside>

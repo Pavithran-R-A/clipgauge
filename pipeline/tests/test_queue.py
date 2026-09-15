@@ -257,3 +257,61 @@ def test_cached_prefix_ready_requires_each_checkpoint_and_artifact():
     assert queue.cached_prefix_ready(job, stages, through="ingest") is True
     queue.checkpoint_path(job, "ingest").unlink()
     assert queue.cached_prefix_ready(job, stages, through="ingest") is False
+
+
+def test_resume_reuses_ingest_before_low_disk_gate_and_runs_asr(monkeypatch):
+    class IngestStage(queue.Stage):
+        name = "ingest"
+        schema_version = 1
+
+        def run(self, ctx):
+            return {"storage_estimate": {"source_bytes": 4 * 1024**3, "required_bytes": 5 * 1024**3}}
+
+    class AsrStage(queue.Stage):
+        name = "asr"
+        schema_version = 1
+
+        def __init__(self):
+            self.runs = 0
+
+        def run(self, ctx):
+            self.runs += 1
+            return {"runs": self.runs}
+
+    low_space = int(1.25 * 1024**3)
+    monkeypatch.setattr(queue.resource_guard.shutil, "disk_usage", lambda _: type("Usage", (), {"free": low_space})())
+    job = queue.create_job("url", "https://example.test/video", _settings_json())
+    ingest = IngestStage()
+    asr = AsrStage()
+
+    with pytest.raises(queue.StageError) as blocked:
+        queue.run_stages(job, [ingest, asr], _noop_progress)
+    assert blocked.value.code == "DISK_SPACE_LOW"
+
+    monkeypatch.setattr(queue.resource_guard.shutil, "disk_usage", lambda _: type("Usage", (), {"free": 8 * 1024**3})())
+    queue.run_stages(job, [ingest], _noop_progress)
+    monkeypatch.setattr(queue.resource_guard.shutil, "disk_usage", lambda _: type("Usage", (), {"free": low_space})())
+
+    results = queue.run_stages(job, [ingest, asr], _noop_progress)
+
+    assert ingest.name in results
+    assert asr.runs == 1
+    assert results["asr"]["runs"] == 1
+
+
+def test_fresh_ingest_stays_blocked_at_same_low_disk(monkeypatch):
+    class IngestStage(queue.Stage):
+        name = "ingest"
+        schema_version = 1
+
+        def run(self, ctx):
+            raise AssertionError("fresh ingest must be blocked before execution")
+
+    low_space = int(1.25 * 1024**3)
+    monkeypatch.setattr(queue.resource_guard.shutil, "disk_usage", lambda _: type("Usage", (), {"free": low_space})())
+    job = queue.create_job("url", "https://example.test/video", _settings_json())
+
+    with pytest.raises(queue.StageError) as blocked:
+        queue.run_stages(job, [IngestStage()], _noop_progress)
+
+    assert blocked.value.code == "DISK_SPACE_LOW"

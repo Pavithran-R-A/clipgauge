@@ -151,6 +151,107 @@ describe('Review media trust states', () => {
     expect(api.exportClip).not.toHaveBeenCalled()
   })
 
+  it('pairs reordered outputs by stable clip identity', async () => {
+    const first = { ...clip, clip_id: 'clip-alpha', start: 0 }
+    const second = { ...clip, clip_id: 'clip-beta', start: 20 }
+    const reordered: JobResults = {
+      ...results({ path: '/managed/jobs/job/clips/clip_01.mp4', artifact_status: 'available' }),
+      score: { clips: [first, second], llm_mode: 'ollama', model: 'fixture', scored_count: 2 },
+      render: {
+        outputs: [
+          { clip: 1, clip_id: 'clip-alpha', path: '/managed/jobs/job/clips/clip_01.mp4', artifact_status: 'available', score: 80, best_platform: 'reels', duration: 10, words: 2, event_tags: 0 },
+          { clip: 0, clip_id: 'clip-beta', path: '/managed/jobs/job/clips/clip_00.mp4', artifact_status: 'available', score: 80, best_platform: 'reels', duration: 10, words: 2, event_tags: 0 },
+        ],
+        emoji_ok: true,
+        caption_preset: 'classic',
+      },
+    }
+    render(<Review results={reordered} onBack={vi.fn()} onRestyle={vi.fn()} />)
+
+    expect(await waitFor(() => screen.getByText('0:00'))).toBeInTheDocument()
+    chooseExportDestinationMock.mockResolvedValue('C:/Users/tester/Videos/alpha.mp4')
+    fireEvent.click(screen.getByRole('button', { name: 'EXPORT MP4' }))
+    await waitFor(() => expect(chooseExportDestinationMock).toHaveBeenCalledWith({
+      jobId: reordered.job_id,
+      clip: 1,
+      suggestedTitle: 'fixture 0:00',
+    }))
+  })
+
+  it('uses render clip numbers for playback and export', async () => {
+    const alpha = { ...clip, clip_id: 'clip-alpha', start: 0 }
+    const beta = { ...clip, clip_id: 'clip-beta', start: 20 }
+    const reordered: JobResults = {
+      ...results({}),
+      score: { clips: [alpha, beta], llm_mode: 'clipgauge-local', model: 'fixture', scored_count: 2 },
+      render: {
+        outputs: [
+          { clip: 7, clip_id: 'clip-alpha', path: '/managed/jobs/job/clips/clip_07.mp4', artifact_status: 'available', score: 80, best_platform: 'reels', duration: 10, words: 2, event_tags: 0 },
+          { clip: 3, clip_id: 'clip-beta', path: '/managed/jobs/job/clips/clip_03.mp4', artifact_status: 'available', score: 80, best_platform: 'reels', duration: 10, words: 2, event_tags: 0 },
+        ],
+        emoji_ok: true,
+        caption_preset: 'classic',
+      },
+    }
+    chooseExportDestinationMock.mockResolvedValue('C:/Users/tester/Videos/alpha.mp4')
+
+    render(<Review results={reordered} onBack={vi.fn()} onRestyle={vi.fn()} />)
+
+    await waitFor(() => expect(api.requestPlaybackUrl).toHaveBeenCalledWith(reordered.job_id, 'render', 7))
+    fireEvent.click(screen.getByRole('button', { name: 'EXPORT MP4' }))
+    await waitFor(() => expect(chooseExportDestinationMock).toHaveBeenCalledWith({
+      jobId: reordered.job_id,
+      clip: 7,
+      suggestedTitle: 'fixture 0:00',
+    }))
+  })
+
+  it.each([
+    ['clipgauge-local', 'scored locally'],
+    ['ollama', 'scored locally'],
+    ['lmstudio', 'scored locally'],
+    ['groq', 'AI-assisted scoring'],
+    ['openrouter', 'AI-assisted scoring'],
+  ])('labels %s scoring locality truthfully', (provider, label) => {
+    const localized = results({})
+    localized.score = { ...localized.score!, llm_mode: provider, provider_kind: provider }
+    render(<Review results={localized} onBack={vi.fn()} onRestyle={vi.fn()} />)
+    expect(screen.getByText(new RegExp(label))).toBeInTheDocument()
+  })
+
+  it('uses singular grammar for one rendered clip', () => {
+    render(<Review results={results({})} onBack={vi.fn()} onRestyle={vi.fn()} />)
+    expect(screen.getByText(/1 clip ·/)).toBeInTheDocument()
+    expect(screen.queryByText(/1 clips ·/)).not.toBeInTheDocument()
+  })
+
+  it('does not numerically pair an unknown output identity', () => {
+    const stale: JobResults = {
+      ...results({ path: '/managed/jobs/job/clips/clip_00.mp4', artifact_status: 'available', clip_id: 'clip-stale' }),
+      score: { clips: [{ ...clip, clip_id: 'clip-current' }], llm_mode: 'ollama', model: 'fixture', scored_count: 1 },
+    }
+    render(<Review results={stale} onBack={vi.fn()} onRestyle={vi.fn()} />)
+
+    expect(screen.getByText('Unavailable')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'EXPORT MP4' })).not.toBeInTheDocument()
+  })
+
+  it('rejects duplicate output identities instead of choosing one clip', () => {
+    const duplicate: JobResults = {
+      ...results({ path: '/managed/jobs/job/clips/clip_00.mp4', artifact_status: 'available', clip_id: 'clip-duplicate' }),
+      score: {
+        clips: [{ ...clip, clip_id: 'clip-duplicate' }, { ...clip, clip_id: 'clip-duplicate', start: 20 }],
+        llm_mode: 'ollama',
+        model: 'fixture',
+        scored_count: 2,
+      },
+    }
+    render(<Review results={duplicate} onBack={vi.fn()} onRestyle={vi.fn()} />)
+
+    expect(screen.getAllByText('Unavailable')).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: 'EXPORT MP4' })).not.toBeInTheDocument()
+  })
+
   it('surfaces export failures without an unhandled rejection', async () => {
     chooseExportDestinationMock.mockRejectedValue(new Error('export unavailable'))
     render(

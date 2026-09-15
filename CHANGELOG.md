@@ -2,6 +2,17 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.19] - 2026-09-14
+
+ClipGauge v0.5.19 is a real-device stability and UX correction candidate.
+
+- Added typed disk and ASR resource headroom gates.
+- Preserved native crash diagnostics with CPU recovery guidance.
+- Revalidated local models before every creator run.
+- Added degraded editor context with safe fallbacks.
+- Stabilized reordered Review outputs by clip identity.
+- Corrected local-model labels, elapsed time, and timeline markers.
+
 ## [0.5.18] - 2026-09-14
 
 ClipGauge v0.5.18 closes post-release defects without changing the product contract.

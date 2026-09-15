@@ -110,6 +110,26 @@ describe('ClipEditor loading, recovery, and ready states', () => {
     expect(screen.getByRole('button', { name: 'Render updated clip' })).toBeEnabled()
   })
 
+  it('opens with safe fallbacks when optional signals are degraded', async () => {
+    const { words, rms, rms_grid, events, auto_cuts, trajectory, ...base } = validContext
+    void words
+    void rms
+    void rms_grid
+    void events
+    void auto_cuts
+    void trajectory
+    vi.mocked(invoke).mockResolvedValue({
+      ...base,
+      degraded_features: ['speaker_transcript', 'audio_waveform', 'event_markers', 'camera_trajectory'],
+      warnings: ['Safe editor fallbacks are active.'],
+    } as never)
+    renderEditor()
+
+    await screen.findByTestId('editor-source-video')
+    expect(screen.getByTestId('editor-degraded')).toHaveTextContent('Some analysis signals are unavailable.')
+    expect(screen.getByRole('button', { name: 'Render updated clip' })).toBeEnabled()
+  })
+
   it('shows recovery when the source playback URL is malformed', async () => {
     vi.mocked(invoke).mockResolvedValue(validContext as never)
     vi.mocked(api.requestPlaybackUrl).mockResolvedValueOnce(null as never)

@@ -13,7 +13,7 @@ import shutil
 from pathlib import Path
 
 from ..jobs.queue import Stage, StageContext, StageError
-from .. import protocol
+from .. import config, protocol, resource_guard, storage_estimate
 from . import normalize, ytdlp
 
 
@@ -59,6 +59,20 @@ class IngestStage(Stage):
                 meta = ytdlp.fetch_meta(job.source, prog, cookies_from_browser=browser_session, compatibility_method="mweb")
                 heatmap = meta.heatmap
                 title = meta.title
+                url_estimate = storage_estimate.for_url_metadata(meta.raw)
+                disk_decision = resource_guard.disk_headroom_decision(
+                    job.source,
+                    data_root=config.home_dir(),
+                    estimate=url_estimate,
+                )
+                if disk_decision.blocked:
+                    raise StageError(
+                        disk_decision.message,
+                        code="DISK_SPACE_LOW",
+                        retryable=True,
+                        stage=self.name,
+                        details={**disk_decision.to_dict(), "source": "url-metadata"},
+                    )
                 media_path = ctx.job_dir / "media.mp4"
                 if not media_path.exists():
                     ytdlp.download(job.source, media_path, prog, cookies_from_browser=browser_session, compatibility_method="mweb")
@@ -153,5 +167,8 @@ class IngestStage(Stage):
             "title": title,
             "probe": info.to_json(),
             "heatmap": heatmap,
+            "storage_estimate": url_estimate if job.source_type == "url" else storage_estimate.for_source(
+                max(0, Path(job.source).expanduser().stat().st_size)
+            ),
             "source_hash": source_hash,
         }

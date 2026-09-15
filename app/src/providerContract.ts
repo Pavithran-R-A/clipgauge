@@ -14,7 +14,7 @@ export const CLOUD_PROVIDER_IDS = [
 
 export interface ProviderExecution {
   provider: string
-  model: string
+  model: string | undefined
   locality: ProviderLocality
   qualityMode: QualityMode
 }
@@ -56,7 +56,7 @@ export function isCloudProvider(provider: string): boolean {
   return (CLOUD_PROVIDER_IDS as readonly string[]).includes(provider)
 }
 
-export function resolveProviderExecution(provider: string, qualityMode: QualityMode, model: string): ProviderExecution {
+export function resolveProviderExecution(provider: string, qualityMode: QualityMode, model?: string): ProviderExecution {
   const locality = providerLocality(provider)
   if (qualityMode === 'private' && locality !== 'local') {
     throw new Error('private mode requires a local provider; choose a local provider')
