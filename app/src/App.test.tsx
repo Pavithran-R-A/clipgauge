@@ -359,7 +359,9 @@ describe('structured pipeline terminal events', () => {
   it('clears stale run notices when the provider changes', async () => {
     render(<App />)
     await waitFor(() => expect(mocks.pipelineHandler).toBeDefined())
-    mocks.pipelineHandler?.({ payload: { event: 'terminal', ok: false, code: 'CANCELLED', message: 'Old provider warning.' } })
+    await act(async () => {
+      mocks.pipelineHandler?.({ payload: { event: 'terminal', ok: false, code: 'CANCELLED', message: 'Old provider warning.' } })
+    })
     expect(await screen.findByTestId('studio-notice')).toHaveTextContent('Old provider warning.')
 
     await userEvent.click(screen.getByRole('button', { name: 'AI Providers' }))
