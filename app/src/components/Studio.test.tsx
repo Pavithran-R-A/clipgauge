@@ -7,7 +7,7 @@ import Studio from './Studio'
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }))
 
 describe('Studio output controls', () => {
-  it('disables cloud scoring until a cloud provider is configured', () => {
+  it('keeps cloud scoring selectable until a cloud provider is configured', async () => {
     render(
       <Studio
         jobs={[]}
@@ -20,6 +20,8 @@ describe('Studio output controls', () => {
         errorCode={null}
         notice={null}
         cloudConfigured={false}
+        localModelId="clipgauge-local/qwen3-1.7b-q8_0"
+        localModelReady
         onRun={vi.fn()}
         onCancel={vi.fn()}
         onContinueCpu={vi.fn()}
@@ -31,10 +33,11 @@ describe('Studio output controls', () => {
       />
     )
 
-    expect(screen.getByRole('button', { name: /^Hybrid/i })).toBeDisabled()
-    expect(screen.getByRole('button', { name: /Best Quality/i })).toBeDisabled()
-    expect(screen.getByText('Configure a cloud provider and model in AI Providers before choosing Hybrid or Best Quality.')).toBeInTheDocument()
-    expect(screen.getByRole('status')).toHaveTextContent('ClipGauge Local')
+    expect(screen.getByRole('radio', { name: /^Hybrid/i })).not.toBeDisabled()
+    expect(screen.getByRole('radio', { name: /Best Quality/i })).not.toBeDisabled()
+    expect(screen.getByRole('status')).toHaveTextContent('ClipGauge Local scores locally using Lightweight')
+    await userEvent.click(screen.getByRole('radio', { name: /^Hybrid/i }))
+    expect(screen.getAllByText('Choose a cloud provider for Hybrid scoring.', { exact: false })[0]).toBeInTheDocument()
   })
 
   it('shows the selected cloud provider and model before creation', async () => {
@@ -61,9 +64,9 @@ describe('Studio output controls', () => {
       />
     )
 
-    await userEvent.click(screen.getByRole('button', { name: /^Hybrid/i }))
+    await userEvent.click(screen.getByRole('radio', { name: /^Hybrid/i }))
 
-    expect(screen.getAllByText(/OpenRouter Free - Auto Free route/)).toHaveLength(2)
+    expect(screen.getAllByText(/OpenRouter Free.*Auto Free route/)).toHaveLength(1)
   })
 
   it.each([
@@ -103,7 +106,7 @@ describe('Studio output controls', () => {
     )
 
     await userEvent.type(screen.getByLabelText('Video link'), 'https://example.com/video')
-    if (mode !== 'private') await userEvent.click(screen.getByRole('button', { name: new RegExp(mode === 'balanced' ? '^Hybrid' : 'Best Quality') }))
+    if (mode !== 'private') await userEvent.click(screen.getByRole('radio', { name: new RegExp(mode === 'balanced' ? '^Hybrid' : 'Best Quality') }))
     await userEvent.click(screen.getByRole('button', { name: 'Create clips' }))
 
     expect(onRun).toHaveBeenCalledTimes(1)
@@ -166,7 +169,7 @@ describe('Studio output controls', () => {
     await userEvent.type(screen.getByLabelText('Video link'), 'https://example.com/video')
 
     expect(screen.getByRole('button', { name: 'Create clips' })).toBeDisabled()
-    expect(screen.getByRole('alert')).toHaveTextContent('Private mode requires a local provider')
+    expect(screen.getByRole('alert')).toHaveTextContent('Choose an installed local model.')
     expect(onRun).not.toHaveBeenCalled()
   })
 
@@ -247,10 +250,10 @@ describe('Studio output controls', () => {
       />
     )
 
-    await userEvent.click(screen.getByRole('button', { name: /^Hybrid/i }))
+    await userEvent.click(screen.getByRole('radio', { name: /^Hybrid/i }))
 
-    expect(screen.getByRole('note')).toHaveTextContent('What leaves this computer: candidate transcript, candidate metadata, and sampled images when visual scoring is supported.')
-    expect(screen.getByRole('note')).toHaveTextContent('The full source file stays on this computer.')
+    expect(screen.getByRole('note')).toHaveTextContent('What leaves this computer: candidate transcript, metadata, and sampled images.')
+    expect(screen.getByRole('note')).toHaveTextContent('The full source file stays local.')
   })
 
   it('lets creators choose the review breadth', async () => {
@@ -307,6 +310,6 @@ describe('Studio output controls', () => {
     )
 
     await userEvent.click(screen.getByRole('button', { name: 'Choose video' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('The video picker could not open. Retry the action.')
+    expect(await screen.findByText('The video picker could not open. Retry the action.')).toBeInTheDocument()
   })
 })

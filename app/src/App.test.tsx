@@ -157,14 +157,14 @@ describe('application navigation handoffs', () => {
 
     await waitFor(() => expect(mocks.api.preflight).toHaveBeenCalledWith(
       'clipgauge-local',
-      'clipgauge-local/balanced',
+      'clipgauge-local/qwen3-4b-q4_k_m',
       undefined,
       undefined,
       undefined,
       'C:\\Videos\\source.mp4',
       'private',
     ))
-    expect(mocks.api.setupInventory).toHaveBeenCalledTimes(1)
+    expect(mocks.api.setupInventory).toHaveBeenCalledTimes(2)
   })
 
   it('does not reuse a local model from an incomplete inventory envelope', async () => {
@@ -186,7 +186,7 @@ describe('application navigation handoffs', () => {
 
     await userEvent.click(await screen.findByTestId('create-job'))
 
-    await waitFor(() => expect(mocks.api.setupInventory).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(mocks.api.setupInventory).toHaveBeenCalledTimes(2))
   })
 
   it('retains a natively discovered local model for later runs', async () => {
@@ -218,10 +218,10 @@ describe('application navigation handoffs', () => {
 
     await userEvent.click(screen.getByTestId('create-job'))
     await waitFor(() => expect(mocks.api.runJob).toHaveBeenCalledTimes(2))
-    expect(mocks.api.setupInventory).toHaveBeenCalledTimes(2)
+    expect(mocks.api.setupInventory).toHaveBeenCalledTimes(3)
     expect(mocks.api.preflight).toHaveBeenLastCalledWith(
       'clipgauge-local',
-      'clipgauge-local/balanced',
+      'clipgauge-local/qwen3-4b-q4_k_m',
       undefined,
       undefined,
       undefined,

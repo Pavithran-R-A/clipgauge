@@ -724,7 +724,7 @@ describe('v0.5 information architecture', () => {
     mocks.testConnection.mockResolvedValue({ state: 'PASS', provider: 'clipgauge-local', message: 'Verified.' })
     render(<ProviderCenter selectedProvider="clipgauge-local" onSelectProvider={vi.fn()} onBack={vi.fn()} />)
     await userEvent.click(await screen.findByRole('button', { name: /Test connection/i }))
-    await waitFor(() => expect(mocks.testConnection).toHaveBeenCalledWith('clipgauge-local', 'clipgauge-local/light', 'http://127.0.0.1:8080/v1', 'none'))
+    await waitFor(() => expect(mocks.testConnection).toHaveBeenCalledWith('clipgauge-local', 'clipgauge-local/qwen3-1.7b-q8_0', 'http://127.0.0.1:8080/v1', 'none'))
   })
 
   it('persists canonical readiness after a successful provider test', async () => {
@@ -799,15 +799,14 @@ describe('v0.5 information architecture', () => {
     const onSelectLocalModel = vi.fn()
     render(<ProviderCenter selectedProvider="clipgauge-local" onSelectProvider={vi.fn()} onSelectLocalModel={onSelectLocalModel} onBack={vi.fn()} />)
 
-    await userEvent.click(await screen.findByRole('button', { name: 'Refresh models' }))
-    const modelPicker = screen.getByRole('combobox', { name: 'Model' })
-    await userEvent.selectOptions(modelPicker, 'clipgauge-local/light')
+    const modelPicker = screen.getByRole('radio', { name: /Lightweight.*Qwen3 1\.7B/i })
+    await userEvent.click(modelPicker)
 
-    expect(modelPicker).toHaveValue('clipgauge-local/light')
-    await waitFor(() => expect(mocks.saveLocalModel).toHaveBeenCalledWith('clipgauge-local/light'))
-    expect(onSelectLocalModel).toHaveBeenCalledWith('clipgauge-local/light')
+    expect(modelPicker).toBeChecked()
+    await waitFor(() => expect(mocks.saveLocalModel).toHaveBeenCalledWith('clipgauge-local/qwen3-1.7b-q8_0'))
+    expect(onSelectLocalModel).toHaveBeenCalledWith('clipgauge-local/qwen3-1.7b-q8_0')
     await userEvent.click(screen.getByText('Advanced settings'))
-    expect(screen.getByText('clipgauge-local/light', { selector: 'code' })).toBeInTheDocument()
+    expect(screen.getByText('clipgauge-local/qwen3-1.7b-q8_0', { selector: 'code' })).toBeInTheDocument()
   })
 
   it('does not notify the parent after local model save unmounts', async () => {
@@ -836,8 +835,7 @@ describe('v0.5 information architecture', () => {
     const onSelectLocalModel = vi.fn()
     const view = render(<ProviderCenter selectedProvider="clipgauge-local" onSelectProvider={vi.fn()} onSelectLocalModel={onSelectLocalModel} onBack={vi.fn()} />)
 
-    await userEvent.click(await screen.findByRole('button', { name: 'Refresh models' }))
-    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Model' }), 'clipgauge-local/light')
+    await userEvent.click(screen.getByRole('radio', { name: /Lightweight.*Qwen3 1\.7B/i }))
     view.unmount()
 
     await act(async () => {
@@ -876,14 +874,14 @@ describe('v0.5 information architecture', () => {
     })
     render(<ProviderCenter selectedProvider="clipgauge-local" onSelectProvider={vi.fn()} onBack={vi.fn()} />)
 
-    await userEvent.click(await screen.findByRole('button', { name: 'Refresh models' }))
-    const modelPicker = screen.getByRole('combobox', { name: 'Model' })
-    await userEvent.selectOptions(modelPicker, 'clipgauge-local/light')
-    await userEvent.selectOptions(modelPicker, 'clipgauge-local/balanced')
+    const modelPicker = screen.getByRole('radio', { name: /Lightweight.*Qwen3 1\.7B/i })
+    const balancedPicker = screen.getByRole('radio', { name: /Balanced.*Qwen3 4B/i })
+    await userEvent.click(modelPicker)
+    await userEvent.click(balancedPicker)
 
-    expect(savedModels).toEqual(['clipgauge-local/light'])
+    expect(savedModels).toEqual(['clipgauge-local/qwen3-1.7b-q8_0'])
     resolvers[0]()
-    await waitFor(() => expect(savedModels).toEqual(['clipgauge-local/light', 'clipgauge-local/balanced']))
+    await waitFor(() => expect(savedModels).toEqual(['clipgauge-local/qwen3-1.7b-q8_0', 'clipgauge-local/qwen3-4b-q4_k_m']))
     resolvers[1]()
   })
 
@@ -1244,9 +1242,9 @@ describe('v0.5 information architecture', () => {
     await userEvent.click(light)
     await userEvent.click(balanced)
 
-    expect(savedModels).toEqual(['clipgauge-local/light'])
+    expect(savedModels).toEqual(['clipgauge-local/qwen3-1.7b-q8_0'])
     resolvers[0]?.()
-    await waitFor(() => expect(savedModels).toEqual(['clipgauge-local/light', 'clipgauge-local/balanced']))
+    await waitFor(() => expect(savedModels).toEqual(['clipgauge-local/qwen3-1.7b-q8_0', 'clipgauge-local/qwen3-4b-q4_k_m']))
     resolvers[1]?.()
   })
 
