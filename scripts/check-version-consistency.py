@@ -8,7 +8,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-EXPECTED = "0.5.19"
+EXPECTED = "0.5.20"
 ROOT = Path(__file__).resolve().parents[1]
 errors: list[str] = []
 
@@ -70,17 +70,17 @@ require("clipgauge_pipeline.__version__", init_match.group(1) if init_match else
 
 changelog = (ROOT / "CHANGELOG.md").read_text()
 if not re.search(r"^## \[0\.5\.19\](?:\s|$)", changelog, re.MULTILINE):
-    errors.append("CHANGELOG.md: missing current v0.5.19 section")
+    errors.append("CHANGELOG.md: missing current v0.5.20 section")
 
 readme = (ROOT / "README.md").read_text()
-if "ClipGauge v0.5.19" not in readme:
-    errors.append("README.md: missing current ClipGauge v0.5.19 marker")
+if "ClipGauge v0.5.20" not in readme:
+    errors.append("README.md: missing current ClipGauge v0.5.20 marker")
 if "unsigned release candidate" in readme.lower():
     errors.append("README.md: stale 'unsigned release candidate' wording remains")
 
 about = (ROOT / "app/src/components/About.tsx").read_text()
-if "ClipGauge v0.5.19" not in about:
-    errors.append("About.tsx: missing current ClipGauge v0.5.19 marker")
+if "ClipGauge v0.5.20" not in about:
+    errors.append("About.tsx: missing current ClipGauge v0.5.20 marker")
 
 if errors:
     print("Version consistency check FAILED:")

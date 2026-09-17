@@ -412,6 +412,17 @@ jobs:
             awk -v key="$1:" '$1 == key { print $2; exit }' /proc/meminfo 2>/dev/null || true
           }
 
+          sc_avphys_bytes() {
+            local pages page_size
+            pages=$(getconf _AVPHYS_PAGES 2>/dev/null || true)
+            page_size=$(getconf PAGE_SIZE 2>/dev/null || true)
+            if [[ "$pages" =~ ^[0-9]+$ && "$page_size" =~ ^[0-9]+$ ]]; then
+              printf '%s' "$((pages * page_size))"
+            else
+              printf 'unknown'
+            fi
+          }
+
           cgroup_memory_value() {
             local name="$1"
             local suffix v2_path v1_path v1_name
@@ -467,8 +478,11 @@ jobs:
           snapshot() {
             local phase="$1"
             local root_pid="${2:-unknown}"
-            local now stage event
+            local now stage event sc_avphys_pages sc_avphys_page_size sc_avphys
             now=$(date --iso-8601=seconds)
+            sc_avphys_pages=$(getconf _AVPHYS_PAGES 2>/dev/null || true)
+            sc_avphys_page_size=$(getconf PAGE_SIZE 2>/dev/null || true)
+            sc_avphys=$(sc_avphys_bytes)
             stage="unknown"
             event="unknown"
             if [ -f "$event_log" ]; then
@@ -478,9 +492,10 @@ jobs:
               event=${event:-unknown}
             fi
             {
-              printf 'snapshot|time=%s|phase=%s|event=%s|stage=%s|root_pid=%s|mem_total_kb=%s|mem_available_kb=%s|mem_free_kb=%s|buffers_kb=%s|cached_kb=%s|sreclaimable_kb=%s|swap_total_kb=%s|swap_free_kb=%s|commit_limit_kb=%s|committed_as_kb=%s|cgroup_memory_max=%s|cgroup_memory_current=%s\n' \
+              printf 'snapshot|time=%s|phase=%s|event=%s|stage=%s|root_pid=%s|mem_total_kb=%s|mem_available_kb=%s|mem_free_kb=%s|sc_avphys_pages=%s|sc_avphys_page_size_bytes=%s|sc_avphys_bytes=%s|buffers_kb=%s|cached_kb=%s|sreclaimable_kb=%s|swap_total_kb=%s|swap_free_kb=%s|commit_limit_kb=%s|committed_as_kb=%s|cgroup_memory_max=%s|cgroup_memory_current=%s\n' \
                 "$now" "$phase" "$event" "$stage" "$root_pid" \
                 "$(meminfo_value MemTotal)" "$(meminfo_value MemAvailable)" "$(meminfo_value MemFree)" \
+                "$sc_avphys_pages" "$sc_avphys_page_size" "$sc_avphys" \
                 "$(meminfo_value Buffers)" "$(meminfo_value Cached)" "$(meminfo_value SReclaimable)" \
                 "$(meminfo_value SwapTotal)" "$(meminfo_value SwapFree)" "$(meminfo_value CommitLimit)" \
                 "$(meminfo_value Committed_AS)" "$(cgroup_memory_value memory.max)" "$(cgroup_memory_value memory.current)"
@@ -505,7 +520,7 @@ jobs:
           pipeline_pid=$!
           (
             while kill -0 "$pipeline_pid" 2>/dev/null; do
-              snapshot pipeline
+              snapshot pipeline "$pipeline_pid"
               sleep 2
             done
           ) &

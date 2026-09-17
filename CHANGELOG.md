@@ -2,6 +2,15 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.20] - 2026-09-17
+
+ClipGauge v0.5.20 repairs Linux available-memory detection for ASR headroom.
+
+- Uses Linux `MemAvailable` instead of free pages alone.
+- Caps memory headroom at readable cgroup limits.
+- Records memory-source and cgroup diagnostics.
+- Preserves the existing ASR safety thresholds.
+
 ## [0.5.19] - 2026-09-14
 
 ClipGauge v0.5.19 is a real-device stability and UX correction candidate.
