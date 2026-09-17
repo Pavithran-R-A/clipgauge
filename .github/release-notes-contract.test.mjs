@@ -46,11 +46,11 @@ test('keeps production model setup retries bounded and verified', () => {
   assert.match(modelJob, /setup download-model clipgauge-local\/qwen3-4b-q4_k_m/)
   assert.match(modelJob, /--model clipgauge-local\/qwen3-4b-q4_k_m/)
   assert.doesNotMatch(modelJob, /qwen3-1\.7b-q8_0/)
-  assert.match(modelJob, /Start deterministic managed scoring runtime/)
-  assert.match(modelJob, /--seed 42/)
-  assert.match(modelJob, /127\.0\.0\.1:8080\/health/)
-  assert.match(modelJob, /CLIPGAUGE_HOME.*runtimes.*llama-server/)
-  assert.match(modelJob, /CLIPGAUGE_HOME.*models.*Qwen3-4B-Q4_K_M\.gguf/)
+  assert.doesNotMatch(modelJob, /Start deterministic managed scoring runtime/)
+  assert.doesNotMatch(modelJob, /llama-server\.pid/)
+  assert.match(modelJob, /CLIPGAUGE_QA_RUNTIME_TRACE: '1'/)
+  assert.match(modelJob, /model-e2e-memory\.log/)
+  assert.match(modelJob, /memory\.limit_in_bytes/)
   assert.doesNotMatch(modelJob, /while true|for \(;;\)/)
 })
 
@@ -66,6 +66,8 @@ test('uploads model failure diagnostics without masking failures', () => {
     'setup-analysis.jsonl',
     'setup-runtime.jsonl',
     'setup-model.jsonl',
+    'model-e2e-memory.log',
+    'local-runtime.jsonl',
     'diagnostics',
   ]) {
     assert.match(modelJob, new RegExp(filename.replace('.', '\\.') ))

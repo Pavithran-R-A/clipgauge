@@ -1,6 +1,21 @@
 import json
+from pathlib import Path
 
 from clipgauge_pipeline import resource_guard, storage_estimate
+
+
+RELEASE_WORKFLOW = Path(__file__).parents[2] / ".github" / "workflows" / "release.yml"
+
+
+def test_model_e2e_uses_production_managed_runtime_lifecycle():
+    source = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "Start deterministic managed scoring runtime" not in source
+    assert "llama-server.pid" not in source
+    assert "CLIPGAUGE_QA_RUNTIME_TRACE: '1'" in source
+    assert "model-e2e-memory.log" in source
+    assert "memory.limit_in_bytes" in source
+    assert "memory.current" in source
 
 
 def test_url_estimate_prefers_exact_size_metadata():

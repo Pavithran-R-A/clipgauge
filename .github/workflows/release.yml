@@ -332,6 +332,7 @@ jobs:
       CLIPGAUGE_FFMPEG: /usr/bin/ffmpeg
       HF_HUB_DISABLE_TELEMETRY: '1'
       TRANSFORMERS_VERBOSITY: error
+      CLIPGAUGE_QA_RUNTIME_TRACE: '1'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -381,37 +382,6 @@ jobs:
             uv run clipgauge --jsonl setup install-runtime
           install_verified "local model" setup-model.jsonl \
             uv run clipgauge --jsonl setup download-model clipgauge-local/qwen3-4b-q4_k_m
-      - name: Start deterministic managed scoring runtime
-        shell: bash
-        run: |
-          set -euo pipefail
-          runtime=$(find "$CLIPGAUGE_HOME/runtimes/llama-server" -type f -name llama-server -print -quit)
-          model=$(find "$CLIPGAUGE_HOME/models" -type f -name Qwen3-4B-Q4_K_M.gguf -print -quit)
-          test -x "$runtime"
-          test -s "$model"
-          "$runtime" \
-            --model "$model" \
-            --host 127.0.0.1 \
-            --port 8080 \
-            --no-webui \
-            --parallel 1 \
-            --ctx-size 4096 \
-            --reasoning off \
-            --seed 42 \
-            > "$GITHUB_WORKSPACE/llama-server.log" 2>&1 &
-          echo "$!" > "$GITHUB_WORKSPACE/llama-server.pid"
-          for attempt in $(seq 1 60); do
-            if curl --fail --silent http://127.0.0.1:8080/health > /dev/null; then
-              exit 0
-            fi
-            if ! kill -0 "$(cat "$GITHUB_WORKSPACE/llama-server.pid")" 2>/dev/null; then
-              cat "$GITHUB_WORKSPACE/llama-server.log"
-              exit 1
-            fi
-            sleep 2
-          done
-          cat "$GITHUB_WORKSPACE/llama-server.log"
-          exit 1
       - name: Build the controlled speech acceptance input
         working-directory: pipeline
         run: |
@@ -432,10 +402,123 @@ jobs:
       - name: Run the real production-default pipeline
         working-directory: pipeline
         run: |
+          set -euo pipefail
+
+          memory_log="$GITHUB_WORKSPACE/model-e2e-memory.log"
+          event_log="$GITHUB_WORKSPACE/model-e2e.jsonl"
+          : > "$memory_log"
+
+          meminfo_value() {
+            awk -v key="$1:" '$1 == key { print $2; exit }' /proc/meminfo 2>/dev/null || true
+          }
+
+          cgroup_memory_value() {
+            local name="$1"
+            local suffix v2_path v1_path v1_name
+            suffix=$(awk -F: '$1 == "0" { print $3; exit }' /proc/self/cgroup 2>/dev/null || true)
+            v2_path="/sys/fs/cgroup${suffix}/${name}"
+            if [ -r "$v2_path" ]; then
+              cat "$v2_path"
+              return
+            fi
+            suffix=$(awk -F: '$2 == "memory" { print $3; exit }' /proc/self/cgroup 2>/dev/null || true)
+            case "$name" in
+              memory.max) v1_name="memory.limit_in_bytes" ;;
+              memory.current) v1_name="memory.usage_in_bytes" ;;
+              *) printf 'unknown'; return ;;
+            esac
+            v1_path="/sys/fs/cgroup/memory${suffix}/${v1_name}"
+            if [ -r "$v1_path" ]; then
+              cat "$v1_path"
+            else
+              printf 'unknown'
+            fi
+          }
+
+          process_tree() {
+            local root_pid="$1"
+            ps -eo pid=,ppid= 2>/dev/null | awk -v root="$root_pid" '
+              { pid[++count] = $1; parent[$1] = $2 }
+              function visit(current, i) {
+                print current
+                for (i = 1; i <= count; i++) {
+                  if (parent[pid[i]] == current) visit(pid[i])
+                }
+              }
+              END { visit(root) }
+            '
+          }
+
+          process_field() {
+            local pid="$1"
+            local field="$2"
+            awk -v key="$field:" '$1 == key { print $2; exit }' "/proc/$pid/smaps_rollup" 2>/dev/null || printf 'unknown'
+          }
+
+          model_mapping_kb() {
+            local pid="$1"
+            awk '
+              /^[0-9a-f]+-[0-9a-f]+/ { model = ($0 ~ /models|\\.(gguf|pth|bin)( |$)/); next }
+              model && $1 == "Rss:" { total += $2 }
+              END { print total + 0 }
+            ' "/proc/$pid/smaps" 2>/dev/null || printf 'unknown'
+          }
+
+          snapshot() {
+            local phase="$1"
+            local root_pid="${2:-unknown}"
+            local now stage event
+            now=$(date --iso-8601=seconds)
+            stage="unknown"
+            event="unknown"
+            if [ -f "$event_log" ]; then
+              stage=$(grep -o '"stage": "[^"]*"' "$event_log" | tail -n 1 | cut -d'"' -f4 || true)
+              event=$(grep -o '"event": "[^"]*"' "$event_log" | tail -n 1 | cut -d'"' -f4 || true)
+              stage=${stage:-unknown}
+              event=${event:-unknown}
+            fi
+            {
+              printf 'snapshot|time=%s|phase=%s|event=%s|stage=%s|root_pid=%s|mem_total_kb=%s|mem_available_kb=%s|mem_free_kb=%s|buffers_kb=%s|cached_kb=%s|sreclaimable_kb=%s|swap_total_kb=%s|swap_free_kb=%s|commit_limit_kb=%s|committed_as_kb=%s|cgroup_memory_max=%s|cgroup_memory_current=%s\n' \
+                "$now" "$phase" "$event" "$stage" "$root_pid" \
+                "$(meminfo_value MemTotal)" "$(meminfo_value MemAvailable)" "$(meminfo_value MemFree)" \
+                "$(meminfo_value Buffers)" "$(meminfo_value Cached)" "$(meminfo_value SReclaimable)" \
+                "$(meminfo_value SwapTotal)" "$(meminfo_value SwapFree)" "$(meminfo_value CommitLimit)" \
+                "$(meminfo_value Committed_AS)" "$(cgroup_memory_value memory.max)" "$(cgroup_memory_value memory.current)"
+              for pid in $(process_tree "$root_pid"); do
+                [ -r "/proc/$pid/status" ] || continue
+                ppid=$(awk '/^PPid:/ { print $2; exit }' "/proc/$pid/status" 2>/dev/null || printf 'unknown')
+                comm=$(cat "/proc/$pid/comm" 2>/dev/null || printf 'unknown')
+                printf 'process|time=%s|phase=%s|stage=%s|pid=%s|ppid=%s|comm=%s|rss_kb=%s|pss_kb=%s|shared_clean_kb=%s|private_dirty_kb=%s|model_mapping_rss_kb=%s\n' \
+                  "$now" "$phase" "$stage" "$pid" "$ppid" "$comm" \
+                  "$(process_field "$pid" Rss)" "$(process_field "$pid" Pss)" \
+                  "$(process_field "$pid" Shared_Clean)" "$(process_field "$pid" Private_Dirty)" \
+                  "$(model_mapping_kb "$pid")"
+              done
+            } >> "$memory_log"
+          }
+
+          snapshot before_pipeline
           uv run clipgauge --jsonl run "$GITHUB_WORKSPACE/e2e-input/v041-controlled.mp4" \
             --provider clipgauge-local \
             --model clipgauge-local/qwen3-4b-q4_k_m \
-            > "$GITHUB_WORKSPACE/model-e2e.jsonl" 2>&1
+            > "$event_log" 2>&1 &
+          pipeline_pid=$!
+          (
+            while kill -0 "$pipeline_pid" 2>/dev/null; do
+              snapshot pipeline
+              sleep 2
+            done
+          ) &
+          monitor_pid=$!
+          if wait "$pipeline_pid"; then
+            pipeline_status=0
+          else
+            pipeline_status=$?
+          fi
+          kill "$monitor_pid" 2>/dev/null || true
+          wait "$monitor_pid" 2>/dev/null || true
+          snapshot after_pipeline "$pipeline_pid"
+          exit "$pipeline_status"
       - name: Validate terminal, stages, and production-default media contract
         working-directory: pipeline
         run: |
@@ -454,9 +537,14 @@ jobs:
           set +e
           diagnostics_dir="$GITHUB_WORKSPACE/model-e2e-diagnostics"
           mkdir -p "$diagnostics_dir"
-          for file in model-e2e.jsonl setup-asr.jsonl setup-analysis.jsonl setup-runtime.jsonl setup-model.jsonl llama-server.log; do
+          for file in model-e2e.jsonl setup-asr.jsonl setup-analysis.jsonl setup-runtime.jsonl setup-model.jsonl model-e2e-memory.log; do
             if [ -f "$GITHUB_WORKSPACE/$file" ]; then
               cp "$GITHUB_WORKSPACE/$file" "$diagnostics_dir/"
+            fi
+          done
+          for file in local-runtime.jsonl local-runtime.stderr.log; do
+            if [ -f "$CLIPGAUGE_HOME/diagnostics/$file" ]; then
+              cp "$CLIPGAUGE_HOME/diagnostics/$file" "$diagnostics_dir/"
             fi
           done
           : > "$diagnostics_dir/model-e2e-job.txt"
