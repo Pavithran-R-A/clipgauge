@@ -646,7 +646,10 @@ jobs:
         continue-on-error: true
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: 'release-assets/*'
+          subject-path: |
+            release-assets/ClipGauge_*.deb
+            release-assets/ClipGauge_*.exe
+            release-assets/SBOM.cyclonedx.json
       - name: Record attestation result without overclaiming
         shell: bash
         run: |
