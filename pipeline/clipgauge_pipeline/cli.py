@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -21,6 +22,9 @@ from . import __version__, config, downloads, environment, local_runtime, protoc
 from .jobs import queue
 from .render import ffmpeg_bin
 from .scoring import providers as providers_mod
+
+
+YOUTUBE_TEST_HEARTBEAT_SECONDS = 2.0
 
 
 def _stages() -> list[queue.Stage]:
@@ -107,6 +111,68 @@ def _progress_printer(jsonl: bool, job_id: str | None = None, attempt_id: str | 
             print(f"[{stage:<10}] {pct}{eta_label} {message}", file=sys.stderr, flush=True)
 
     return emit
+
+
+def _emit_setup_heartbeat(
+    jsonl: bool,
+    operation: str,
+    message: str,
+    *,
+    elapsed_seconds: float = 0.0,
+) -> None:
+    if not jsonl:
+        return
+    print(
+        json.dumps(
+            {
+                "event": "setup-progress",
+                "protocol_version": protocol.PROTOCOL_VERSION,
+                "asset_id": "core:youtube",
+                "display_name": "YouTube support",
+                "operation": operation,
+                "message": message,
+                "bytes_done": 0,
+                "bytes_total": None,
+                "bytes_per_second": 0.0,
+                "fraction": None,
+                "eta_seconds": None,
+                "elapsed_seconds": round(elapsed_seconds, 3),
+                "one_time_download": False,
+                "cached": False,
+                "state": "CHECKING",
+            }
+        ),
+        flush=True,
+    )
+
+
+def _run_with_setup_heartbeat(jsonl: bool, *, operation: str, probe):
+    if not jsonl:
+        return probe()
+    stop = threading.Event()
+    started_at = time.monotonic()
+
+    def emit_heartbeat() -> None:
+        _emit_setup_heartbeat(
+            jsonl,
+            operation,
+            "Starting the managed YouTube provider self-test.",
+        )
+        while not stop.wait(YOUTUBE_TEST_HEARTBEAT_SECONDS):
+            _emit_setup_heartbeat(
+                jsonl,
+                operation,
+                "The managed YouTube provider self-test is still running.",
+                elapsed_seconds=time.monotonic() - started_at,
+            )
+
+    thread = threading.Thread(target=emit_heartbeat, name="youtube-test-heartbeat", daemon=True)
+    thread.start()
+    try:
+        return probe()
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
 
 
 def _emit_result(jsonl: bool, payload: dict) -> None:
@@ -455,8 +521,16 @@ def cmd_setup(args: argparse.Namespace) -> int:
         model_assets = [_setup_model_asset(model) for model in local_runtime.MODEL_CATALOG.values()]
         if args.setup_cmd in {"youtube-status", "youtube-test"}:
             from .ingest import youtube_compat
-            result = youtube_compat.test() if args.setup_cmd == "youtube-test" else youtube_compat.readiness()
-            print(json.dumps(result))
+            result = (
+                _run_with_setup_heartbeat(
+                    args.jsonl,
+                    operation="Testing the managed YouTube provider",
+                    probe=youtube_compat.test,
+                )
+                if args.setup_cmd == "youtube-test"
+                else youtube_compat.readiness()
+            )
+            print(json.dumps(result), flush=True)
             return 0
         if args.setup_cmd == "inventory":
             runtime_binary = manager.binary_path()
