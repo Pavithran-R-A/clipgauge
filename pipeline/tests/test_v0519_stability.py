@@ -16,6 +16,9 @@ def test_model_e2e_uses_production_managed_runtime_lifecycle():
     assert "model-e2e-memory.log" in source
     assert "memory.limit_in_bytes" in source
     assert "memory.current" in source
+    assert 'snapshot pipeline "$pipeline_pid"' in source
+    assert "_AVPHYS_PAGES" in source
+    assert "sc_avphys_bytes" in source
 
 
 def test_url_estimate_prefers_exact_size_metadata():

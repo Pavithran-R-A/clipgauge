@@ -1,6 +1,136 @@
 from clipgauge_pipeline import hardware
 
 
+def test_linux_memory_values_prefer_memavailable_over_free_pages():
+    values = hardware._linux_memory_values(
+        {"MemTotal": 16 * hardware.GIB, "MemAvailable": 14 * hardware.GIB, "MemFree": 1 * hardware.GIB},
+        physical_total=16 * hardware.GIB,
+        sysconf_available=1 * hardware.GIB,
+        cgroup_limit=None,
+        cgroup_current=None,
+    )
+
+    assert values == {
+        "total_bytes": 16 * hardware.GIB,
+        "available_bytes": 14 * hardware.GIB,
+        "available_source": "proc_meminfo",
+        "cgroup_memory_limit_bytes": None,
+        "cgroup_memory_current_bytes": None,
+    }
+
+
+def test_linux_memory_values_cap_available_at_cgroup_headroom():
+    values = hardware._linux_memory_values(
+        {"MemTotal": 16 * hardware.GIB, "MemAvailable": 10 * hardware.GIB},
+        physical_total=16 * hardware.GIB,
+        sysconf_available=1 * hardware.GIB,
+        cgroup_limit=8 * hardware.GIB,
+        cgroup_current=7 * hardware.GIB,
+    )
+
+    assert values["total_bytes"] == 8 * hardware.GIB
+    assert values["available_bytes"] == 1 * hardware.GIB
+    assert values["available_source"] == "proc_meminfo+cgroup"
+    assert values["cgroup_memory_limit_bytes"] == 8 * hardware.GIB
+    assert values["cgroup_memory_current_bytes"] == 7 * hardware.GIB
+
+
+def test_linux_memory_values_marks_sysconf_fallback_when_memavailable_is_missing():
+    values = hardware._linux_memory_values(
+        {"MemTotal": 16 * hardware.GIB},
+        physical_total=16 * hardware.GIB,
+        sysconf_available=4 * hardware.GIB,
+        cgroup_limit=None,
+        cgroup_current=None,
+    )
+
+    assert values["available_bytes"] == 4 * hardware.GIB
+    assert values["available_source"] == "sysconf_avphys_pages"
+
+
+def test_linux_meminfo_parser_rejects_malformed_values():
+    values = hardware._parse_meminfo("MemAvailable: malformed kB\nMemFree: 128 kB\nBroken line")
+
+    assert values == {"MemFree": 128 * 1024}
+
+
+def test_linux_memory_snapshot_uses_memavailable_for_asr_headroom(monkeypatch):
+    monkeypatch.setattr(hardware.sys, "platform", "linux")
+    monkeypatch.setattr(hardware, "_memory_bytes", lambda: 16 * hardware.GIB)
+    monkeypatch.setattr(hardware, "_sysconf_available_bytes", lambda: 1 * hardware.GIB)
+    monkeypatch.setattr(hardware, "_linux_cgroup_memory", lambda: (None, None))
+    monkeypatch.setattr(
+        hardware,
+        "_read_text",
+        lambda path: "MemTotal: 16777216 kB\nMemAvailable: 14680064 kB\n" if path.name == "meminfo" else None,
+    )
+
+    result = hardware._memory_snapshot()
+
+    assert result["available_bytes"] == 14 * hardware.GIB
+    assert result["available_source"] == "proc_meminfo"
+
+
+def test_linux_cgroup_memory_reads_v2_limit_and_current_usage(monkeypatch):
+    monkeypatch.setattr(
+        hardware,
+        "_read_text",
+        lambda path: {
+            "cgroup": "0::/github-runner\n",
+            "memory.max": str(8 * hardware.GIB),
+            "memory.current": str(3 * hardware.GIB),
+        }.get(path.name),
+    )
+
+    assert hardware._linux_cgroup_memory() == (8 * hardware.GIB, 3 * hardware.GIB)
+
+
+def test_linux_cgroup_memory_reads_v1_limit_and_current_usage(monkeypatch):
+    monkeypatch.setattr(
+        hardware,
+        "_read_text",
+        lambda path: {
+            "cgroup": "7:cpu,memory:/runner\n",
+            "memory.limit_in_bytes": str(6 * hardware.GIB),
+            "memory.usage_in_bytes": str(2 * hardware.GIB),
+        }.get(path.name),
+    )
+
+    assert hardware._linux_cgroup_memory() == (6 * hardware.GIB, 2 * hardware.GIB)
+
+
+def test_linux_cgroup_memory_treats_unlimited_and_malformed_values_as_unknown():
+    assert hardware._parse_cgroup_memory_value("max") is None
+    assert hardware._parse_cgroup_memory_value("not-a-number") is None
+    assert hardware._parse_cgroup_memory_value("-1") is None
+
+
+def test_snapshot_exposes_linux_memory_measurement_sources(monkeypatch):
+    monkeypatch.setattr(hardware.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(hardware.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(hardware, "_nvidia", lambda: {})
+    monkeypatch.setattr(hardware, "_cuda", lambda: {})
+    monkeypatch.setattr(hardware, "_pytorch_cuda", lambda: {})
+    monkeypatch.setattr(hardware, "_whisperx_alignment", lambda: {})
+    monkeypatch.setattr(hardware, "_vulkan", lambda: {})
+    monkeypatch.setattr(hardware, "_cpu", lambda: {})
+    monkeypatch.setattr(hardware, "_memory_snapshot", lambda: {
+        "total_bytes": 8 * hardware.GIB,
+        "available_bytes": 4 * hardware.GIB,
+        "available_source": "proc_meminfo+cgroup",
+        "total_page_file_bytes": None,
+        "available_page_file_bytes": None,
+        "cgroup_memory_limit_bytes": 6 * hardware.GIB,
+        "cgroup_memory_current_bytes": 2 * hardware.GIB,
+    })
+
+    result = hardware.snapshot()
+
+    assert result["available_ram_source"] == "proc_meminfo+cgroup"
+    assert result["cgroup_memory_limit_bytes"] == 6 * hardware.GIB
+    assert result["cgroup_memory_current_bytes"] == 2 * hardware.GIB
+
+
 def test_cuda_probe_requires_a_real_device(monkeypatch):
     class CTranslate2:
         @staticmethod
