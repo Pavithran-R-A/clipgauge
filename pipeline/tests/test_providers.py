@@ -304,6 +304,8 @@ def test_scoring_deadline_caps_provider_request_timeout(monkeypatch):
         )
 
     monkeypatch.setattr(providers.httpx, "post", fake_post)
+    # Freeze the deadline clock to avoid Windows float edge cases.
+    monkeypatch.setattr(providers.time, "monotonic", lambda: 100.0)
     adapter = providers.OpenAICompatibleAdapter(profile(), "secret-value")
     adapter.set_scoring_deadline(providers.time.monotonic() + 5.0)
 
