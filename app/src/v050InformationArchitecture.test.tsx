@@ -134,7 +134,7 @@ describe('v0.5 information architecture', () => {
   it('renders cached provider inventory before native refresh completes', () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.20',
+      app_version: '0.5.21',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: 1_700_000_000,
@@ -182,7 +182,7 @@ describe('v0.5 information architecture', () => {
   it('keeps cached provider readiness when native refresh fails', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.20',
+      app_version: '0.5.21',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: 1_700_000_000,
@@ -360,7 +360,7 @@ describe('v0.5 information architecture', () => {
   it('uses cached YouTube readiness without retesting on setup mount', async () => {
     window.localStorage.setItem('clipgauge.setup.youtube.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.20',
+      app_version: '0.5.21',
       value: { state: 'DEPENDENCIES_READY', ready: true, reason: 'Cached tools are ready.', actions: ['Test'], checks: [] },
       verifiedAt: new Date(Date.now() - 1000).toISOString()
     }))
@@ -372,7 +372,7 @@ describe('v0.5 information architecture', () => {
   it('keeps cached YouTube actions when a manual test fails', async () => {
     window.localStorage.setItem('clipgauge.setup.youtube.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.20',
+      app_version: '0.5.21',
       value: { state: 'DEPENDENCIES_READY', ready: true, reason: 'Cached YouTube support needs installation.', actions: ['Install'], checks: [] },
       verifiedAt: new Date().toISOString()
     }))
@@ -405,7 +405,7 @@ describe('v0.5 information architecture', () => {
       cuda_runtime_ready: true,
       cudnn_runtime_ready: true
     }
-    window.localStorage.setItem('clipgauge.setup.gpu.v1', JSON.stringify({ schema_version: 1, app_version: '0.5.20', identity: { gpu_identity: ['Cached GPU'], driver_version: ['1.0'], cuda_runtime_fingerprint: '{}', cudnn_runtime_fingerprint: '{}', pipeline_environment_fingerprint: null }, value: cachedGpu, verifiedAt: new Date().toISOString() }))
+    window.localStorage.setItem('clipgauge.setup.gpu.v1', JSON.stringify({ schema_version: 1, app_version: '0.5.21', identity: { gpu_identity: ['Cached GPU'], driver_version: ['1.0'], cuda_runtime_fingerprint: '{}', cudnn_runtime_fingerprint: '{}', pipeline_environment_fingerprint: null }, value: cachedGpu, verifiedAt: new Date().toISOString() }))
     mocks.gpuDiagnostics.mockImplementation(() => new Promise(() => undefined))
     render(<SetupCenter onBack={vi.fn()} />)
     expect(screen.getByText('Cached GPU')).toBeInTheDocument()
@@ -445,7 +445,7 @@ describe('v0.5 information architecture', () => {
 
     const cached = JSON.parse(window.localStorage.getItem('clipgauge.setup.gpu.v1') ?? '{}')
     expect(cached.schema_version).toBe(1)
-    expect(cached.app_version).toBe('0.5.20')
+    expect(cached.app_version).toBe('0.5.21')
     expect(cached.identity).toMatchObject({
       gpu_identity: ['Test GPU'],
       driver_version: ['555.1'],
@@ -458,7 +458,7 @@ describe('v0.5 information architecture', () => {
   it('renders cached setup inventory before the native refresh completes', () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.20',
+      app_version: '0.5.21',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'cached-manifest',
       last_verified_at: Date.now() / 1000 - 60,
@@ -484,7 +484,7 @@ describe('v0.5 information architecture', () => {
   it('avoids a native inventory check while cached setup is fresh', () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.20',
+      app_version: '0.5.21',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'cached-manifest',
       last_verified_at: Date.now() / 1000 - 60,
@@ -533,7 +533,7 @@ describe('v0.5 information architecture', () => {
   it('ignores cached inventory with malformed storage breakdown rows', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.20',
+      app_version: '0.5.21',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: Date.now() / 1000,
@@ -548,7 +548,7 @@ describe('v0.5 information architecture', () => {
   it('ignores cached inventory with managed assets missing identifiers', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.20',
+      app_version: '0.5.21',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: Date.now() / 1000,

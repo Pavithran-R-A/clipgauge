@@ -53,7 +53,7 @@ Use **support bundle** from the Studio rail. The bundle contains sanitized metad
 
 ## Unsigned artifact warnings
 
-The historical v0.5.18 Linux Debian artifact and Windows NSIS installer were unsigned. The current v0.5.20 Windows NSIS candidate is also unsigned. An unsigned package cannot establish publisher identity and should be obtained from a trusted source, checked against `SHA256SUMS`, inspected with the platform’s package tools, and installed only at the user’s discretion. Windows may show SmartScreen warnings. Native macOS qualification builds are not automatically signed or notarized; Gatekeeper may warn or block them. The updater is disabled because no signing key is configured. No code-signing, notarization, or hardware-benchmark claim is made unless the release notes explicitly document one.
+The historical v0.5.18 Linux Debian artifact and Windows NSIS installer were unsigned. The current v0.5.21 Windows NSIS candidate is also unsigned. An unsigned package cannot establish publisher identity and should be obtained from a trusted source, checked against `SHA256SUMS`, inspected with the platform’s package tools, and installed only at the user’s discretion. Windows may show SmartScreen warnings. Native macOS qualification builds are not automatically signed or notarized; Gatekeeper may warn or block them. The updater is disabled because no signing key is configured. No code-signing, notarization, or hardware-benchmark claim is made unless the release notes explicitly document one.
 
 ## Reporting a reproducible issue
 

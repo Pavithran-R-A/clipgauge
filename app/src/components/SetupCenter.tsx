@@ -27,9 +27,9 @@ type GpuCacheIdentity = {
 type GpuCacheRecord = { schema_version: number; app_version: string; identity: GpuCacheIdentity; value: GpuDiagnostics; verifiedAt: string }
 const GPU_CACHE_KEY = 'clipgauge.setup.gpu.v1'
 const GPU_CACHE_SCHEMA_VERSION = 1
-const GPU_CACHE_APP_VERSION = '0.5.20'
+const GPU_CACHE_APP_VERSION = '0.5.21'
 const YOUTUBE_CACHE_SCHEMA_VERSION = 2
-const YOUTUBE_CACHE_APP_VERSION = '0.5.20'
+const YOUTUBE_CACHE_APP_VERSION = '0.5.21'
 const GPU_CACHE_TTL_MS = 15 * 60 * 1000
 
 function isRecord(value: unknown): value is Record<string, unknown> {
