@@ -238,7 +238,7 @@ def test_provider_build_readiness_rejects_empty_output(tmp_path, monkeypatch):
     (modules / ".bin").mkdir()
     (modules / ".bin" / "tsc.cmd").write_text("tsc", encoding="utf-8")
     (modules / ".package-lock.json").write_text(
-        '{"lockfileVersion":3,"packages":{"":{"dependencies":{"commander":"1.0.0"},"devDependencies":{"typescript":"1.0.0"}},"node_modules/commander":{},"node_modules/typescript":{}}}',
+        '{"lockfileVersion":3,"packages":{"":{"dependencies":{"commander":"1.0.0"},"devDependencies":{"typescript":"1.0.0"}},"node_modules/commander":{"version":"1.0.0"},"node_modules/typescript":{"version":"1.0.0"}}}',
         encoding="utf-8",
     )
     (tmp_path / "node").write_bytes(b"node")
@@ -279,7 +279,7 @@ def _write_provider_manifests(server: Path) -> None:
         encoding="utf-8",
     )
     (server / "package-lock.json").write_text(
-        '{"name":"bgutil-ytdlp-pot-provider","version":"2.0.0","lockfileVersion":3,"packages":{}}',
+        '{"name":"bgutil-ytdlp-pot-provider","version":"2.0.0","lockfileVersion":3,"packages":{"":{"dependencies":{"commander":"1.0.0"},"devDependencies":{"typescript":"1.0.0"}},"node_modules/commander":{"version":"1.0.0"},"node_modules/typescript":{"version":"1.0.0"}}}',
         encoding="utf-8",
     )
 
@@ -296,6 +296,10 @@ def test_youtube_node_modules_readiness_requires_locked_direct_dependencies_and_
     assert youtube_compat._node_modules_ready() is False
 
     _write_provider_manifests(server)
+    (server / "package-lock.json").write_text(
+        '{"name":"bgutil-ytdlp-pot-provider","version":"2.0.0","lockfileVersion":3,"packages":{"":{"dependencies":{"commander":"1.0.0"},"devDependencies":{"typescript":"1.0.0"}},"node_modules/commander":{"version":"1.0.0"},"node_modules/typescript":{"version":"1.0.0"},"node_modules/commander/node_modules/transitive":{"version":"1.0.0"}}}',
+        encoding="utf-8",
+    )
     modules = server / "node_modules"
     (modules / "commander").mkdir()
     (modules / "commander" / "package.json").write_text("{}", encoding="utf-8")
@@ -304,7 +308,7 @@ def test_youtube_node_modules_readiness_requires_locked_direct_dependencies_and_
     (modules / ".bin").mkdir()
     (modules / ".bin" / "tsc.cmd").write_text("tsc", encoding="utf-8")
     (modules / ".package-lock.json").write_text(
-        '{"lockfileVersion":3,"packages":{"":{"dependencies":{"commander":"1.0.0"},"devDependencies":{"typescript":"1.0.0"}},"node_modules/commander":{},"node_modules/typescript":{},"node_modules/commander/node_modules/transitive":{}}}',
+        '{"lockfileVersion":3,"packages":{"":{"dependencies":{"commander":"1.0.0"},"devDependencies":{"typescript":"1.0.0"}},"node_modules/commander":{"version":"1.0.0"},"node_modules/typescript":{"version":"1.0.0"},"node_modules/commander/node_modules/transitive":{"version":"1.0.0"}}}',
         encoding="utf-8",
     )
     assert youtube_compat._node_modules_ready() is False

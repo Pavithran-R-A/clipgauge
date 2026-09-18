@@ -250,10 +250,11 @@ def _node_modules_ready(server: Path | None = None) -> bool:
         if not modules.is_dir():
             return False
         package = json.loads((provider_server / "package.json").read_text(encoding="utf-8"))
+        source_lockfile = json.loads((provider_server / "package-lock.json").read_text(encoding="utf-8"))
         lockfile = json.loads((modules / ".package-lock.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    if not isinstance(package, dict) or not isinstance(lockfile, dict):
+    if not isinstance(package, dict) or not isinstance(source_lockfile, dict) or not isinstance(lockfile, dict):
         return False
     dependencies = package.get("dependencies", {})
     dev_dependencies = package.get("devDependencies", {})
@@ -262,12 +263,35 @@ def _node_modules_ready(server: Path | None = None) -> bool:
     required_packages = set(dependencies) | set(dev_dependencies)
     if "typescript" not in required_packages:
         return False
-    if lockfile.get("lockfileVersion") != 3 or not isinstance(lockfile.get("packages"), dict):
+    if (
+        source_lockfile.get("lockfileVersion") != 3
+        or not isinstance(source_lockfile.get("packages"), dict)
+        or lockfile.get("lockfileVersion") != 3
+        or not isinstance(lockfile.get("packages"), dict)
+    ):
         return False
+    source_packages = source_lockfile["packages"]
     installed_packages = lockfile["packages"]
+    for package_path, source_entry in source_packages.items():
+        if package_path and package_path not in installed_packages:
+            if not isinstance(source_entry, dict) or not source_entry.get("optional"):
+                return False
+    for package_path, source_entry in source_packages.items():
+        if not package_path:
+            continue
+        installed_entry = installed_packages.get(package_path)
+        if installed_entry is None:
+            continue
+        if not isinstance(source_entry, dict) or not isinstance(installed_entry, dict):
+            return False
+        source_version = source_entry.get("version")
+        if source_version is not None and installed_entry.get("version") != source_version:
+            return False
     for package_path in installed_packages:
         if not isinstance(package_path, str) or not package_path.startswith("node_modules/"):
             continue
+        if package_path not in source_packages:
+            return False
         package_dir = modules / package_path.removeprefix("node_modules/")
         if not _nonempty_file(package_dir / "package.json"):
             return False
