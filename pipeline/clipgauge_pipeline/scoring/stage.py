@@ -588,8 +588,11 @@ def is_evidence_backed_recommendation(entry: dict) -> bool:
     payoff_relevance = quality.get("payoff_relevance_to_premise")
     if topic_shift_count >= 3:
         return False
-    if "PAYOFF_NOT_RELEVANT" in flags and isinstance(payoff_relevance, (int, float)) and float(payoff_relevance) < 50.0:
-        return False
+    if "PAYOFF_NOT_RELEVANT" in flags:
+        if not isinstance(payoff_relevance, (int, float)) or isinstance(payoff_relevance, bool):
+            return False
+        if float(payoff_relevance) < 50.0:
+            return False
     return bool(
         quality.get("eligible_to_recommend")
         and quality.get("quality_tier") == "STRUCTURALLY_VALID"
