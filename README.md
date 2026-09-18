@@ -1,117 +1,257 @@
-# ClipGauge
+# ClipGauge v0.5.21
 
-ClipGauge is a desktop app for finding strong moments in longer videos and turning them into vertical clips. It combines transcript and audio signals with optional AI scoring, then keeps the recommendation understandable so a creator can see *why* a moment was selected before exporting it.
+ClipGauge is a local-first desktop application for finding, ranking, reviewing, and exporting short-form clips from long-form video.
 
-[Download the latest release](https://github.com/Pavithran-R-A/clipgauge/releases/latest) · [Report an issue](https://github.com/Pavithran-R-A/clipgauge/issues)
+It combines speech transcription, speaker information, audio events, replay signals, story structure, and optional model-based scoring. The output is intentionally reviewable: ClipGauge keeps the recommendation score, supporting signals, and edit controls visible before export instead of treating clip selection as a black box.
 
-> **Current branch release: ClipGauge v0.5.21** — YouTube self-test heartbeat repair.
+**Current stable release: [v0.5.21](https://github.com/Pavithran-R-A/clipgauge/releases/tag/v0.5.21)**
 
-> **Fallback if the current release has issues:** you can use [ClipGauge v0.5.3](https://github.com/Pavithran-R-A/clipgauge/releases/tag/v0.5.3). If you fall back to v0.5.3, **do not rely on the YouTube-link workflow**; YouTube compatibility is best effort and may fail because of upstream changes. Download or obtain the source video separately and use **local media upload/import** in ClipGauge instead.
+[Download for Windows](https://github.com/Pavithran-R-A/clipgauge/releases/download/v0.5.21/ClipGauge_0.5.21_Windows_x64_NSIS.exe) · [Download for Linux](https://github.com/Pavithran-R-A/clipgauge/releases/download/v0.5.21/ClipGauge_0.5.21_amd64.deb) · [Release notes](https://github.com/Pavithran-R-A/clipgauge/releases/tag/v0.5.21) · [Report an issue](https://github.com/Pavithran-R-A/clipgauge/issues)
 
-## What it does
+## Release status
 
-A typical ClipGauge workflow looks like this:
+v0.5.21 is the current qualified release and the recommended version for normal use.
 
-1. Add a local video or supported link.
-2. Choose a local or cloud scoring provider.
-3. Let the pipeline find and score candidate moments.
-4. Review the suggested clips and the signals behind each score.
-5. Adjust the cut or caption style if needed and export the result.
+| Item | v0.5.21 |
+| --- | --- |
+| Windows | x64 NSIS installer |
+| Linux | amd64 Debian package |
+| macOS | ARM64 and x86_64 build qualification in CI; no signed/notarized public package |
+| Production model E2E | Passed |
+| CycloneDX SBOM | Published |
+| SHA-256 manifest | Published |
+| Artifact attestation | Windows binary, Linux package, and SBOM |
+| Release provenance | Published |
+| Public YouTube import | Best effort; local-file import is the reliable fallback |
 
-The app is designed around the creator workflow rather than model configuration. Provider setup, diagnostics, and storage live in their own screens so they do not get in the way of the main job.
+The Windows and Linux release artifacts are currently unsigned. See the release page for checksums, SBOM, provenance, attestation status, and the model-E2E summary.
 
-The packaged screenshots below show the creator workflow. Setup & Storage separates core components from optional ClipGauge Local, reports whether model files are verified or need repair, and exposes a real YouTube Test action. AI Providers distinguishes a saved credential from a verified connection.
+## What ClipGauge does
 
-![ClipGauge Create screen](docs/screenshots/v0.5.1-packaged-create.png)
+A ClipGauge job moves through a deterministic media pipeline:
 
-![ClipGauge Sessions screen](docs/screenshots/v0.5.1-packaged-sessions.png)
+1. **Ingest** a local video or a supported public link.
+2. **Prepare media** and normalize the source for downstream processing.
+3. **Transcribe speech** and align spoken content.
+4. **Identify speakers** and derive audio-level signals.
+5. **Build candidate story units** from transcript, timing, replay, and media evidence.
+6. **Score candidates** with ClipGauge Local or a configured provider.
+7. **Review recommendations** with score breakdowns and supporting signals.
+8. **Reframe, caption, edit, and render** vertical clips.
+9. **Export** the final MP4 and keep the session available for later review.
 
-## Main features
+ClipGauge is designed for human-in-the-loop editing. A recommendation is a ranking signal, not an instruction to publish a clip unchanged.
 
-- candidate moment detection from video, audio, and transcript signals
-- vertical clip rendering with captions
-- explanation of the signals that contributed to a recommendation
-- session history for previous jobs
-- local and cloud AI-provider options
-- provider connection checks and diagnostics
-- local component and setup management
-- support bundles that exclude provider credentials
+## Core capabilities
 
-## Get started
+- local video import and best-effort public YouTube import
+- automatic speech transcription and timing alignment
+- speaker-aware processing
+- audio-event, vocal-arousal, replay, and story-structure signals
+- candidate discovery and ranked short-form recommendations
+- local scoring with ClipGauge Local
+- optional OpenAI-compatible and provider-specific cloud scoring
+- recommendation ledger with per-signal explanations
+- vertical smart reframing
+- multiple caption styles
+- per-clip editing and rerendering
+- session persistence and reopen support
+- resumable, verified component downloads
+- setup, storage, GPU, and provider diagnostics
+- redacted support bundles
+- release SBOM, checksums, provenance, and artifact attestations
 
-1. Download the installer for your operating system from the [latest release](https://github.com/Pavithran-R-A/clipgauge/releases/latest).
-2. Open ClipGauge and approve the one-time core-component setup. Setup & Storage tells you what will be installed, what is already available, and when an existing verified file will be reused.
-3. If you want local scoring, choose a model in Optional local AI. A verified existing model shows as installed and contributes zero additional download bytes; a failed integrity check shows Needs repair instead of silently redownloading.
-4. For YouTube, open Setup & Storage and run Test YouTube support. The app checks the pinned runtime, provider build, plugin discovery, loopback startup, and health. **YouTube tools ready** means those local dependencies are available; **YouTube download tested** is a separate state based on a real public transfer. Public-link availability can change with YouTube, and a local video file remains the dependable fallback.
-5. Add a video from your computer or paste a supported link. Choose the scoring provider and caption style that fit this clip.
-6. Review the suggested clips, adjust a cut or caption style if needed, and export the MP4 you want to publish.
+## Local-first by default
 
-If a setup step needs attention, open **Setup & Storage**. Core readiness, optional local-AI readiness, and best-effort YouTube readiness are shown independently. Use Install, Test, Repair, or Retry as offered by the current state. If YouTube rejects a public download during playback verification, retry later, use the optional browser-assisted route only after explicit approval when it is available, or import the video file directly. Open **Help & Diagnostics** for a local health summary and create a redacted support bundle. The bundle is designed for troubleshooting and does not include provider credentials, tokens, cookies, or browser-profile data.
+ClipGauge Local runs scoring on the machine and does not require an AI-provider account.
+
+The application separates local execution from external providers deliberately:
+
+- **Local mode** keeps scoring on the computer.
+- **Hybrid mode** combines local discovery with a configured provider.
+- **Best Quality mode** uses the configured provider for scoring where selected.
+- Provider credentials are stored through the operating-system credential store.
+- Browser cookies are not read by default.
+- No mandatory account is required to use the local workflow.
+
+When a cloud provider is selected, source-derived material may leave the machine. The Privacy screen describes the relevant boundary before the job runs.
+
+## Installation
+
+### Windows
+
+Download the current x64 installer:
+
+[**ClipGauge_0.5.21_Windows_x64_NSIS.exe**](https://github.com/Pavithran-R-A/clipgauge/releases/download/v0.5.21/ClipGauge_0.5.21_Windows_x64_NSIS.exe)
+
+SHA-256:
+
+```text
+B6A486F75C5F8204CD72A396E04D41343A1E8D35CAAE8C43E2F59C6CC015FF64
+```
+
+### Linux
+
+Download the current amd64 Debian package:
+
+[**ClipGauge_0.5.21_amd64.deb**](https://github.com/Pavithran-R-A/clipgauge/releases/download/v0.5.21/ClipGauge_0.5.21_amd64.deb)
+
+SHA-256:
+
+```text
+8F55474283CA5F9A2C1037AF18815025C3D60D08860FF8A2931C4CDB6AB4422C
+```
+
+For the complete checksum manifest and release metadata, use the [v0.5.21 release page](https://github.com/Pavithran-R-A/clipgauge/releases/tag/v0.5.21).
+
+## First run
+
+1. Launch ClipGauge.
+2. Open **Setup & Storage** and install the required core components.
+3. Optionally configure GPU speech acceleration.
+4. If you want local scoring, install one ClipGauge Local model.
+5. If you want public YouTube import, install and test the optional YouTube support components.
+6. Return to **Create**, add a local file or supported link, choose the scoring mode and caption style, then run the job.
+7. Review the candidates, adjust the cut or style if required, and export.
+
+Setup state is explicit. Verified files are reused; failed integrity checks are reported as repair states rather than silently accepted.
+
+## YouTube support
+
+YouTube integration is intentionally treated as **best effort**.
+
+ClipGauge pins and verifies the local downloader/runtime/provider components it manages, and it can test the local provider lifecycle independently from a real public transfer. That distinction matters: a healthy local setup does not guarantee that every public YouTube URL will remain downloadable.
+
+YouTube can change access behavior, bot checks, formats, or transfer requirements without notice. ClipGauge does not claim to bypass login, DRM, anti-bot, or account restrictions.
+
+For reliable processing, use a local media file.
 
 ## AI providers
 
-ClipGauge can run with its built-in local path, local model servers such as Ollama or LM Studio, OpenRouter's free route, or supported bring-your-own-key cloud providers. There is also a custom OpenAI-compatible option for endpoints you control. Provider availability and free-tier limits can change, so the UI treats saved credentials and a verified connection as separate states.
+ClipGauge supports multiple scoring paths without coupling the media pipeline to a single vendor.
 
-| Option | Best for | What to know |
-| --- | --- | --- |
-| ClipGauge Local | Keeping source media on this computer | No provider account; requires the local setup components. |
-| OpenRouter Free | Trying a cloud route with a free model path | Availability, limits, and the routed model can change. |
-| Gemini, Groq, Cloudflare, Hugging Face, Cerebras | Using a provider you already use | Add your own key; model capabilities and provider terms vary. |
-| Ollama or LM Studio | Using a local model you already run | Start the local server first, then test the connection. |
-| Custom OpenAI-compatible | Connecting an endpoint you control | Enter the endpoint, model, and credential in Advanced settings. |
+| Provider path | Typical use |
+| --- | --- |
+| ClipGauge Local | Local scoring with no provider account |
+| Ollama / LM Studio | Existing local OpenAI-compatible model servers |
+| OpenRouter | Routed cloud models, including available free routes |
+| Gemini / Groq / Cloudflare / Hugging Face / Cerebras | Bring-your-own-key cloud scoring |
+| Custom OpenAI-compatible | Self-hosted or third-party compatible endpoints |
 
-**Pexels** is separate from AI providers. It lives in **Integrations** as an optional source for stock visuals. Instagram feedback is also optional and separate from scoring.
+Provider availability, model capability, pricing, and free-tier limits are external to ClipGauge and can change independently.
 
-## Privacy in plain language
+Pexels and Instagram are integrations, not scoring providers.
 
-When you use a local provider, source video stays on the machine. When you choose a cloud provider, ClipGauge explains what can be sent before you run the job; this can include transcript excerpts, prompts, and sampled frames when the selected model supports vision.
-
-Provider credentials are stored through the operating-system credential store rather than project files. ClipGauge does not read browser cookies by default. Any browser-cookie behavior must be explicitly enabled for a supported workflow. Read the in-app **Privacy** panel and [`docs/providers/README.md`](docs/providers/README.md) before sending source-derived material to a third party.
-
-## Build from source
-
-ClipGauge uses a React/TypeScript frontend, Tauri for the desktop shell, and a Python media-processing pipeline. You will need Node.js, Rust, Python, `uv`, and the platform dependencies described in [`INSTALL.md`](INSTALL.md).
-
-```bash
-git clone https://github.com/Pavithran-R-A/clipgauge.git
-cd clipgauge
-
-cd app
-npm ci
-npm run dev
-```
-
-Run the checks before opening a pull request:
-
-```bash
-cd app && npm test -- --run && npm run build
-cd ../pipeline && uv run pytest -q
-cd ../app/src-tauri && cargo fmt -- --check && cargo test
-```
-
-The repository workflows build the release files. Do not commit generated installers, local credentials, job output, or downloaded models.
-
-## Project layout
+## Architecture
 
 ```text
-app/            React/TypeScript UI and Tauri application
-pipeline/       Python media-processing pipeline
-docs/           architecture, providers, product notes and screenshots
-.github/        CI and release workflows
+app/
+  React + TypeScript UI
+  Tauri desktop shell
+  native lifecycle, installer and platform integration
+
+pipeline/
+  Python media pipeline
+  ingest, ASR, diarization, audio analysis
+  candidate synthesis, scoring, rendering and diagnostics
+
+docs/
+  architecture, provider notes, QA evidence and product documentation
+
+.github/
+  CI, platform qualification, security checks and release automation
 ```
+
+At runtime, the desktop application owns process lifecycle and local setup state while the Python pipeline performs media analysis and rendering. Managed runtimes and models are installed outside the source tree and verified before use.
+
+## Release engineering
+
+ClipGauge releases are built from immutable version tags.
+
+The v0.5.21 release pipeline includes:
+
+- version/tag consistency checks
+- Windows qualification
+- Linux qualification
+- macOS ARM64 qualification
+- macOS x86_64 qualification
+- production-default managed-model E2E
+- checksum generation
+- CycloneDX SBOM generation
+- release provenance
+- GitHub artifact attestations for stable release subjects
+- publication only after mandatory release gates pass
+
+The published release includes `SHA256SUMS`, `SBOM.cyclonedx.json`, `MODEL_E2E_SUMMARY.json`, `RELEASE_PROVENANCE.md`, and `ATTESTATION_STATUS.md`.
+
+## Development
+
+The frontend is React/TypeScript, the desktop shell is Tauri/Rust, and the media pipeline is Python.
+
+Read [INSTALL.md](INSTALL.md) for platform prerequisites.
+
+### Frontend
+
+```bash
+cd app
+npm ci
+npm test -- --run
+npm run build
+```
+
+### Pipeline
+
+```bash
+cd pipeline
+uv run pytest -q
+```
+
+### Tauri / Rust
+
+```bash
+cd app/src-tauri
+cargo fmt -- --check
+cargo test
+cargo clippy -- -D warnings
+```
+
+Do not commit generated installers, local model files, downloaded runtime assets, credentials, user sessions, or rendered media.
+
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| `app/` | React UI and Tauri desktop application |
+| `pipeline/` | Python analysis, scoring, setup, and render pipeline |
+| `docs/` | Architecture, providers, QA records, and product documentation |
+| `scripts/` | Release and qualification utilities |
+| `.github/` | CI, platform qualification, security, and release workflows |
+
+## Security and privacy
+
+ClipGauge is intended to make execution boundaries visible rather than implicit.
+
+- Credentials are stored outside the repository through the OS credential store.
+- Support bundles are redacted and exclude provider credentials.
+- Managed downloads are versioned and integrity-checked.
+- Local scoring does not require source-derived content to be sent to a cloud AI provider.
+- Cloud/provider workflows disclose their external boundary in the application.
+- Release artifacts include checksums and an SBOM.
+
+Security-sensitive reports should follow [SECURITY.md](SECURITY.md) instead of being opened as public issues.
 
 ## Contributing
 
-Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/product-principles.md`](docs/product-principles.md). Changes to provider behavior, privacy disclosures, browser-cookie handling, setup downloads, or licensing need extra care; explain the user-visible effect and include tests where the behavior can be checked locally.
+Start with [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/product-principles.md](docs/product-principles.md).
 
-For security-sensitive reports, use [`SECURITY.md`](SECURITY.md) rather than a public issue.
+Changes that affect provider behavior, privacy boundaries, setup downloads, process lifecycle, release integrity, or browser-assisted workflows should include focused regression coverage and a clear description of the user-visible change.
+
+Main may contain work intended for a future release. The latest tagged release is the supported reference point for packaged behavior.
 
 ## License and attribution
 
-ClipGauge is distributed under the **GNU Affero General Public License v3.0 or later**. It began as a fork of [`Blueturboguy07/publikclip`](https://github.com/Blueturboguy07/publikclip); the upstream relationship and retained notices are documented in [`ORIGIN.md`](ORIGIN.md). Third-party licenses and notices remain in [`NOTICE.md`](NOTICE.md), [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), and [`VENDORED-LICENSES.md`](VENDORED-LICENSES.md). The `bgutil` component is documented as **GPL-3.0-only** in the third-party notices.
+ClipGauge is distributed under the **GNU Affero General Public License v3.0 or later**.
 
-## References
+The project began as a fork of [Blueturboguy07/publikclip](https://github.com/Blueturboguy07/publikclip). Upstream history and retained attribution are documented in [ORIGIN.md](ORIGIN.md).
 
-[1]: https://github.com/Pavithran-R-A/clipgauge/releases/latest "ClipGauge latest releases"
-[2]: https://github.com/Pavithran-R-A/clipgauge/blob/main/LICENSE "ClipGauge license"
-[3]: https://github.com/Blueturboguy07/publikclip "publikclip upstream repository"
+Third-party licensing is documented in [NOTICE.md](NOTICE.md), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and [VENDORED-LICENSES.md](VENDORED-LICENSES.md).
