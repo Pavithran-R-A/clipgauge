@@ -1,3 +1,5 @@
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -226,8 +228,19 @@ def test_provider_build_readiness_rejects_empty_output(tmp_path, monkeypatch):
     monkeypatch.setattr(youtube_compat, "_source_install_ready", lambda: True)
     monkeypatch.setattr(youtube_compat, "_provider_plugin_ready", lambda: True)
     server = tmp_path / "source" / youtube_compat.PROVIDER_SOURCE_ROOT / "server"
-    (server / "node_modules").mkdir(parents=True)
-    (server / "node_modules" / ".package-lock.json").write_text("{}", encoding="utf-8")
+    server.mkdir(parents=True)
+    _write_provider_manifests(server)
+    modules = server / "node_modules"
+    (modules / "commander").mkdir(parents=True)
+    (modules / "commander" / "package.json").write_text("{}", encoding="utf-8")
+    (modules / "typescript").mkdir()
+    (modules / "typescript" / "package.json").write_text("{}", encoding="utf-8")
+    (modules / ".bin").mkdir()
+    (modules / ".bin" / "tsc.cmd").write_text("tsc", encoding="utf-8")
+    (modules / ".package-lock.json").write_text(
+        '{"lockfileVersion":3,"packages":{"":{"dependencies":{"commander":"1.0.0"},"devDependencies":{"typescript":"1.0.0"}},"node_modules/commander":{"version":"1.0.0"},"node_modules/typescript":{"version":"1.0.0"}}}',
+        encoding="utf-8",
+    )
     (tmp_path / "node").write_bytes(b"node")
     (tmp_path / "npm").write_bytes(b"npm")
     (server / "build").mkdir()
@@ -260,7 +273,18 @@ def test_provider_build_swaps_compiled_output_atomically(tmp_path, monkeypatch):
     assert not list(server.glob(".provider-build-*.backup"))
 
 
-def test_youtube_node_modules_readiness_rejects_empty_managed_directory(tmp_path, monkeypatch):
+def _write_provider_manifests(server: Path) -> None:
+    (server / "package.json").write_text(
+        '{"name":"bgutil-ytdlp-pot-provider","version":"2.0.0","dependencies":{"commander":"1.0.0"},"devDependencies":{"typescript":"1.0.0"}}',
+        encoding="utf-8",
+    )
+    (server / "package-lock.json").write_text(
+        '{"name":"bgutil-ytdlp-pot-provider","version":"2.0.0","lockfileVersion":3,"packages":{"":{"dependencies":{"commander":"1.0.0"},"devDependencies":{"typescript":"1.0.0"}},"node_modules/commander":{"version":"1.0.0"},"node_modules/typescript":{"version":"1.0.0"}}}',
+        encoding="utf-8",
+    )
+
+
+def test_youtube_node_modules_readiness_requires_locked_direct_dependencies_and_compiler(tmp_path, monkeypatch):
     server = tmp_path / "server"
     server.mkdir()
     monkeypatch.setattr(youtube_compat, "server_home", lambda: server)
@@ -269,7 +293,50 @@ def test_youtube_node_modules_readiness_rejects_empty_managed_directory(tmp_path
     (server / "node_modules").mkdir()
     assert youtube_compat._node_modules_ready() is False
     (server / "node_modules" / ".package-lock.json").write_text("{}", encoding="utf-8")
+    assert youtube_compat._node_modules_ready() is False
+
+    _write_provider_manifests(server)
+    (server / "package-lock.json").write_text(
+        '{"name":"bgutil-ytdlp-pot-provider","version":"2.0.0","lockfileVersion":3,"packages":{"":{"dependencies":{"commander":"1.0.0"},"devDependencies":{"typescript":"1.0.0"}},"node_modules/commander":{"version":"1.0.0"},"node_modules/typescript":{"version":"1.0.0"},"node_modules/commander/node_modules/transitive":{"version":"1.0.0"}}}',
+        encoding="utf-8",
+    )
+    modules = server / "node_modules"
+    (modules / "commander").mkdir()
+    (modules / "commander" / "package.json").write_text("{}", encoding="utf-8")
+    (modules / "typescript").mkdir()
+    (modules / "typescript" / "package.json").write_text("{}", encoding="utf-8")
+    (modules / ".bin").mkdir()
+    (modules / ".bin" / "tsc.cmd").write_text("tsc", encoding="utf-8")
+    (modules / ".package-lock.json").write_text(
+        '{"lockfileVersion":3,"packages":{"":{"dependencies":{"commander":"1.0.0"},"devDependencies":{"typescript":"1.0.0"}},"node_modules/commander":{"version":"1.0.0"},"node_modules/typescript":{"version":"1.0.0"},"node_modules/commander/node_modules/transitive":{"version":"1.0.0"}}}',
+        encoding="utf-8",
+    )
+    assert youtube_compat._node_modules_ready() is False
+    transitive = modules / "commander" / "node_modules" / "transitive"
+    transitive.mkdir(parents=True)
+    (transitive / "package.json").write_text("{}", encoding="utf-8")
     assert youtube_compat._node_modules_ready() is True
+
+
+def test_youtube_provider_commands_prepend_managed_node_bin_to_path(tmp_path, monkeypatch):
+    managed_node = tmp_path / "managed-node" / "node.exe"
+    managed_node.parent.mkdir()
+    managed_node.write_bytes(b"node")
+    captured: dict[str, object] = {}
+
+    def fake_run(args, *, cwd, env, **kwargs):
+        captured.update({"args": args, "cwd": cwd, "env": env, "kwargs": kwargs})
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(youtube_compat, "node_path", lambda: managed_node)
+    monkeypatch.setenv("PATH", "ambient-path")
+    monkeypatch.setattr(youtube_compat.subprocess, "run", fake_run)
+
+    youtube_compat._run_provider_command(["npm.cmd", "ci"], cwd=tmp_path, failure_code="TEST", event=None)
+
+    environment = captured["env"]
+    assert isinstance(environment, dict)
+    assert environment["PATH"] == f"{managed_node.parent}{os.pathsep}ambient-path"
 
 
 def test_youtube_install_repairs_empty_node_modules(tmp_path, monkeypatch):

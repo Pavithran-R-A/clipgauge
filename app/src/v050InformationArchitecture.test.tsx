@@ -1135,6 +1135,14 @@ describe('v0.5 information architecture', () => {
     await waitFor(() => expect(mocks.startSetup).toHaveBeenCalledWith(['install-group', '--group', 'core:youtube']))
   })
 
+  it('gives setup diagnostics and storage their own responsive layout regions', async () => {
+    render(<SetupCenter onBack={vi.fn()} />)
+
+    expect(await screen.findByRole('heading', { name: 'GPU diagnostics' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'GPU diagnostics' }).closest('section')).toHaveClass('setup-major-section')
+    expect(screen.getByRole('heading', { name: 'What uses disk space' }).closest('section')).toHaveClass('setup-major-section')
+  })
+
   it('keeps the original failed component retryable when a later queued component succeeds', async () => {
     const handlers: Array<(event: { payload: Record<string, unknown> }) => void> = []
     mocks.listen.mockImplementation(async (_event: string, handler: (event: { payload: Record<string, unknown> }) => void) => { handlers.push(handler); return () => undefined })
