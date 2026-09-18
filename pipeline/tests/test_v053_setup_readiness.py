@@ -304,9 +304,13 @@ def test_youtube_node_modules_readiness_requires_locked_direct_dependencies_and_
     (modules / ".bin").mkdir()
     (modules / ".bin" / "tsc.cmd").write_text("tsc", encoding="utf-8")
     (modules / ".package-lock.json").write_text(
-        '{"lockfileVersion":3,"packages":{"":{"dependencies":{"commander":"1.0.0"},"devDependencies":{"typescript":"1.0.0"}},"node_modules/commander":{},"node_modules/typescript":{}}}',
+        '{"lockfileVersion":3,"packages":{"":{"dependencies":{"commander":"1.0.0"},"devDependencies":{"typescript":"1.0.0"}},"node_modules/commander":{},"node_modules/typescript":{},"node_modules/commander/node_modules/transitive":{}}}',
         encoding="utf-8",
     )
+    assert youtube_compat._node_modules_ready() is False
+    transitive = modules / "commander" / "node_modules" / "transitive"
+    transitive.mkdir(parents=True)
+    (transitive / "package.json").write_text("{}", encoding="utf-8")
     assert youtube_compat._node_modules_ready() is True
 
 

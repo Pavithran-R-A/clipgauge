@@ -264,6 +264,13 @@ def _node_modules_ready(server: Path | None = None) -> bool:
         return False
     if lockfile.get("lockfileVersion") != 3 or not isinstance(lockfile.get("packages"), dict):
         return False
+    installed_packages = lockfile["packages"]
+    for package_path in installed_packages:
+        if not isinstance(package_path, str) or not package_path.startswith("node_modules/"):
+            continue
+        package_dir = modules / package_path.removeprefix("node_modules/")
+        if not _nonempty_file(package_dir / "package.json"):
+            return False
     for package_name in required_packages:
         package_json = modules / package_name / "package.json"
         if not _nonempty_file(package_json):
