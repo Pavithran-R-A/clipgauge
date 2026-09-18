@@ -584,6 +584,12 @@ def is_evidence_backed_recommendation(entry: dict) -> bool:
         "LATE_NEW_TOPIC",
         "WEAK_COLD_HOOK",
     }
+    topic_shift_count = int(quality.get("topic_shift_count", 0) or 0)
+    payoff_relevance = quality.get("payoff_relevance_to_premise")
+    if topic_shift_count >= 3:
+        return False
+    if "PAYOFF_NOT_RELEVANT" in flags and isinstance(payoff_relevance, (int, float)) and float(payoff_relevance) < 50.0:
+        return False
     return bool(
         quality.get("eligible_to_recommend")
         and quality.get("quality_tier") == "STRUCTURALLY_VALID"

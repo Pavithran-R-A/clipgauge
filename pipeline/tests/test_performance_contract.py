@@ -388,6 +388,26 @@ def test_evidence_backed_story_can_survive_local_quality_flags():
     assert scoring_stage.is_evidence_backed_recommendation(entry) is True
 
 
+def test_evidence_backed_story_with_multiple_topic_shifts_stays_borderline():
+    entry = {
+        "payoff_boundary_explicit": True,
+        "short_quality": {
+            "eligible_to_recommend": True,
+            "quality_tier": "STRUCTURALLY_VALID",
+            "quality_flags": ["TOPIC_DRIFT"],
+            "complete_ending": True,
+            "story_consistent": True,
+            "effective_hook_0_100": 55.0,
+            "payoff": 66.0,
+            "standalone": 72.0,
+            "topic_shift_count": 3,
+            "payoff_relevance_to_premise": 55.0,
+        },
+    }
+
+    assert scoring_stage.is_evidence_backed_recommendation(entry) is False
+
+
 def test_windows_vulkan_remains_fallback_without_cuda_runtime():
     key = local_runtime.select_runtime_asset_key(
         platform_key="windows-x86_64",
