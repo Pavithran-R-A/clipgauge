@@ -2,6 +2,17 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.21] - 2026-09-18
+
+ClipGauge v0.5.21 keeps the YouTube provider self-test alive through native idle monitoring.
+
+- Emits truthful JSONL heartbeats during the silent provider startup and self-test phase.
+- Preserves the native sidecar idle and hard timeout guards.
+- Keeps YouTube provider lifecycle, public metadata, and public transfer as separate states.
+- Keeps public-link downloads best effort; local media remains the dependable fallback.
+- Attests stable Windows, Linux, and SBOM subjects without treating mutable release metadata as product artifacts.
+- Preserves the v0.5.20 ASR memory-headroom repair and all existing resource guards.
+
 ## [0.5.20] - 2026-09-17
 
 ClipGauge v0.5.20 repairs Linux available-memory detection for ASR headroom.
