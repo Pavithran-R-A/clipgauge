@@ -1,4 +1,4 @@
-# ClipGauge
+# ClipGauge v0.5.21
 
 ClipGauge is a local-first desktop application for finding, ranking, reviewing, and exporting short-form clips from long-form video.
 
