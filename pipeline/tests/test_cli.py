@@ -37,6 +37,49 @@ def test_help_flag_remains_successful(capsys):
     assert stderr == ''
 
 
+def test_youtube_test_emits_heartbeat_during_silent_provider(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "YOUTUBE_TEST_HEARTBEAT_SECONDS", 0.01)
+
+    def silent_probe():
+        cli.time.sleep(0.035)
+        return {"ok": True}
+
+    result = cli._run_with_setup_heartbeat(
+        True,
+        operation="Testing the managed YouTube provider",
+        probe=silent_probe,
+    )
+
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert result == {"ok": True}
+    assert len(events) >= 2
+    assert all(event["event"] == "setup-progress" for event in events)
+    assert all(event["operation"] == "Testing the managed YouTube provider" for event in events)
+
+
+def test_youtube_test_command_keeps_sidecar_active(monkeypatch, capsys):
+    from clipgauge_pipeline.ingest import youtube_compat
+
+    monkeypatch.setattr(cli, "YOUTUBE_TEST_HEARTBEAT_SECONDS", 0.01)
+    monkeypatch.setattr(cli.local_runtime, "LocalRuntime", lambda: object())
+    monkeypatch.setattr(cli.local_runtime, "MODEL_CATALOG", {})
+    monkeypatch.setattr(cli, "_setup_runtime_asset", lambda _manager: object())
+    monkeypatch.setattr(cli, "_setup_model_asset", lambda _model: object())
+    monkeypatch.setattr(cli.downloads, "DownloadManager", lambda event: object())
+
+    def silent_probe():
+        cli.time.sleep(0.035)
+        return {"ok": True}
+
+    monkeypatch.setattr(youtube_compat, "test", silent_probe)
+    args = SimpleNamespace(setup_cmd="youtube-test", jsonl=True)
+
+    assert cli.cmd_setup(args) == 0
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert events[-1] == {"ok": True}
+    assert sum(event["event"] == "setup-progress" for event in events[:-1]) >= 2
+
+
 def test_disk_warning_is_actionable_when_free_space_is_low(monkeypatch):
     monkeypatch.setattr(cli.config, 'home_dir', lambda: cli.Path('C:/managed'))
     monkeypatch.setattr(cli.shutil, 'disk_usage', lambda _: SimpleNamespace(free=2 * 1024**3))
