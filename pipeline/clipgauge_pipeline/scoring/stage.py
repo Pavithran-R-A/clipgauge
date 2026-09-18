@@ -584,7 +584,10 @@ def is_evidence_backed_recommendation(entry: dict) -> bool:
         "LATE_NEW_TOPIC",
         "WEAK_COLD_HOOK",
     }
-    topic_shift_count = int(quality.get("topic_shift_count", 0) or 0)
+    raw_topic_shift_count = quality.get("topic_shift_count", 0)
+    if isinstance(raw_topic_shift_count, bool) or not isinstance(raw_topic_shift_count, int) or raw_topic_shift_count < 0:
+        return False
+    topic_shift_count = raw_topic_shift_count
     payoff_relevance = quality.get("payoff_relevance_to_premise")
     if topic_shift_count >= 3:
         return False
