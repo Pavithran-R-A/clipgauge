@@ -2,6 +2,26 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.5.22] - 2026-09-18
+
+ClipGauge v0.5.22 records the merged Setup, YouTube installation, and recommendation-quality stabilization work.
+
+### Fixed
+
+- Restored clear spacing and responsive behavior in Setup & Storage, including GPU diagnostics and storage controls across supported Windows DPI configurations.
+- Fixed fresh Windows YouTube-support installation without global Node. Provider builds now use ClipGauge's managed Node runtime.
+- Fixed incomplete provider dependency trees being treated as ready. YouTube repair now detects and rebuilds partial `node_modules` state.
+- Tightened recommendation evidence validation so malformed topic-shift data and weak payoff evidence cannot become strong recommendations.
+
+YouTube remains a best-effort workflow. Local media remains the dependable fallback.
+
+### Verified
+
+- Real Windows 125% DPI qualification at 1536x864 logical and 1920x1080 physical resolution.
+- CUDA ASR qualification on RTX 4050-class hardware with the existing 6 GiB resource guard unchanged.
+- Real ClipGauge Local and Qwen3 4B benchmark completion without promoting the prior weak finalists.
+- Fresh-machine YouTube setup and repair without administrator rights, global Node, or manual PATH changes.
+
 ## [0.5.21] - 2026-09-18
 
 ClipGauge v0.5.21 keeps the YouTube provider self-test alive through native idle monitoring.
