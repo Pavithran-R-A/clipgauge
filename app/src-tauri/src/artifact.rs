@@ -20,6 +20,48 @@ fn read_stage(dir: &Path, name: &str) -> Result<Value, String> {
         .ok_or_else(|| format!("malformed {name} checkpoint"))
 }
 
+fn read_creator_overrides(dir: &Path) -> Result<Value, String> {
+    let path = dir.join("creator-overrides.json");
+    if !path.exists() {
+        return Ok(Value::Null);
+    }
+    let text = fs::read_to_string(path).map_err(|_| "could not read creator overrides")?;
+    let value: Value = serde_json::from_str(&text).map_err(|_| "malformed creator overrides")?;
+    if value.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || !value.get("clips").is_some_and(Value::is_object)
+    {
+        return Err("malformed creator overrides".to_string());
+    }
+    Ok(value)
+}
+
+fn apply_creator_title_overrides(stage: &mut Value, overrides: &Value) {
+    let Some(entries) = overrides.get("clips").and_then(Value::as_object) else {
+        return;
+    };
+    let Some(clips) = stage.get_mut("clips").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for clip in clips {
+        let Some(object) = clip.as_object_mut() else {
+            continue;
+        };
+        let Some(clip_id) = object.get("clip_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(title) = entries
+            .get(clip_id)
+            .and_then(Value::as_object)
+            .and_then(|entry| entry.get("title"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        object.insert("title".to_string(), Value::String(title.to_string()));
+        object.insert("title_source".to_string(), Value::String("user".to_string()));
+    }
+}
+
 pub fn render_artifact(home: &Path, job_id: &str, clip: u32) -> Result<PathBuf, String> {
     let dir = resolve_job_dir(home, job_id)?;
     let render = read_stage(&dir, "render")?;
@@ -108,6 +150,7 @@ fn artifact_status(job_dir: &Path, value: &mut Map<String, Value>) {
 
 pub fn job_results(home: &Path, job_id: &str) -> Result<Value, String> {
     let dir = resolve_job_dir(home, job_id)?;
+    let creator_overrides = read_creator_overrides(&dir)?;
     let ingest = read_stage(&dir, "ingest")?;
     let score = read_stage(&dir, "score")?;
     let enrich = read_stage(&dir, "enrich")?;
@@ -153,6 +196,9 @@ pub fn job_results(home: &Path, job_id: &str) -> Result<Value, String> {
             }
         }
     }
+    apply_creator_title_overrides(&mut score, &creator_overrides);
+    let mut enrich = enrich;
+    apply_creator_title_overrides(&mut enrich, &creator_overrides);
 
     if let Some(outputs) = render.get_mut("outputs").and_then(Value::as_array_mut) {
         for output in outputs {
@@ -277,7 +323,9 @@ pub fn export_clip(
 
 #[cfg(test)]
 mod tests {
-    use super::{export_clip, export_clip_to, job_results, render_artifact, source_media_artifact};
+    use super::{
+        export_clip, export_clip_to, job_results, render_artifact, source_media_artifact,
+    };
     use serde_json::json;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -426,6 +474,36 @@ mod tests {
             "Bait phrases were checked against the candidate transcript."
         );
         assert_eq!(result["outcome"], "SUCCESS_WITH_CLIPS");
+    }
+
+    #[test]
+    fn applies_creator_title_override_without_mutating_score_checkpoint() {
+        let home = fixture();
+        let job = home.join("jobs/20260818-155237-c6b118");
+        let score = json!({
+            "data": {
+                "outcome": "SUCCESS_WITH_CLIPS",
+                "clips": [{"clip_id": "clip-a", "title": "Generated", "title_source": "model"}]
+            }
+        });
+        let score_bytes = serde_json::to_vec(&score).unwrap();
+        fs::write(job.join("score.json"), &score_bytes).unwrap();
+        fs::write(
+            job.join("creator-overrides.json"),
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "job_id": "20260818-155237-c6b118",
+                "clips": {"clip-a": {"title": "Creator title", "updated_at": "2026-09-20T00:00:00Z"}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let result = job_results(&home, "20260818-155237-c6b118").unwrap();
+
+        assert_eq!(result["score"]["clips"][0]["title"], "Creator title");
+        assert_eq!(result["score"]["clips"][0]["title_source"], "user");
+        assert_eq!(fs::read(job.join("score.json")).unwrap(), score_bytes);
     }
 
     #[test]
