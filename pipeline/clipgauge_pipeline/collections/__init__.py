@@ -5,6 +5,7 @@ from .service import (
     delete_collection,
     list_collections,
     regenerate_ai_collections,
+    regenerate_smart_collections,
     reorder_collection,
     update_collection,
 )
@@ -16,4 +17,5 @@ __all__ = [
     "reorder_collection",
     "delete_collection",
     "regenerate_ai_collections",
+    "regenerate_smart_collections",
 ]

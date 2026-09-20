@@ -8,7 +8,7 @@ from clipgauge_pipeline.collections.service import (
     create_collection,
     delete_collection,
     list_collections,
-    regenerate_ai_collections,
+    regenerate_smart_collections,
     reorder_collection,
     update_collection,
 )
@@ -33,10 +33,16 @@ def _clips():
     return [{"start": 0.0, "end": 5.0, "summary": "First"}, {"start": 8.0, "end": 12.0, "summary": "Second"}]
 
 
-def test_ai_proposal_uses_stable_existing_clip_ids(tmp_path):
+def test_provider_proposal_uses_stable_existing_clip_ids(tmp_path):
     job = _job(tmp_path)
     clips = _clips()
-    result = regenerate_ai_collections(job, clips, category="knowledge")
+    ids = [stable_clip_id(clip, index) for index, clip in enumerate(clips)]
+    result = regenerate_smart_collections(
+        job,
+        clips,
+        category="knowledge",
+        group_provider=lambda *_: {"collections": [{"title": "Knowledge", "summary": "", "clip_ids": ids}]},
+    )
     assert len(result) == 1
     assert result[0]["source"] == "ai"
     assert result[0]["clip_ids"] == [stable_clip_id(clips[0], 0), stable_clip_id(clips[1], 1)]
