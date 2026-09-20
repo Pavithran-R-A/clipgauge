@@ -14,6 +14,9 @@ fn read_stage(dir: &Path, name: &str) -> Result<Value, String> {
         fs::read_to_string(&path).map_err(|_| format!("could not read {name} checkpoint"))?;
     let envelope: Value =
         serde_json::from_str(&text).map_err(|_| format!("malformed {name} checkpoint"))?;
+    if name == "collections" && envelope.get("collections").is_some() {
+        return Ok(envelope);
+    }
     envelope
         .get("data")
         .cloned()
@@ -504,6 +507,47 @@ mod tests {
         assert_eq!(result["score"]["clips"][0]["title"], "Creator title");
         assert_eq!(result["score"]["clips"][0]["title_source"], "user");
         assert_eq!(fs::read(job.join("score.json")).unwrap(), score_bytes);
+    }
+
+    #[test]
+    fn reads_python_creator_collection_state_after_mutation() {
+        let home = fixture();
+        let job = home.join("jobs/20260818-155237-c6b118");
+        fs::write(
+            job.join("score.json"),
+            serde_json::to_vec(&json!({
+                "data": {
+                    "outcome": "SUCCESS_WITH_CLIPS",
+                    "clips": [
+                        {"clip_id": "clip-a", "title": "A"},
+                        {"clip_id": "clip-b", "title": "B"}
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            job.join("collections.json"),
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "job_id": "20260818-155237-c6b118",
+                "collections": [{
+                    "id": "collection-a",
+                    "title": "Creator series",
+                    "clip_ids": ["clip-a", "clip-b"],
+                    "source": "manual",
+                    "user_edited": true,
+                    "render_path": null
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let result = job_results(&home, "20260818-155237-c6b118").unwrap();
+
+        assert_eq!(result["collections"]["collections"][0]["title"], "Creator series");
     }
 
     #[test]

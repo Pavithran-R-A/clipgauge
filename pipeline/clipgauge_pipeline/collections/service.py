@@ -62,6 +62,8 @@ def _load(job, clips: list[dict] | None = None) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"collections cannot be read: {protocol.safe_message(str(exc))}") from exc
+    if isinstance(value, dict) and isinstance(value.get("data"), dict) and "collections" in value["data"]:
+        value = value["data"]
     if not isinstance(value, dict) or value.get("schema_version") != COLLECTIONS_SCHEMA_VERSION:
         raise ValueError("unsupported collections schema")
     rows = value.get("collections")

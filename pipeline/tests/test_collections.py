@@ -68,6 +68,32 @@ def test_unknown_clip_id_is_rejected(tmp_path):
         create_collection(job, "Bad", ["clip-missing"], clips=_clips())
 
 
+def test_creator_service_reads_pipeline_collection_checkpoint(tmp_path):
+    job = _job(tmp_path)
+    clips = _clips()
+    ids = [stable_clip_id(clip, index) for index, clip in enumerate(clips)]
+    (job.dir / "collections.json").write_text(
+        json.dumps({
+            "stage": "collections",
+            "schema_version": 1,
+            "data": {
+                "schema_version": 1,
+                "job_id": job.id,
+                "collections": [{
+                    "id": "collection-stage",
+                    "title": "Stage series",
+                    "clip_ids": ids,
+                    "source": "ai",
+                    "user_edited": False,
+                }],
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    assert list_collections(job, clips)[0]["title"] == "Stage series"
+
+
 def test_render_collection_resolves_relative_render_paths_inside_job(tmp_path, monkeypatch):
     job = _job(tmp_path)
     clips_dir = job.dir / "clips"
