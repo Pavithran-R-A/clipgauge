@@ -10,7 +10,17 @@ vi.mock('../api', () => ({
     fileUrl: vi.fn((path: string) => `asset://${path}`),
     requestPlaybackUrl: vi.fn().mockResolvedValue('http://127.0.0.1:49152/media/test-token'),
     recordMediaEvent: vi.fn().mockRejectedValue(new Error('diagnostics unavailable')),
-    exportClip: vi.fn().mockResolvedValue('/Downloads/clip.mp4')
+    exportClip: vi.fn().mockResolvedValue('/Downloads/clip.mp4'),
+    getClipTitle: vi.fn().mockResolvedValue({ clip_id: 'clip-fixture', title: 'Generated', title_source: 'model' }),
+    setClipTitle: vi.fn().mockResolvedValue({ ok: true, clip_id: 'clip-fixture', title: 'Edited', title_source: 'user' }),
+    resetClipTitle: vi.fn().mockResolvedValue({ ok: true, clip_id: 'clip-fixture', title: 'Generated', title_source: 'model' }),
+    listCollections: vi.fn().mockResolvedValue({ ok: true, collections: [] }),
+    createCollection: vi.fn().mockResolvedValue({ ok: true }),
+    updateCollection: vi.fn().mockResolvedValue({ ok: true }),
+    deleteCollection: vi.fn().mockResolvedValue({ ok: true }),
+    reorderCollection: vi.fn().mockResolvedValue({ ok: true }),
+    regenerateCollections: vi.fn().mockResolvedValue({ ok: true, collections: [] }),
+    renderCollection: vi.fn().mockResolvedValue({ ok: true, path: '/managed/series.mp4' })
   }
 }))
 
@@ -27,6 +37,7 @@ vi.mock('./ClipEditor', () => ({
 }))
 
 const clip = {
+  clip_id: 'clip-fixture',
   start: 0,
   end: 10,
   score: 80,
@@ -38,6 +49,8 @@ const clip = {
   signals_missing: [],
   confidence: 'standard',
   summary: 'fixture clip',
+  title: 'Generated',
+  title_source: 'model' as const,
   arousal_pct: 0.5,
   heatmap_pct: null,
   curve_score: 0.7,
@@ -56,6 +69,34 @@ function results(output: Partial<RenderOutput>): JobResults {
     },
     events: { counts: {}, timeline: [], arousal_source: 'dsp-proxy' },
     candidates: { count: 1, effective_weights: {}, heatmap_present: false }
+  }
+}
+
+function creatorResults(): JobResults {
+  const first = { ...clip, clip_id: 'clip-first', title: 'First generated', start: 0 }
+  const second = { ...clip, clip_id: 'clip-second', title: 'Second generated', start: 20 }
+  return {
+    ...results({}),
+    score: { clips: [first, second], llm_mode: 'ollama', model: 'fixture', scored_count: 2 },
+    enrich: { clips: [first, second], category: 'knowledge' },
+    collections: {
+      collections: [{
+        id: 'collection-fixture',
+        title: 'Suggested series',
+        summary: 'Two related clips.',
+        clip_ids: ['clip-first', 'clip-second'],
+        source: 'ai',
+        user_edited: false,
+      }]
+    },
+    render: {
+      outputs: [
+        { clip: 0, clip_id: 'clip-first', path: null, artifact_status: 'missing', score: 80, best_platform: 'reels', duration: 10, words: 2, event_tags: 0 },
+        { clip: 1, clip_id: 'clip-second', path: null, artifact_status: 'missing', score: 80, best_platform: 'reels', duration: 10, words: 2, event_tags: 0 },
+      ],
+      emoji_ok: true,
+      caption_preset: 'classic'
+    }
   }
 }
 
@@ -234,6 +275,37 @@ describe('Review media trust states', () => {
 
     expect(screen.getByText('Unavailable')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'EXPORT MP4' })).not.toBeInTheDocument()
+  })
+
+  it('edits, saves, cancels, and resets a title by stable clip ID', async () => {
+    render(<Review results={results({})} onBack={vi.fn()} onRestyle={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit title' }))
+    const input = screen.getByRole('textbox', { name: 'Publishing title' })
+    fireEvent.change(input, { target: { value: 'Edited title' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(api.setClipTitle).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit title' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Publishing title' }), { target: { value: 'Edited title' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(api.setClipTitle).toHaveBeenCalledWith('20260818-155237-c6b118', 'clip-fixture', 'Edited title'))
+    expect(await screen.findByText('Edited by you')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Reset to generated' }))
+    await waitFor(() => expect(api.resetClipTitle).toHaveBeenCalledWith('20260818-155237-c6b118', 'clip-fixture'))
+  })
+
+  it('shows category and functional collection controls', () => {
+    render(<Review results={creatorResults()} onBack={vi.fn()} onRestyle={vi.fn()} />)
+
+    expect(screen.getByText('Content type · Knowledge')).toBeInTheDocument()
+    expect(screen.getByText('Suggested')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Create collection' }))
+    expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled()
+    const checkboxes = screen.getAllByRole('checkbox')
+    fireEvent.click(checkboxes[0])
+    fireEvent.click(checkboxes[1])
+    expect(screen.getByRole('button', { name: 'Create' })).toBeEnabled()
   })
 
   it('rejects duplicate output identities instead of choosing one clip', () => {

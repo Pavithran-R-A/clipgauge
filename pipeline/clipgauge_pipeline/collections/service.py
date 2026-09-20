@@ -93,6 +93,22 @@ def list_collections(job, clips: list[dict] | None = None) -> list[dict]:
     return list(_load(job, clips).get("collections", []))
 
 
+def set_collection_render_path(job, identifier: str, render_path: str, *, clips: list[dict] | None = None) -> dict:
+    value = _load(job, clips)
+    rows = []
+    found = False
+    for item in value["collections"]:
+        if item["id"] != identifier:
+            rows.append(item)
+            continue
+        found = True
+        rows.append({**item, "render_path": str(render_path)})
+    if not found:
+        raise ValueError("collection not found")
+    normalized = _save(job, {**value, "collections": rows}, clips)
+    return next(row for row in normalized["collections"] if row["id"] == identifier)
+
+
 def create_collection(
     job,
     title: str,

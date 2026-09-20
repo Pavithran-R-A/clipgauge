@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import { chooseExportDestination } from '../exportDestination'
 import { traceMedia } from '../mediaDiagnostics'
-import type { Clip, JobResults, RenderOutput } from '../types'
+import type { Clip, Collection, JobResults, RenderOutput } from '../types'
 import ClipEditor from './ClipEditor'
 import { isPlaybackUrl } from '../nativeValidation'
 import { friendlyErrorMessage } from '../errorMessaging'
@@ -36,6 +36,12 @@ const SIGNAL_LABELS: Record<string, string> = {
   arousal: 'vocal arousal',
   replay_heatmap: 'replay heatmap',
   visual: 'visual pass'
+}
+
+const CATEGORY_LABELS: Record<string, string> = {
+  auto: 'Auto',
+  knowledge: 'Knowledge',
+  entertainment: 'Entertainment',
 }
 
 function fmtTime(t: number): string {
@@ -101,6 +107,17 @@ function clipCountLabel(count: number): string {
   return `${count} clip${count === 1 ? '' : 's'}`
 }
 
+function categoryLabel(category: string | undefined): string {
+  const normalized = category?.trim().toLowerCase() || 'auto'
+  return CATEGORY_LABELS[normalized] ?? normalized.replace(/[-_]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function collectionSourceLabel(source: Collection['source']): string {
+  if (source === 'ai') return 'Suggested'
+  if (source === 'deterministic') return 'Deterministic fallback'
+  return 'Manual'
+}
+
 function scoringLocality(results: JobResults): string {
   const provider = results.score?.provider_kind ?? results.score?.llm_mode ?? ''
   return providerLocality(provider) === 'local' ? 'scored locally' : 'AI-assisted scoring'
@@ -141,6 +158,19 @@ export default function Review({ results, onBack, onRestyle }: Props) {
   const [mediaState, setMediaState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [mediaUrl, setMediaUrl] = useState<string | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
+  const [titleDraft, setTitleDraft] = useState('')
+  const [titleEditing, setTitleEditing] = useState(false)
+  const [titleBusy, setTitleBusy] = useState(false)
+  const [titleOverrides, setTitleOverrides] = useState<Record<string, { title: string; title_source: string }>>({})
+  const [collections, setCollections] = useState<Collection[]>(results.collections?.collections ?? [])
+  const [collectionDialogOpen, setCollectionDialogOpen] = useState(false)
+  const [collectionTitle, setCollectionTitle] = useState('New collection')
+  const [selectedCollectionClipIds, setSelectedCollectionClipIds] = useState<string[]>([])
+  const [collectionEditorId, setCollectionEditorId] = useState<string | null>(null)
+  const [collectionRenameId, setCollectionRenameId] = useState<string | null>(null)
+  const [collectionRenameDraft, setCollectionRenameDraft] = useState('')
+  const [creatorBusy, setCreatorBusy] = useState(false)
+  const [creatorError, setCreatorError] = useState<string | null>(null)
   const mountedRef = useRef(true)
   const styleChanged = restylePreset !== currentPreset || restyleCamera !== 'cut'
   const borderline = results.score?.borderline_candidates
@@ -154,6 +184,159 @@ export default function Review({ results, onBack, onRestyle }: Props) {
     const out = outputs[selected]
     return out ? pairForOutput(out, clips) : null
   }, [outputs, clips, selected])
+
+  const selectedClipId = pair?.scoreClip.clip_id ?? null
+  const titleOverride = selectedClipId ? titleOverrides[selectedClipId] : undefined
+  const selectedTitle = titleOverride?.title ?? pair?.scoreClip.title ?? ''
+  const selectedTitleSource = titleOverride?.title_source ?? pair?.scoreClip.title_source ?? 'deterministic'
+  const creatorClips = results.score?.clips ?? results.enrich?.clips ?? []
+
+  useEffect(() => {
+    setTitleDraft(selectedTitle)
+    setTitleEditing(false)
+  }, [selectedClipId, selectedTitle])
+
+  useEffect(() => {
+    setCollections(results.collections?.collections ?? [])
+  }, [results.job_id, results.collections])
+
+  function applyCollectionResult(result: Awaited<ReturnType<typeof api.listCollections>> | Awaited<ReturnType<typeof api.createCollection>>) {
+    if (result.collections) setCollections(result.collections)
+    if (result.collection) {
+      setCollections((current) => current.some((item) => item.id === result.collection?.id)
+        ? current.map((item) => item.id === result.collection?.id ? result.collection! : item)
+        : [...current, result.collection!])
+    }
+  }
+
+  async function saveTitle() {
+    if (!selectedClipId || !titleDraft.trim()) return
+    setTitleBusy(true)
+    setCreatorError(null)
+    try {
+      const result = await api.setClipTitle(results.job_id, selectedClipId, titleDraft.trim())
+      if (!mountedRef.current) return
+      setTitleOverrides((current) => ({
+        ...current,
+        [selectedClipId]: { title: result.title ?? titleDraft.trim(), title_source: result.title_source ?? 'user' },
+      }))
+      setTitleDraft(result.title ?? titleDraft.trim())
+      setTitleEditing(false)
+    } catch (error) {
+      if (mountedRef.current) setCreatorError(friendlyErrorMessage(error, 'Title could not be saved.'))
+    } finally {
+      if (mountedRef.current) setTitleBusy(false)
+    }
+  }
+
+  async function resetTitle() {
+    if (!selectedClipId) return
+    setTitleBusy(true)
+    setCreatorError(null)
+    try {
+      const result = await api.resetClipTitle(results.job_id, selectedClipId)
+      if (!mountedRef.current) return
+      setTitleOverrides((current) => ({
+        ...current,
+        [selectedClipId]: { title: result.title ?? pair?.scoreClip.title ?? '', title_source: result.title_source ?? 'model' },
+      }))
+      setTitleDraft(result.title ?? pair?.scoreClip.title ?? '')
+      setTitleEditing(false)
+    } catch (error) {
+      if (mountedRef.current) setCreatorError(friendlyErrorMessage(error, 'Title could not be reset.'))
+    } finally {
+      if (mountedRef.current) setTitleBusy(false)
+    }
+  }
+
+  async function createCollection() {
+    if (selectedCollectionClipIds.length < 2 || !collectionTitle.trim()) return
+    setCreatorBusy(true)
+    setCreatorError(null)
+    try {
+      const result = await api.createCollection(results.job_id, collectionTitle.trim(), selectedCollectionClipIds)
+      if (!mountedRef.current) return
+      applyCollectionResult(result)
+      setCollectionDialogOpen(false)
+      setCollectionTitle('New collection')
+      setSelectedCollectionClipIds([])
+    } catch (error) {
+      if (mountedRef.current) setCreatorError(friendlyErrorMessage(error, 'Collection could not be created.'))
+    } finally {
+      if (mountedRef.current) setCreatorBusy(false)
+    }
+  }
+
+  async function updateCollection(collection: Collection, title?: string, clipIds?: string[]) {
+    const nextClipIds = clipIds ?? collection.clip_ids
+    if (nextClipIds.length < 2) return
+    setCreatorBusy(true)
+    setCreatorError(null)
+    try {
+      const result = await api.updateCollection(results.job_id, collection.id, title, nextClipIds)
+      if (!mountedRef.current) return
+      applyCollectionResult(result)
+      if (result.collection === undefined) {
+        setCollections((current) => current.map((item) => item.id === collection.id
+          ? { ...item, ...(title === undefined ? {} : { title }), clip_ids: [...nextClipIds], user_edited: true, source: 'manual' }
+          : item))
+      }
+      setCollectionEditorId(null)
+      setCollectionRenameId(null)
+    } catch (error) {
+      if (mountedRef.current) setCreatorError(friendlyErrorMessage(error, 'Collection could not be updated.'))
+    } finally {
+      if (mountedRef.current) setCreatorBusy(false)
+    }
+  }
+
+  async function deleteCollection(collection: Collection) {
+    setCreatorBusy(true)
+    setCreatorError(null)
+    try {
+      await api.deleteCollection(results.job_id, collection.id)
+      if (mountedRef.current) setCollections((current) => current.filter((item) => item.id !== collection.id))
+    } catch (error) {
+      if (mountedRef.current) setCreatorError(friendlyErrorMessage(error, 'Collection could not be deleted.'))
+    } finally {
+      if (mountedRef.current) setCreatorBusy(false)
+    }
+  }
+
+  async function moveCollectionClip(collection: Collection, index: number, direction: -1 | 1) {
+    const target = index + direction
+    if (target < 0 || target >= collection.clip_ids.length) return
+    const clipIds = [...collection.clip_ids]
+    ;[clipIds[index], clipIds[target]] = [clipIds[target], clipIds[index]]
+    await updateCollection(collection, undefined, clipIds)
+  }
+
+  async function renderCollection(collection: Collection) {
+    setCreatorBusy(true)
+    setCreatorError(null)
+    try {
+      const result = await api.renderCollection(results.job_id, collection.id)
+      if (!mountedRef.current) return
+      if (result.path) setCollections((current) => current.map((item) => item.id === collection.id ? { ...item, render_path: result.path } : item))
+    } catch (error) {
+      if (mountedRef.current) setCreatorError(friendlyErrorMessage(error, 'Collection render could not be completed.'))
+    } finally {
+      if (mountedRef.current) setCreatorBusy(false)
+    }
+  }
+
+  async function regenerateCollections() {
+    setCreatorBusy(true)
+    setCreatorError(null)
+    try {
+      const result = await api.regenerateCollections(results.job_id)
+      if (mountedRef.current) applyCollectionResult(result)
+    } catch (error) {
+      if (mountedRef.current) setCreatorError(friendlyErrorMessage(error, 'Collection suggestions could not be regenerated.'))
+    } finally {
+      if (mountedRef.current) setCreatorBusy(false)
+    }
+  }
 
   const artifactAvailable = Boolean(
     pair?.out.path && (pair.out.artifact_status === undefined || pair.out.artifact_status === 'available')
@@ -302,7 +485,44 @@ export default function Review({ results, onBack, onRestyle }: Props) {
         })}
       </div>
       <OtherMoments moments={borderline} jobId={results.job_id} />
-      {results.collections?.collections?.length ? <section className="card-surface" aria-labelledby="collections-heading"><p className="section-eyebrow">Series / Collections</p><h2 id="collections-heading">Suggested collections</h2>{results.collections.collections.map((collection) => <div className="ledger-row" key={collection.id}><div><strong>{collection.title}</strong><span className="ledger-reason">{collection.clip_ids.length} clips · {collection.source}</span></div></div>)}</section> : null}
+      <section className="card-surface" aria-labelledby="collections-heading">
+        <p className="section-eyebrow">Series / Collections</p>
+        <div className="page-header" style={{ marginBottom: 12 }}>
+          <div>
+            <h2 id="collections-heading">Collections</h2>
+            <p className="audit-fine">Content type {'·'} {categoryLabel(results.enrich?.category ?? results.collections?.category)}</p>
+          </div>
+          <div className="monitor-actions">
+            <button type="button" className="button-secondary" onClick={() => { setCollectionDialogOpen(true); setCreatorError(null) }}>Create collection</button>
+            <button type="button" className="button-secondary" onClick={() => void regenerateCollections()} disabled={creatorBusy}>Regenerate suggestions</button>
+          </div>
+        </div>
+        {creatorError && <p className="field-help" role="alert">{creatorError}</p>}
+        {collections.length === 0 && <p className="audit-fine">No collections yet.</p>}
+        {collections.map((collection) => {
+          const editingClips = collectionEditorId === collection.id
+          const renaming = collectionRenameId === collection.id
+          return (
+            <div className="ledger-row" key={collection.id}>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                {renaming ? <div className="monitor-actions"><input aria-label={`Rename ${collection.title}`} value={collectionRenameDraft} onChange={(event) => setCollectionRenameDraft(event.target.value)} /><button type="button" className="button-secondary" onClick={() => void updateCollection(collection, collectionRenameDraft.trim())} disabled={!collectionRenameDraft.trim() || creatorBusy}>Save name</button><button type="button" className="button-quiet" onClick={() => setCollectionRenameId(null)}>Cancel</button></div> : <strong>{collection.title}</strong>}
+                <span className="ledger-reason">{collection.clip_ids.length} clips Â· <span className="chip chip-green">{collectionSourceLabel(collection.source)}</span></span>
+                {collection.summary && <span className="ledger-reason">{collection.summary}</span>}
+                <div className="monitor-actions">
+                  <button type="button" className="button-quiet" onClick={() => { setCollectionRenameId(collection.id); setCollectionRenameDraft(collection.title) }}>Rename</button>
+                  <button type="button" className="button-quiet" onClick={() => { setCollectionEditorId(editingClips ? null : collection.id); setSelectedCollectionClipIds(collection.clip_ids) }}>Add clip</button>
+                  <button type="button" className="button-quiet" onClick={() => void renderCollection(collection)} disabled={creatorBusy}>Render series</button>
+                  <button type="button" className="button-quiet" onClick={() => void deleteCollection(collection)} disabled={creatorBusy}>Delete</button>
+                </div>
+                {editingClips && <div className="choice-section">{creatorClips.filter((clip) => clip.clip_id).map((clip) => { const clipId = clip.clip_id!; return <label key={clipId} className="sig"><input type="checkbox" checked={selectedCollectionClipIds.includes(clipId)} onChange={(event) => setSelectedCollectionClipIds((current) => event.target.checked ? [...new Set([...current, clipId])] : current.filter((id) => id !== clipId))} />{clip.title ?? clipId}</label> })}<button type="button" className="button-secondary" onClick={() => void updateCollection(collection, undefined, selectedCollectionClipIds)} disabled={selectedCollectionClipIds.length < 2 || creatorBusy}>Save clips</button></div>}
+                <ol className="ledger">{collection.clip_ids.map((clipId, index) => { const clip = creatorClips.find((item) => item.clip_id === clipId); return <li className="ledger-row" key={clipId}><span>{clip?.title ?? clipId}</span><div className="monitor-actions"><button type="button" className="button-quiet" onClick={() => void updateCollection(collection, undefined, collection.clip_ids.filter((id) => id !== clipId))} disabled={collection.clip_ids.length <= 2 || creatorBusy}>Remove</button><button type="button" className="button-quiet" onClick={() => void moveCollectionClip(collection, index, -1)} disabled={index === 0 || creatorBusy}>Move up</button><button type="button" className="button-quiet" onClick={() => void moveCollectionClip(collection, index, 1)} disabled={index === collection.clip_ids.length - 1 || creatorBusy}>Move down</button></div></li> })}</ol>
+                {collection.render_path && <div className="monitor-actions"><video className="monitor" controls playsInline src={api.fileUrl(collection.render_path)} /><span className="mono export-path">{collection.render_path}</span></div>}
+              </div>
+            </div>
+          )
+        })}
+      </section>
+      {collectionDialogOpen && <div className="modal-scrim" role="presentation"><section className="modal" role="dialog" aria-modal="true" aria-labelledby="create-collection-heading"><div className="modal-head"><div><p className="section-eyebrow">Manual collection</p><h2 id="create-collection-heading">Create collection</h2></div><button type="button" className="button-quiet" onClick={() => setCollectionDialogOpen(false)}>Close</button></div><label className="field-stack">Collection title<input value={collectionTitle} onChange={(event) => setCollectionTitle(event.target.value)} /></label><div className="choice-section">{creatorClips.filter((clip) => clip.clip_id).map((clip) => { const clipId = clip.clip_id!; return <label key={clipId} className="sig"><input type="checkbox" checked={selectedCollectionClipIds.includes(clipId)} onChange={(event) => setSelectedCollectionClipIds((current) => event.target.checked ? [...new Set([...current, clipId])] : current.filter((id) => id !== clipId))} />{clip.title ?? clipId}</label> })}</div><div className="monitor-actions"><button type="button" className="button-primary" onClick={() => void createCollection()} disabled={creatorBusy || selectedCollectionClipIds.length < 2 || !collectionTitle.trim()}>Create</button><button type="button" className="button-secondary" onClick={() => setCollectionDialogOpen(false)}>Cancel</button></div></section></div>}
 
       {pair && (
         <div className="bay">
@@ -394,7 +614,10 @@ export default function Review({ results, onBack, onRestyle }: Props) {
                 ))}
               </div>
             </div>
-            {pair.scoreClip.title && <><h2 className="audit-title">{pair.scoreClip.title}</h2><p className="audit-fine">Publishing title · {pair.scoreClip.title_source ?? 'deterministic'}</p>{pair.scoreClip.short_description && <p className="audit-summary">{pair.scoreClip.short_description}</p>}</>}
+            {selectedClipId && <div className="title-editor">
+              <h2 className="audit-title">{selectedTitle}</h2>
+              {titleEditing ? <div className="monitor-actions"><label className="field-stack">Publishing title<input aria-label="Publishing title" value={titleDraft} maxLength={120} onChange={(event) => setTitleDraft(event.target.value)} /></label><button type="button" className="button-primary" onClick={() => void saveTitle()} disabled={titleBusy || !titleDraft.trim()}>Save</button><button type="button" className="button-secondary" onClick={() => { setTitleDraft(selectedTitle); setTitleEditing(false) }} disabled={titleBusy}>Cancel</button></div> : <><p className="audit-fine">{selectedTitleSource === 'user' ? 'Edited by you' : <>Publishing title {'·'} {selectedTitleSource}</>}</p><div className="monitor-actions"><button type="button" className="button-secondary" onClick={() => { setTitleDraft(selectedTitle); setTitleEditing(true) }}>Edit title</button><button type="button" className="button-quiet" onClick={() => void resetTitle()} disabled={titleBusy}>Reset to generated</button></div></>}
+            </div>}
             <div className="audit-tier"><span>Quality tier</span><strong>{qualityTier(Number(pair.scoreClip.recommendation_score ?? pair.scoreClip.score))}</strong><span>Recommendation confidence</span><strong>{confidenceLabel(pair.scoreClip.confidence)}</strong><span>Platform fit</span><strong>{Math.round(pair.scoreClip.platform_score ?? pair.scoreClip.score)}/100</strong></div>
             <p className="audit-score-note">This is a 0–100 ranking signal, not a probability.</p>
             <p className="audit-summary">{pair.scoreClip.summary}</p>

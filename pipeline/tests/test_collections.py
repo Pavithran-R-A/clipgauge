@@ -100,4 +100,5 @@ def test_render_collection_resolves_relative_render_paths_inside_job(tmp_path, m
 
     assert output == job.dir / "collections" / "Relative-Paths.mp4"
     assert output.read_bytes() == b"compiled"
+    assert list_collections(job, clips)[0]["render_path"] == str(output)
     assert not list((job.dir / "collections").glob(".*.txt"))

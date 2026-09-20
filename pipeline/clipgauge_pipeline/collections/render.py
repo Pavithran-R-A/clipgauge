@@ -10,7 +10,7 @@ from ..render import ffmpeg_bin
 from ..ingest import normalize
 from ..enrich.stage import stable_clip_id
 from .model import safe_name
-from .service import list_collections
+from .service import list_collections, set_collection_render_path
 
 
 def _clip_paths(job, clips: list[dict], clip_ids: list[str]) -> list[Path]:
@@ -61,6 +61,7 @@ def render_collection(job, identifier: str, clips: list[dict]) -> Path:
         if not probe.has_audio or probe.duration_sec <= 0:
             raise ValueError("compiled collection has no verified audio/video duration")
         temporary.replace(target)
+        set_collection_render_path(job, identifier, str(target), clips=clips)
         return target
     finally:
         list_path.unlink(missing_ok=True)
