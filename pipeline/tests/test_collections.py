@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,8 @@ from clipgauge_pipeline.collections.service import (
     reorder_collection,
     update_collection,
 )
+from clipgauge_pipeline.collections.render import render_collection
+from clipgauge_pipeline.collections import render as collection_render
 from clipgauge_pipeline.enrich.stage import stable_clip_id
 from clipgauge_pipeline.ingest.manifest import default_manifest
 from clipgauge_pipeline.jobs import queue
@@ -57,3 +60,38 @@ def test_unknown_clip_id_is_rejected(tmp_path):
     job = _job(tmp_path)
     with pytest.raises(ValueError):
         create_collection(job, "Bad", ["clip-missing"], clips=_clips())
+
+
+def test_render_collection_resolves_relative_render_paths_inside_job(tmp_path, monkeypatch):
+    job = _job(tmp_path)
+    clips_dir = job.dir / "clips"
+    clips_dir.mkdir()
+    (clips_dir / "clip_00.mp4").write_bytes(b"first")
+    (clips_dir / "clip_01.mp4").write_bytes(b"second")
+    clips = [
+        {"start": 0.0, "end": 5.0, "summary": "First", "render_path": "clips/clip_00.mp4"},
+        {"start": 8.0, "end": 12.0, "summary": "Second", "render_path": "clips/clip_01.mp4"},
+    ]
+    ids = [stable_clip_id(clip, index) for index, clip in enumerate(clips)]
+    created = create_collection(job, "Relative Paths", list(reversed(ids)), clips=clips)
+
+    def fake_run(command, **_kwargs):
+        list_path = Path(command[command.index("-i") + 1])
+        assert list_path.exists()
+        temporary = Path(command[-1])
+        temporary.write_bytes(b"compiled")
+        return type("Completed", (), {"returncode": 0, "stderr": ""})()
+
+    monkeypatch.setattr(collection_render.ffmpeg_bin, "ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(collection_render.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        collection_render.normalize,
+        "probe",
+        lambda _path: type("Probe", (), {"has_audio": True, "duration_sec": 10.0})(),
+    )
+
+    output = render_collection(job, created["id"], clips)
+
+    assert output == job.dir / "collections" / "Relative-Paths.mp4"
+    assert output.read_bytes() == b"compiled"
+    assert not list((job.dir / "collections").glob(".*.txt"))

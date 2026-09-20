@@ -23,8 +23,9 @@ def _clip_paths(job, clips: list[dict], clip_ids: list[str]) -> list[Path]:
         raw = clip.get("render_path") or clip.get("path")
         if not raw:
             raise ValueError(f"collection clip {identifier} has no rendered output")
-        candidate = Path(str(raw)).resolve()
         root = job.dir.resolve()
+        raw_path = Path(str(raw))
+        candidate = (root / raw_path if not raw_path.is_absolute() else raw_path).resolve()
         if root not in candidate.parents or not candidate.is_file():
             raise ValueError("collection clip is outside the managed job directory")
         paths.append(candidate)
