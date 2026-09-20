@@ -26,6 +26,7 @@
         "enable": true,
         "scope": [
           "$HOME/.clipgauge/jobs/*/clips/**/*",
+          "$HOME/.clipgauge/jobs/*/collections/**/*",
           "$HOME/.clipgauge/jobs/*/media*.mp4",
           "$HOME/.clipgauge/jobs/*/overlays/**/*",
           "$HOME/.clipgauge/ig_thumbs/**/*"
