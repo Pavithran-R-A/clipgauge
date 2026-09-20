@@ -188,6 +188,10 @@ export interface Clip {
   music: MusicBrief | null
   t1_raw?: Record<string, unknown>
   ledger?: ClipLedger
+  title?: string
+  short_description?: string
+  title_source?: 'model' | 'deterministic' | string
+  description_source?: 'model' | 'deterministic' | string
 }
 
 export type ArtifactStatus =
@@ -244,6 +248,8 @@ export interface JobResults {
     provider_kind?: string
     capabilities?: ProviderCapabilities
   } | null
+  enrich?: { clips: Clip[]; soft_failure?: boolean; warnings?: string[]; category?: string } | null
+  collections?: { collections: Array<{ id: string; title: string; clip_ids: string[]; source: string; user_edited: boolean }> } | null
   render: { outputs: RenderOutput[]; emoji_ok: boolean; caption_preset: string } | null
   events: { counts: Record<string, number>; timeline: unknown[]; arousal_source: string } | null
   candidates: { count: number; effective_weights: Record<string, number>; heatmap_present: boolean } | null

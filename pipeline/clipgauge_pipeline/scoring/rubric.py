@@ -184,6 +184,7 @@ def t1_prompt(transcript_text: str, context: dict) -> str:
     numbers it will later be checked against. Judge and evidence stay
     independent; that's what makes the cross-validation meaningful."""
     events_desc = context.get("events_desc", "none detected")
+    category_guidance = context.get("category_guidance")
     candidate_evidence = context.get("candidate_evidence")
     hint_lines: list[str] = []
     if isinstance(candidate_evidence, dict):
@@ -213,6 +214,7 @@ def t1_prompt(transcript_text: str, context: dict) -> str:
         f"{transcript_text}\n\n"
         f"{hints}"
         f"Audio events detected in this span: {events_desc}\n\n"
+        f"Content-category guidance: {category_guidance or 'auto; preserve existing ClipGauge semantics.'}\n\n"
         "Score each dimension honestly. Most clips are mediocre; 8+ on any "
         "dimension should be rare. hook rates ONLY the first ~3 seconds. "
         "shock is about content (surprising/taboo), independent of hook. "

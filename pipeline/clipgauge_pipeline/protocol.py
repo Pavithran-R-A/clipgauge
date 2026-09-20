@@ -21,6 +21,8 @@ DISPLAY_STAGES = {
     "events": "Understanding audio",
     "candidates": "Finding strong moments",
     "score": "Scoring clips",
+    "enrich": "Writing clip titles",
+    "collections": "Grouping a series",
     "camera": "Smart reframing",
     "render": "Creating clips",
 }

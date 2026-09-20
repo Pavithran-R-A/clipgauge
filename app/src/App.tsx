@@ -433,7 +433,7 @@ export default function App() {
     return () => { disposed = true; unlistenRef.current?.() }
   }, [loadResults, refreshJobs])
 
-  const startRun = useCallback(async (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, browserSession?: string, qualityMode = 'private', outputPreference = 'recommended') => {
+  const startRun = useCallback(async (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, browserSession?: string, qualityMode = 'private', outputPreference = 'recommended', subtitlePath?: string, category?: string) => {
     setRunning(true)
     setRunState('RUNNING')
     const startedAt = Date.now()
@@ -484,7 +484,11 @@ export default function App() {
       }
       if (warnings.length) setRunNotice(`Before you start: ${warnings.slice(0, 2).map((check) => check.message).join(' ')}`)
       if (!mountedRef.current) return
-      await api.runJob(source, provider, captions, resolvedModel, resolvedEndpoint, resolvedAuth, secretHeader, browserSession, qualityMode, outputPreference)
+      if (subtitlePath || category) {
+        await api.runJob(source, provider, captions, resolvedModel, resolvedEndpoint, resolvedAuth, secretHeader, browserSession, qualityMode, outputPreference, subtitlePath, category)
+      } else {
+        await api.runJob(source, provider, captions, resolvedModel, resolvedEndpoint, resolvedAuth, secretHeader, browserSession, qualityMode, outputPreference)
+      }
     } catch (error) {
       if (!mountedRef.current) return
       const elapsed = lastElapsedSecondsRef.current ?? (runStartedAtRef.current ? Math.max(0, Math.floor((Date.now() - runStartedAtRef.current) / 1000)) : 0)

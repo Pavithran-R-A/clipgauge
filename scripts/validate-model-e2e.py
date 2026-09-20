@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 ANALYSIS_STAGES = {"ingest", "asr", "diarize", "events", "candidates", "score"}
+POST_ANALYSIS_STAGES = {"enrich", "collections"}
 RENDER_STAGES = {"camera", "render"}
 
 
@@ -44,6 +45,9 @@ def main() -> int:
     missing = RENDER_STAGES - observed
     if missing:
         raise SystemExit(f"model E2E is missing render stages: {sorted(missing)}")
+    missing = POST_ANALYSIS_STAGES - observed
+    if missing:
+        raise SystemExit(f"model E2E is missing metadata stages: {sorted(missing)}")
     if not args.output.is_file() or args.output.stat().st_size <= 0:
         raise SystemExit(f"model E2E output is missing or empty: {args.output}")
 

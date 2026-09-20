@@ -2,6 +2,21 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.6.0] - Unreleased
+
+ClipGauge v0.6.0 adds the capability suite on top of the immutable v0.5.22 baseline.
+
+### Added
+
+- Reusable SRT and WebVTT subtitle input, platform caption reuse, and Bilibili ingest through the managed downloader.
+- Bounded content-category guidance, finalist titles and descriptions, and validated manual or proposed collections.
+- Persistent MCP tools, optional loopback-first FastAPI serving, and non-root headless container packaging.
+
+### Compatibility
+
+- Existing multimodal candidate synthesis remains authoritative.
+- Existing job databases, checkpoints, settings migration, resource guards, and v0.5.22 tag integrity remain preserved.
+
 ## [0.5.22] - 2026-09-18
 
 ClipGauge v0.5.22 records the merged Setup, YouTube installation, and recommendation-quality stabilization work.

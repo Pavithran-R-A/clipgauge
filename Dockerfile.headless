@@ -1,0 +1,26 @@
+FROM python:3.12-slim
+
+ENV CLIPGAUGE_HOME=/data/.clipgauge \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 10001 clipgauge
+
+WORKDIR /opt/clipgauge
+COPY pipeline/ /opt/clipgauge/
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir ".[headless]"
+
+RUN mkdir -p /data/.clipgauge \
+    && chown -R clipgauge:clipgauge /opt/clipgauge /data
+USER clipgauge
+
+EXPOSE 8732
+VOLUME ["/data/.clipgauge"]
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8732/v1/health', timeout=3)"
+
+ENTRYPOINT ["clipgauge"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "8732"]

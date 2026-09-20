@@ -12,7 +12,7 @@ export function creatorHeadline(state: CreatorRunState): string {
   return HEADLINES[state]
 }
 
-export const YOUTUBE_HELPER_COPY = 'YouTube links are best-effort and depend on current YouTube playback rules. Import a local video file if a public link is rejected.'
+export const YOUTUBE_HELPER_COPY = 'YouTube and Bilibili links depend on public availability. Import a local video file if a link is rejected.'
 
 export function providerHelperCopy(provider: string): string {
   switch (provider) {
@@ -32,6 +32,7 @@ export function providerHelperCopy(provider: string): string {
   }
 }
 
-export function sourceKind(source: string): 'youtube' | 'local' {
-  return /^https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be)\//i.test(source.trim()) ? 'youtube' : 'local'
+export function sourceKind(source: string): 'youtube' | 'bilibili' | 'local' {
+  if (/^https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be)\//i.test(source.trim())) return 'youtube'
+  return /^https?:\/\/(?:www\.)?(?:bilibili\.com|b23\.tv)\//i.test(source.trim()) ? 'bilibili' : 'local'
 }

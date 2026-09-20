@@ -302,6 +302,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
         })}
       </div>
       <OtherMoments moments={borderline} jobId={results.job_id} />
+      {results.collections?.collections?.length ? <section className="card-surface" aria-labelledby="collections-heading"><p className="section-eyebrow">Series / Collections</p><h2 id="collections-heading">Suggested collections</h2>{results.collections.collections.map((collection) => <div className="ledger-row" key={collection.id}><div><strong>{collection.title}</strong><span className="ledger-reason">{collection.clip_ids.length} clips · {collection.source}</span></div></div>)}</section> : null}
 
       {pair && (
         <div className="bay">
@@ -393,6 +394,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
                 ))}
               </div>
             </div>
+            {pair.scoreClip.title && <><h2 className="audit-title">{pair.scoreClip.title}</h2><p className="audit-fine">Publishing title · {pair.scoreClip.title_source ?? 'deterministic'}</p>{pair.scoreClip.short_description && <p className="audit-summary">{pair.scoreClip.short_description}</p>}</>}
             <div className="audit-tier"><span>Quality tier</span><strong>{qualityTier(Number(pair.scoreClip.recommendation_score ?? pair.scoreClip.score))}</strong><span>Recommendation confidence</span><strong>{confidenceLabel(pair.scoreClip.confidence)}</strong><span>Platform fit</span><strong>{Math.round(pair.scoreClip.platform_score ?? pair.scoreClip.score)}/100</strong></div>
             <p className="audit-score-note">This is a 0–100 ranking signal, not a probability.</p>
             <p className="audit-summary">{pair.scoreClip.summary}</p>

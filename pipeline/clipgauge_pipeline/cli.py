@@ -29,13 +29,15 @@ YOUTUBE_TEST_HEARTBEAT_SECONDS = 2.0
 
 def _stages() -> list[queue.Stage]:
     # Grows per milestone: ingest → asr → diarize → events → candidates →
-    # score → camera → render. Stage imports are deferred so `clipgauge
+    # score → enrich → collections → camera → render. Stage imports are deferred so `clipgauge
     # jobs` doesn't pay the torch import tax.
     from .asr.stage import AsrStage
     from .camera.stage import CameraStage
     from .candidates.stage import CandidatesStage
     from .diarize.stage import DiarizeStage
     from .events.stage import EventsStage
+    from .enrich.stage import EnrichStage
+    from .collections.stage import CollectionsStage
     from .ingest.stage import IngestStage
     from .render.stage import RenderStage
     from .scoring.stage import ScoreStage
@@ -47,6 +49,8 @@ def _stages() -> list[queue.Stage]:
         EventsStage(),
         CandidatesStage(),
         ScoreStage(),
+        EnrichStage(),
+        CollectionsStage(),
         CameraStage(),
         RenderStage(),
     ]
@@ -833,6 +837,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     settings.quality_mode = quality_mode
     if args.output_preference:
         settings.output_preference = config.validate_output_preference(args.output_preference)
+    if args.category:
+        settings.content_category = config.validate_content_category(args.category)
     if args.camera:
         settings.camera.speaker_change = args.camera
     if args.cookies_from_browser:
@@ -841,7 +847,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.allow_cpu_asr_fallback:
         settings.allow_cpu_asr_fallback = True
     try:
-        job = queue.create_job(source_type, source, json.dumps(settings.to_json()))
+        from .ingest.manifest import default_manifest
+        input_manifest = default_manifest(source_type, source)
+        if args.subtitle:
+            input_manifest["subtitle"].update({"mode": "external", "requested_path": args.subtitle})
+        job = queue.create_job(
+            source_type,
+            source,
+            json.dumps(settings.to_json()),
+            input_manifest=input_manifest,
+        )
     except Exception as err:  # noqa: BLE001 — pre-job protocol boundary
         return _preflight_terminal(args.jsonl, None, "JOB_CREATE_FAILED", f"Could not create a pipeline job: {protocol.safe_message(str(err))}", True)
     return _execute(job, args.jsonl)
@@ -885,6 +900,25 @@ def cmd_resume(args: argparse.Namespace) -> int:
             conn.execute("UPDATE jobs SET settings_json = ? WHERE id = ?", (new_json, job.id))
         job = queue.get_job(args.job_id)
     return _execute(job, args.jsonl, stop_after=args.stop_after)
+
+
+def cmd_mcp(args: argparse.Namespace) -> int:
+    from .mcp_server import serve_stdio
+
+    return serve_stdio()
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    from .server.app import create_app
+
+    token = os.environ.get("CLIPGAUGE_SERVER_TOKEN")
+    if args.token_stdin:
+        token = sys.stdin.readline().strip()
+    app = create_app(host=args.host, token=token, cors_origins=args.allow_origin, import_roots=args.import_root)
+    import uvicorn
+
+    uvicorn.run(app, host=args.host, port=args.port, log_config=None)
+    return 0
 
 
 def _execute(job: queue.Job, jsonl: bool, *, stop_after: str | None = None) -> int:
@@ -1239,6 +1273,8 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--camera", choices=["cut", "pan", "locked"], default=None)
     p_run.add_argument("--cookies-from-browser", choices=sorted(__import__("clipgauge_pipeline.ingest.ytdlp", fromlist=["SUPPORTED_BROWSER_SESSIONS"]).SUPPORTED_BROWSER_SESSIONS), default=None, help="explicitly use a supported browser session for authenticated video access")
     p_run.add_argument("--allow-cpu-asr-fallback", action="store_true", help="explicitly allow slower CPU speech fallback")
+    p_run.add_argument("--subtitle", default=None, help="optional external SRT or WebVTT subtitle file")
+    p_run.add_argument("--category", choices=config.CONTENT_CATEGORIES, default=None, help="optional content category guidance")
     p_run.set_defaults(fn=cmd_run)
 
     p_resume = sub.add_parser("resume", help="resume a job from its checkpoints")
@@ -1257,6 +1293,17 @@ def main(argv: list[str] | None = None) -> int:
     p_resume.add_argument("--allow-cpu-asr-fallback", action="store_true", help="explicitly allow slower CPU speech fallback")
     p_resume.add_argument("--stop-after", choices=["ingest", "asr", "diarize", "events", "candidates", "score", "camera", "render"], default=None, help=argparse.SUPPRESS)
     p_resume.set_defaults(fn=cmd_resume)
+
+    p_mcp = sub.add_parser("mcp", help="serve the persistent ClipGauge MCP interface over stdio")
+    p_mcp.set_defaults(fn=cmd_mcp)
+
+    p_serve = sub.add_parser("serve", help="serve the optional loopback-first headless API")
+    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("--port", type=int, default=8732)
+    p_serve.add_argument("--token-stdin", action="store_true", help=argparse.SUPPRESS)
+    p_serve.add_argument("--allow-origin", action="append", default=[])
+    p_serve.add_argument("--import-root", action="append", default=[])
+    p_serve.set_defaults(fn=cmd_serve)
 
     p_jobs = sub.add_parser("jobs", help="list jobs")
     p_jobs.set_defaults(fn=cmd_jobs)

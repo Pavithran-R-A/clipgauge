@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     title TEXT,
     status TEXT NOT NULL DEFAULT 'pending',  -- pending|running|done|failed
     error TEXT,
-    settings_json TEXT NOT NULL
+    settings_json TEXT NOT NULL,
+    input_json TEXT
 );
 CREATE TABLE IF NOT EXISTS stage_runs (
     job_id TEXT NOT NULL,
@@ -63,6 +64,7 @@ class Job:
     status: str
     error: str | None
     settings_json: str
+    input_json: str | None
 
     @property
     def dir(self) -> Path:
@@ -74,6 +76,9 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(config.db_path(), timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "input_json" not in columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN input_json TEXT")
     return conn
 
 
@@ -87,24 +92,34 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         status=row["status"],
         error=row["error"],
         settings_json=row["settings_json"],
+        input_json=row["input_json"],
     )
 
 
-def create_job(source_type: str, source: str, settings_json: str) -> Job:
+def create_job(source_type: str, source: str, settings_json: str, input_manifest: dict[str, Any] | None = None) -> Job:
     if source_type not in ("url", "file"):
         raise ValueError(f"bad source_type {source_type!r}")
     job_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO jobs (id, created_at, source_type, source, status, settings_json)"
-            " VALUES (?, ?, ?, ?, 'pending', ?)",
-            (job_id, time.time(), source_type, source, settings_json),
+            "INSERT INTO jobs (id, created_at, source_type, source, status, settings_json, input_json)"
+            " VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+            (
+                job_id,
+                time.time(),
+                source_type,
+                source,
+                settings_json,
+                json.dumps(input_manifest, ensure_ascii=False, sort_keys=True) if input_manifest else None,
+            ),
         )
     job = get_job(job_id)
     assert job is not None
     job.dir.mkdir(parents=True, exist_ok=True)
     # Snapshot settings into the job dir so resume never picks up new defaults.
     _atomic_write_json(job.dir / "settings.json", json.loads(settings_json))
+    if input_manifest is not None:
+        _atomic_write_json(job.dir / "input.json", input_manifest)
     return job
 
 
@@ -406,8 +421,11 @@ class Stage:
                     "provider_capabilities",
                     "quality_mode",
                     "output_preference",
+                    "content_category",
                 )
             }
+        if self.name in {"enrich", "collections"}:
+            return {"content_category": settings.get("content_category", "auto")}
         if self.name == "camera":
             return {"camera": settings.get("camera")}
         if self.name == "render":
@@ -452,6 +470,16 @@ def _dependency_fingerprint(stage: Stage, ctx: StageContext, prior: dict[str, di
         "type": ctx.job.source_type,
         "source": ctx.job.source,
     }
+    try:
+        raw_input_json = getattr(ctx.job, "input_json", None)
+        input_value = json.loads(raw_input_json) if raw_input_json else None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        input_value = None
+    if isinstance(input_value, dict):
+        subtitle = input_value.get("subtitle")
+        if isinstance(subtitle, dict):
+            source_identity["subtitle_mode"] = subtitle.get("mode")
+            source_identity["subtitle_sha256"] = subtitle.get("sha256")
     if ctx.job.source_type == "file":
         source_path = Path(ctx.job.source)
         try:
@@ -538,6 +566,9 @@ def run_stages(
     results: dict[str, dict] = {}
     set_job_status(job.id, "running")
     for stage in stage_list:
+        if (job.dir / "cancel.requested").exists():
+            set_job_status(job.id, "failed", "Job cancelled.")
+            raise StageError("The job was cancelled. Completed checkpoints remain available for resume.", code="CANCELLED", retryable=False, stage=stage.name)
         estimate = None
         ingest_result = results.get("ingest")
         if isinstance(ingest_result, dict):

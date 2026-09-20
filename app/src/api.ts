@@ -18,9 +18,9 @@ export const api = {
   privacySummary: (provider: string, model?: string, endpoint?: string) =>
     invoke<PrivacySummary>('privacy_summary', { llm: legacyMode(provider), provider, model, endpoint }),
   generateSupportBundle: (jobId?: string, diagnosticId?: string) => invoke<string>('generate_support_bundle', { jobId, diagnosticId }),
-  runJob: (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, browserSession?: string, qualityMode?: string, outputPreference?: string) =>
+  runJob: (source: string, provider: string, captions: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, browserSession?: string, qualityMode?: string, outputPreference?: string, subtitlePath?: string, category?: string) =>
     invoke<void>('run_job', {
-      request: { source, llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader, captions, cookies_from_browser: browserSession, quality_mode: qualityMode, output_preference: outputPreference },
+      request: { source, llm: legacyMode(provider), provider, model, endpoint, auth, secret_header: secretHeader, captions, cookies_from_browser: browserSession, quality_mode: qualityMode, output_preference: outputPreference, subtitle_path: subtitlePath, category },
     }),
   resumeJob: (jobId: string, provider?: string, captions?: string, camera?: string, model?: string, endpoint?: string, auth?: string, secretHeader?: string, allowCpuAsrFallback = false, qualityMode?: string, outputPreference?: string) =>
     invoke<void>('resume_job', {

@@ -71,6 +71,10 @@ struct RunJobRequest {
     cookies_from_browser: Option<String>,
     #[serde(default)]
     allow_cpu_asr_fallback: bool,
+    #[serde(default)]
+    subtitle_path: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
 }
 
 fn validate_browser_session(value: Option<&str>) -> Result<Option<String>, String> {
@@ -847,6 +851,8 @@ fn run_job(
         output_preference,
         cookies_from_browser,
         allow_cpu_asr_fallback,
+        subtitle_path,
+        category,
     } = request;
     let cookies_from_browser = validate_browser_session(cookies_from_browser.as_deref())?;
     let (program, base_args) = pipeline_invocation();
@@ -913,6 +919,14 @@ fn run_job(
         }
         if allow_cpu_asr_fallback {
             args.push("--allow-cpu-asr-fallback".to_string());
+        }
+        if let Some(path) = subtitle_path {
+            args.push("--subtitle".to_string());
+            args.push(path);
+        }
+        if let Some(value) = category {
+            args.push("--category".to_string());
+            args.push(value);
         }
         stream_pipeline(
             &app,

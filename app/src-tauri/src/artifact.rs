@@ -110,6 +110,8 @@ pub fn job_results(home: &Path, job_id: &str) -> Result<Value, String> {
     let dir = resolve_job_dir(home, job_id)?;
     let ingest = read_stage(&dir, "ingest")?;
     let score = read_stage(&dir, "score")?;
+    let enrich = read_stage(&dir, "enrich")?;
+    let collections = read_stage(&dir, "collections")?;
     let camera = read_stage(&dir, "camera")?;
     let mut render = read_stage(&dir, "render")?;
     let events = read_stage(&dir, "events")?;
@@ -126,6 +128,32 @@ pub fn job_results(home: &Path, job_id: &str) -> Result<Value, String> {
         }
     });
 
+    let mut score = score;
+    if let (Some(score_clips), Some(enriched_clips)) = (
+        score.get_mut("clips").and_then(Value::as_array_mut),
+        enrich.get("clips").and_then(Value::as_array),
+    ) {
+        for (index, score_clip) in score_clips.iter_mut().enumerate() {
+            let Some(enriched) = enriched_clips.get(index).and_then(Value::as_object) else {
+                continue;
+            };
+            let Some(target) = score_clip.as_object_mut() else {
+                continue;
+            };
+            for key in [
+                "clip_id",
+                "title",
+                "short_description",
+                "title_source",
+                "description_source",
+            ] {
+                if let Some(value) = enriched.get(key) {
+                    target.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+    }
+
     if let Some(outputs) = render.get_mut("outputs").and_then(Value::as_array_mut) {
         for output in outputs {
             if let Some(object) = output.as_object_mut() {
@@ -141,6 +169,8 @@ pub fn job_results(home: &Path, job_id: &str) -> Result<Value, String> {
         "outcome": outcome,
         "ingest": ingest,
         "score": score,
+        "enrich": enrich,
+        "collections": collections,
         "camera": camera,
         "render": render,
         "events": events,

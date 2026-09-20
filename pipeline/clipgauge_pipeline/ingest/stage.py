@@ -14,7 +14,8 @@ from pathlib import Path
 
 from ..jobs.queue import Stage, StageContext, StageError
 from .. import config, protocol, resource_guard, storage_estimate
-from . import normalize, ytdlp
+from . import manifest, normalize, platforms, ytdlp
+from ..transcripts.external import SubtitleError, accept_external_subtitle
 
 
 def _sample_hash(path: Path) -> str:
@@ -37,8 +38,14 @@ class IngestStage(Stage):
             return False
         if data.get("source_hash"):
             try:
-                return _sample_hash(media) == data["source_hash"] or media.parent == ctx.job_dir
+                if not (_sample_hash(media) == data["source_hash"] or media.parent == ctx.job_dir):
+                    return False
             except OSError:
+                return False
+        subtitle = data.get("subtitle")
+        if isinstance(subtitle, dict) and subtitle.get("mode") in {"external", "platform"}:
+            artifact = subtitle.get("artifact_path")
+            if not artifact or not (ctx.job_dir / str(artifact)).is_file():
                 return False
         return True
 
@@ -50,10 +57,13 @@ class IngestStage(Stage):
 
         heatmap = None
         title = None
+        platform = platforms.classify_source(job.source)
         browser_session = ctx.settings.provider_metadata.get("cookies_from_browser")
         if browser_session is not None and not isinstance(browser_session, str):
             browser_session = None
         compatibility_method = "mweb"
+        input_manifest = manifest.load_from_job(job)
+        subtitle_metadata = input_manifest.get("subtitle", {})
         if job.source_type == "url":
             try:
                 meta = ytdlp.fetch_meta(job.source, prog, cookies_from_browser=browser_session, compatibility_method="mweb")
@@ -76,12 +86,37 @@ class IngestStage(Stage):
                 media_path = ctx.job_dir / "media.mp4"
                 if not media_path.exists():
                     ytdlp.download(job.source, media_path, prog, cookies_from_browser=browser_session, compatibility_method="mweb")
+                if subtitle_metadata.get("mode") in {"auto", "asr"}:
+                    selected = platforms.select_platform_caption(
+                        platforms.caption_tracks(meta.raw),
+                        requested_language=subtitle_metadata.get("language"),
+                    )
+                    if selected is not None:
+                        suffix = ".srt" if str(selected.ext).lower() == "srt" else ".vtt"
+                        target = job.dir / "subtitles" / f"platform{suffix}"
+                        if not target.exists():
+                            ytdlp.download_caption(selected.url, target, prog)
+                        subtitle_metadata = {
+                            **subtitle_metadata,
+                            "mode": "platform",
+                            "requested_path": None,
+                            "artifact_path": str(target.relative_to(job.dir)),
+                            "language": selected.language,
+                            "source": selected.source,
+                            "automatic": selected.automatic,
+                            "extractor": selected.extractor,
+                            "format": suffix[1:],
+                        }
+                        input_manifest["subtitle"] = subtitle_metadata
+                        manifest.persist(job, input_manifest)
             except ytdlp.YtDlpError as err:
                 if getattr(err, "code", None) == "YTDLP_ATTESTATION_REQUIRED" and not browser_session:
                     from . import youtube_compat
                     youtube_compat.invalidate_public_compatibility()
                 message = str(err)
                 code = getattr(err, "code", None) or ("YTDLP_LOGIN_REQUIRED" if ytdlp.is_auth_error(message) else "YTDLP_METADATA_FAILED")
+                if platform == platforms.SourcePlatform.BILIBILI:
+                    code = platforms.map_bilibili_error(message)
                 if code == "YTDLP_ERROR" and ("download" in message.lower() or "connection" in message.lower()):
                     code = "YTDLP_DOWNLOAD_FAILED"
                 diagnostic_id = None
@@ -132,10 +167,29 @@ class IngestStage(Stage):
             raise StageError(
                 "This video has no audio track. ClipGauge needs speech to find moments."
             )
+        subtitle_transcript = None
+        if subtitle_metadata.get("mode") in {"external", "platform"}:
+            try:
+                subtitle_metadata, subtitle_transcript = accept_external_subtitle(
+                    job,
+                    input_manifest,
+                    duration=info.duration_sec,
+                )
+            except SubtitleError as err:
+                raise StageError(
+                    str(err),
+                    code=err.code,
+                    retryable=False,
+                    stage=self.name,
+                    details={"malformed_cues": err.malformed_cues},
+                ) from err
+            input_manifest["subtitle"] = subtitle_metadata
+            manifest.persist(job, input_manifest)
+            prog(0.975, "Accepted supplied subtitles…")
         if job.source_type == "url" and not browser_session:
             try:
-                manifest, _, _ = ytdlp._manifest_record()
-                ytdlp_version = str(manifest["runtimes"]["yt-dlp"]["version"])
+                runtime_manifest, _, _ = ytdlp._manifest_record()
+                ytdlp_version = str(runtime_manifest["runtimes"]["yt-dlp"]["version"])
                 from . import youtube_compat
                 youtube_compat.record_public_compatibility_success(method=compatibility_method, ytdlp_version=ytdlp_version)
             except (KeyError, TypeError, ValueError, OSError):
@@ -171,4 +225,7 @@ class IngestStage(Stage):
                 max(0, Path(job.source).expanduser().stat().st_size)
             ),
             "source_hash": source_hash,
+            "platform": platform.value,
+            "subtitle": subtitle_metadata,
+            "subtitle_transcript": subtitle_transcript,
         }
