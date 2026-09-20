@@ -2210,7 +2210,14 @@ async fn set_clip_title(job_id: String, clip_id: String, title: String) -> Resul
     let sidecar_job = job_id.clone();
     spawn_blocking_result(move || {
         creator_sidecar_blocking(
-            vec!["title".into(), "set".into(), job_id, clip_id, "--title".into(), title],
+            vec![
+                "title".into(),
+                "set".into(),
+                job_id,
+                clip_id,
+                "--title".into(),
+                title,
+            ],
             &sidecar_job,
             "set title",
         )
@@ -2235,19 +2242,34 @@ async fn reset_clip_title(job_id: String, clip_id: String) -> Result<Value, Stri
 async fn list_collections(job_id: String) -> Result<Value, String> {
     let sidecar_job = job_id.clone();
     spawn_blocking_result(move || {
-        creator_sidecar_blocking(vec!["collections".into(), "list".into(), job_id], &sidecar_job, "list collections")
+        creator_sidecar_blocking(
+            vec!["collections".into(), "list".into(), job_id],
+            &sidecar_job,
+            "list collections",
+        )
     })
     .await
 }
 
 #[tauri::command]
-async fn create_collection(job_id: String, title: String, clip_ids: Vec<String>) -> Result<Value, String> {
+async fn create_collection(
+    job_id: String,
+    title: String,
+    clip_ids: Vec<String>,
+) -> Result<Value, String> {
     let sidecar_job = job_id.clone();
-    let mut args = vec!["collections".into(), "create".into(), job_id, "--title".into(), title];
+    let mut args = vec![
+        "collections".into(),
+        "create".into(),
+        job_id,
+        "--title".into(),
+        title,
+    ];
     for clip_id in clip_ids {
         args.extend(["--clip".into(), clip_id]);
     }
-    spawn_blocking_result(move || creator_sidecar_blocking(args, &sidecar_job, "create collection")).await
+    spawn_blocking_result(move || creator_sidecar_blocking(args, &sidecar_job, "create collection"))
+        .await
 }
 
 #[tauri::command]
@@ -2265,33 +2287,54 @@ async fn update_collection(
     for clip_id in clip_ids.unwrap_or_default() {
         args.extend(["--clip".into(), clip_id]);
     }
-    spawn_blocking_result(move || creator_sidecar_blocking(args, &sidecar_job, "update collection")).await
+    spawn_blocking_result(move || creator_sidecar_blocking(args, &sidecar_job, "update collection"))
+        .await
 }
 
 #[tauri::command]
 async fn delete_collection(job_id: String, collection_id: String) -> Result<Value, String> {
     let sidecar_job = job_id.clone();
     spawn_blocking_result(move || {
-        creator_sidecar_blocking(vec!["collections".into(), "delete".into(), job_id, collection_id], &sidecar_job, "delete collection")
+        creator_sidecar_blocking(
+            vec!["collections".into(), "delete".into(), job_id, collection_id],
+            &sidecar_job,
+            "delete collection",
+        )
     })
     .await
 }
 
 #[tauri::command]
-async fn reorder_collection(job_id: String, collection_id: String, clip_ids: Vec<String>) -> Result<Value, String> {
+async fn reorder_collection(
+    job_id: String,
+    collection_id: String,
+    clip_ids: Vec<String>,
+) -> Result<Value, String> {
     let sidecar_job = job_id.clone();
-    let mut args = vec!["collections".into(), "reorder".into(), job_id, collection_id];
+    let mut args = vec![
+        "collections".into(),
+        "reorder".into(),
+        job_id,
+        collection_id,
+    ];
     for clip_id in clip_ids {
         args.extend(["--clip".into(), clip_id]);
     }
-    spawn_blocking_result(move || creator_sidecar_blocking(args, &sidecar_job, "reorder collection")).await
+    spawn_blocking_result(move || {
+        creator_sidecar_blocking(args, &sidecar_job, "reorder collection")
+    })
+    .await
 }
 
 #[tauri::command]
 async fn regenerate_collections(job_id: String) -> Result<Value, String> {
     let sidecar_job = job_id.clone();
     spawn_blocking_result(move || {
-        creator_sidecar_blocking(vec!["collections".into(), "regenerate".into(), job_id], &sidecar_job, "regenerate collections")
+        creator_sidecar_blocking(
+            vec!["collections".into(), "regenerate".into(), job_id],
+            &sidecar_job,
+            "regenerate collections",
+        )
     })
     .await
 }
@@ -2300,7 +2343,11 @@ async fn regenerate_collections(job_id: String) -> Result<Value, String> {
 async fn render_collection(job_id: String, collection_id: String) -> Result<Value, String> {
     let sidecar_job = job_id.clone();
     spawn_blocking_result(move || {
-        creator_sidecar_blocking(vec!["collections".into(), "render".into(), job_id, collection_id], &sidecar_job, "render collection")
+        creator_sidecar_blocking(
+            vec!["collections".into(), "render".into(), job_id, collection_id],
+            &sidecar_job,
+            "render collection",
+        )
     })
     .await
 }

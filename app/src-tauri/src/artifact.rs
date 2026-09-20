@@ -61,7 +61,10 @@ fn apply_creator_title_overrides(stage: &mut Value, overrides: &Value) {
             continue;
         };
         object.insert("title".to_string(), Value::String(title.to_string()));
-        object.insert("title_source".to_string(), Value::String("user".to_string()));
+        object.insert(
+            "title_source".to_string(),
+            Value::String("user".to_string()),
+        );
     }
 }
 
@@ -326,9 +329,7 @@ pub fn export_clip(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        export_clip, export_clip_to, job_results, render_artifact, source_media_artifact,
-    };
+    use super::{export_clip, export_clip_to, job_results, render_artifact, source_media_artifact};
     use serde_json::json;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -547,7 +548,10 @@ mod tests {
 
         let result = job_results(&home, "20260818-155237-c6b118").unwrap();
 
-        assert_eq!(result["collections"]["collections"][0]["title"], "Creator series");
+        assert_eq!(
+            result["collections"]["collections"][0]["title"],
+            "Creator series"
+        );
     }
 
     #[test]
