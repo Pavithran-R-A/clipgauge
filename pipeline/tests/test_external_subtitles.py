@@ -70,6 +70,20 @@ def test_external_subtitle_is_copied_hashed_and_resumes_without_source(tmp_path)
     value["subtitle"].update({"mode": "external", "requested_path": str(source)})
     subtitle, transcript = accept_external_subtitle(job, value, duration=1.0)
     value["subtitle"] = subtitle
+    (job.dir / "media.mp4").write_bytes(b"media")
+    (job.dir / "audio16k.wav").write_bytes(b"audio")
+    from clipgauge_pipeline.jobs import artifacts
+
+    prepared, _ = artifacts.prepare(
+        job.dir,
+        {
+            "media_path": str(job.dir / "media.mp4"),
+            "audio_path": str(job.dir / "audio16k.wav"),
+            "subtitle": subtitle,
+        },
+        "ingest",
+    )
+    assert prepared["subtitle"]["requested_path"] is None
     persist(job, value)
     source.unlink()
     resumed = json.loads((job.dir / "input.json").read_text(encoding="utf-8"))

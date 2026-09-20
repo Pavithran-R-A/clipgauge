@@ -60,6 +60,10 @@ def accept_external_subtitle(job, input_manifest: dict, *, duration: float) -> t
     else:
         raise SubtitleError("SUBTITLE_PATH_MISSING", "Subtitle mode requires a subtitle file.")
 
+    # The original picker path is never a managed artifact. Clear it after
+    # acceptance so checkpoint validation cannot persist an external path.
+    subtitle["requested_path"] = None
+
     text = _read_text(source)
     try:
         if source.suffix.lower() == ".srt":
