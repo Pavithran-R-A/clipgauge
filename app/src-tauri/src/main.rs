@@ -236,6 +236,13 @@ fn validate_job_id(job_id: &str) -> Result<PathBuf, String> {
     path_security::resolve_job_dir(&home_dir(), job_id)
 }
 
+fn validate_creator_job_id(job_id: &str) -> Result<PathBuf, String> {
+    if !path_security::valid_job_id(job_id) {
+        return Err("invalid job ID".to_string());
+    }
+    validate_job_id(job_id)
+}
+
 /// Command that never flashes a console window on Windows (CREATE_NO_WINDOW).
 /// Every pipeline/tool spawn goes through this — a GUI app popping cmd.exe
 /// windows for each sidecar call reads as malware to most people.
@@ -2151,6 +2158,153 @@ fn edit_tool_blocking(args: Vec<String>) -> Result<Value, String> {
     run_json_sidecar(command, "edit tool")
 }
 
+fn selected_provider_for_job(job_id: &str) -> Option<(&'static str, String)> {
+    let settings_path = validate_creator_job_id(job_id).ok()?.join("settings.json");
+    let value = serde_json::from_str::<Value>(&fs::read_to_string(settings_path).ok()?).ok()?;
+    let snapshot = value.get("provider_snapshot").and_then(Value::as_object);
+    let kind = snapshot
+        .and_then(|item| item.get("kind"))
+        .and_then(Value::as_str)
+        .or_else(|| value.get("provider_kind").and_then(Value::as_str))?;
+    let profile_id = snapshot
+        .and_then(|item| item.get("id"))
+        .and_then(Value::as_str)
+        .or_else(|| value.get("provider_profile_id").and_then(Value::as_str))?;
+    let (env_name, _) = selected_provider_env(Some(kind))?;
+    Some((env_name, profile_id.to_string()))
+}
+
+fn creator_sidecar_blocking(
+    args: Vec<String>,
+    job_id: &str,
+    operation: &str,
+) -> Result<Value, String> {
+    validate_creator_job_id(job_id)?;
+    let (program, base_args) = pipeline_invocation();
+    let mut full = base_args;
+    full.extend(args);
+    let mut command = quiet_command(&program);
+    secrets::apply_operation_env(&mut command);
+    if let Some((env_name, profile_id)) = selected_provider_for_job(job_id) {
+        secrets::apply_provider_operation_env(&mut command, &profile_id, env_name);
+    }
+    command.env("CLIPGAUGE_HOME", home_dir()).args(&full);
+    run_json_sidecar(command, operation)
+}
+
+#[tauri::command]
+async fn get_clip_title(job_id: String, clip_id: String) -> Result<Value, String> {
+    let sidecar_job = job_id.clone();
+    spawn_blocking_result(move || {
+        creator_sidecar_blocking(
+            vec!["title".into(), "get".into(), job_id, clip_id],
+            &sidecar_job,
+            "get title",
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn set_clip_title(job_id: String, clip_id: String, title: String) -> Result<Value, String> {
+    let sidecar_job = job_id.clone();
+    spawn_blocking_result(move || {
+        creator_sidecar_blocking(
+            vec!["title".into(), "set".into(), job_id, clip_id, "--title".into(), title],
+            &sidecar_job,
+            "set title",
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn reset_clip_title(job_id: String, clip_id: String) -> Result<Value, String> {
+    let sidecar_job = job_id.clone();
+    spawn_blocking_result(move || {
+        creator_sidecar_blocking(
+            vec!["title".into(), "reset".into(), job_id, clip_id],
+            &sidecar_job,
+            "reset title",
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn list_collections(job_id: String) -> Result<Value, String> {
+    let sidecar_job = job_id.clone();
+    spawn_blocking_result(move || {
+        creator_sidecar_blocking(vec!["collections".into(), "list".into(), job_id], &sidecar_job, "list collections")
+    })
+    .await
+}
+
+#[tauri::command]
+async fn create_collection(job_id: String, title: String, clip_ids: Vec<String>) -> Result<Value, String> {
+    let sidecar_job = job_id.clone();
+    let mut args = vec!["collections".into(), "create".into(), job_id, "--title".into(), title];
+    for clip_id in clip_ids {
+        args.extend(["--clip".into(), clip_id]);
+    }
+    spawn_blocking_result(move || creator_sidecar_blocking(args, &sidecar_job, "create collection")).await
+}
+
+#[tauri::command]
+async fn update_collection(
+    job_id: String,
+    collection_id: String,
+    title: Option<String>,
+    clip_ids: Option<Vec<String>>,
+) -> Result<Value, String> {
+    let sidecar_job = job_id.clone();
+    let mut args = vec!["collections".into(), "update".into(), job_id, collection_id];
+    if let Some(value) = title {
+        args.extend(["--title".into(), value]);
+    }
+    for clip_id in clip_ids.unwrap_or_default() {
+        args.extend(["--clip".into(), clip_id]);
+    }
+    spawn_blocking_result(move || creator_sidecar_blocking(args, &sidecar_job, "update collection")).await
+}
+
+#[tauri::command]
+async fn delete_collection(job_id: String, collection_id: String) -> Result<Value, String> {
+    let sidecar_job = job_id.clone();
+    spawn_blocking_result(move || {
+        creator_sidecar_blocking(vec!["collections".into(), "delete".into(), job_id, collection_id], &sidecar_job, "delete collection")
+    })
+    .await
+}
+
+#[tauri::command]
+async fn reorder_collection(job_id: String, collection_id: String, clip_ids: Vec<String>) -> Result<Value, String> {
+    let sidecar_job = job_id.clone();
+    let mut args = vec!["collections".into(), "reorder".into(), job_id, collection_id];
+    for clip_id in clip_ids {
+        args.extend(["--clip".into(), clip_id]);
+    }
+    spawn_blocking_result(move || creator_sidecar_blocking(args, &sidecar_job, "reorder collection")).await
+}
+
+#[tauri::command]
+async fn regenerate_collections(job_id: String) -> Result<Value, String> {
+    let sidecar_job = job_id.clone();
+    spawn_blocking_result(move || {
+        creator_sidecar_blocking(vec!["collections".into(), "regenerate".into(), job_id], &sidecar_job, "regenerate collections")
+    })
+    .await
+}
+
+#[tauri::command]
+async fn render_collection(job_id: String, collection_id: String) -> Result<Value, String> {
+    let sidecar_job = job_id.clone();
+    spawn_blocking_result(move || {
+        creator_sidecar_blocking(vec!["collections".into(), "render".into(), job_id, collection_id], &sidecar_job, "render collection")
+    })
+    .await
+}
+
 #[tauri::command]
 fn run_edit_render(
     app: AppHandle,
@@ -2492,6 +2646,16 @@ fn main() {
             cancel_job,
             job_results,
             list_job_dirs,
+            get_clip_title,
+            set_clip_title,
+            reset_clip_title,
+            list_collections,
+            create_collection,
+            update_collection,
+            delete_collection,
+            reorder_collection,
+            regenerate_collections,
+            render_collection,
             save_gemini_key,
             save_provider_key,
             remove_provider_key,
@@ -2543,7 +2707,8 @@ mod tests {
         instagram_connection_from_json, instagram_connection_is_valid, is_completion_payload,
         migrate_legacy_data_from, privacy_summary, read_bounded_line, selected_provider_env,
         setup_start_failure_message, spawn_blocking_result, valid_setup_tool_args,
-        valid_start_setup_args, validate_browser_session, ResumeJobRequest, RunJobRequest,
+        valid_start_setup_args, validate_browser_session, validate_creator_job_id,
+        ResumeJobRequest, RunJobRequest,
     };
     use serde_json::json;
 
@@ -2778,6 +2943,12 @@ mod tests {
             "gpu-repair".to_string(),
             "unexpected".to_string()
         ]));
+    }
+
+    #[test]
+    fn creator_job_validation_rejects_path_traversal() {
+        assert!(validate_creator_job_id("..\\escape").is_err());
+        assert!(validate_creator_job_id("C:\\outside").is_err());
     }
 
     #[test]

@@ -249,10 +249,39 @@ export interface JobResults {
     capabilities?: ProviderCapabilities
   } | null
   enrich?: { clips: Clip[]; soft_failure?: boolean; warnings?: string[]; category?: string } | null
-  collections?: { collections: Array<{ id: string; title: string; clip_ids: string[]; source: string; user_edited: boolean }> } | null
+  collections?: { collections: Collection[]; category?: string; grouping_provider?: Record<string, unknown> } | null
   render: { outputs: RenderOutput[]; emoji_ok: boolean; caption_preset: string } | null
   events: { counts: Record<string, number>; timeline: unknown[]; arousal_source: string } | null
   candidates: { count: number; effective_weights: Record<string, number>; heatmap_present: boolean } | null
+}
+
+export interface Collection {
+  id: string
+  title: string
+  summary?: string
+  clip_ids: string[]
+  source: 'ai' | 'manual' | 'deterministic' | string
+  user_edited: boolean
+  render_path?: string | null
+}
+
+export interface CreatorTitle {
+  clip_id: string
+  title?: string
+  title_source?: 'user' | 'model' | 'deterministic' | string
+}
+
+export interface CreatorOperationResult {
+  ok: boolean
+  clip_id?: string
+  title?: string
+  title_source?: string
+  collection?: Collection
+  collections?: Collection[]
+  collection_id?: string
+  path?: string
+  deleted?: string
+  error?: string
 }
 
 export interface ClipEditOverlay {

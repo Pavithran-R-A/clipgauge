@@ -4,8 +4,12 @@ from types import SimpleNamespace
 import pytest
 
 from clipgauge_pipeline import __version__
+from clipgauge_pipeline import config
 from clipgauge_pipeline import cli
 from clipgauge_pipeline.cli import main
+from clipgauge_pipeline.enrich.stage import stable_clip_id
+from clipgauge_pipeline.ingest.manifest import default_manifest
+from clipgauge_pipeline.jobs import queue
 
 
 def run_exit(*args, capsys):
@@ -184,6 +188,50 @@ def test_private_cli_default_uses_clipgauge_local():
 
     assert profile.kind == 'clipgauge-local'
     assert profile.locality == 'local'
+
+
+def test_title_set_cli_returns_user_source(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CLIPGAUGE_HOME", str(tmp_path / "home"))
+    source = str(tmp_path / "media.mp4")
+    job = queue.create_job("file", source, json.dumps(config.Settings().to_json()), default_manifest("file", source))
+    clip = {"start": 0.0, "end": 5.0, "title": "Generated"}
+    clip_id = stable_clip_id(clip, 0)
+    (job.dir / "enrich.json").write_text(json.dumps({"data": {"clips": [dict(clip, clip_id=clip_id)]}}), encoding="utf-8")
+
+    assert main(["title", "set", job.id, clip_id, "--title", "Edited title"]) == 0
+
+    assert json.loads(capsys.readouterr().out)["title_source"] == "user"
+
+
+def test_collection_create_cli_requires_two_clips(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CLIPGAUGE_HOME", str(tmp_path / "home"))
+    source = str(tmp_path / "media.mp4")
+    job = queue.create_job("file", source, json.dumps(config.Settings().to_json()), default_manifest("file", source))
+    clip = {"start": 0.0, "end": 5.0, "title": "Generated"}
+    clip_id = stable_clip_id(clip, 0)
+    (job.dir / "enrich.json").write_text(json.dumps({"data": {"clips": [dict(clip, clip_id=clip_id)]}}), encoding="utf-8")
+
+    assert main(["collections", "create", job.id, "--title", "Series", "--clip", clip_id]) == 2
+
+    assert "at least two" in capsys.readouterr().out
+
+
+def test_collection_cli_lifecycle_uses_stable_ids(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CLIPGAUGE_HOME", str(tmp_path / "home"))
+    source = str(tmp_path / "media.mp4")
+    job = queue.create_job("file", source, json.dumps(config.Settings().to_json()), default_manifest("file", source))
+    clips = [{"start": 0.0, "end": 5.0, "title": "First"}, {"start": 8.0, "end": 12.0, "title": "Second"}]
+    ids = [stable_clip_id(clip, index) for index, clip in enumerate(clips)]
+    (job.dir / "enrich.json").write_text(json.dumps({"data": {"clips": [dict(clip, clip_id=ids[index]) for index, clip in enumerate(clips)]}}), encoding="utf-8")
+
+    assert main(["collections", "create", job.id, "--title", "Series", "--clip", ids[0], "--clip", ids[1]]) == 0
+    created = json.loads(capsys.readouterr().out)["collection"]
+    assert main(["collections", "update", job.id, created["id"], "--title", "Renamed"]) == 0
+    capsys.readouterr()
+    assert main(["collections", "reorder", job.id, created["id"], "--clip", ids[1], "--clip", ids[0]]) == 0
+    assert json.loads(capsys.readouterr().out)["collection"]["clip_ids"] == [ids[1], ids[0]]
+    assert main(["collections", "delete", job.id, created["id"]]) == 0
+    assert json.loads(capsys.readouterr().out)["deleted"] == created["id"]
 
 
 def test_private_cli_rejects_explicit_cloud_provider():

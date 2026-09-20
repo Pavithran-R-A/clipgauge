@@ -1028,6 +1028,101 @@ def cmd_jobs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _creator_clips(job: queue.Job) -> list[dict]:
+    for stage_name in ("enrich", "score"):
+        path = job.dir / f"{stage_name}.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        data = value.get("data") if isinstance(value, dict) else None
+        clips = data.get("clips") if isinstance(data, dict) else None
+        if isinstance(clips, list):
+            return [dict(item) for item in clips if isinstance(item, dict)]
+    return []
+
+
+def _creator_response(payload: dict, *, code: int = 0) -> int:
+    print(json.dumps(payload, ensure_ascii=False))
+    return code
+
+
+def _creator_error(error: Exception) -> int:
+    return _creator_response({"ok": False, "error": protocol.safe_message(str(error), limit=300)}, code=2)
+
+
+def _creator_group_provider(job: queue.Job):
+    settings = config.Settings.from_json(json.loads(job.settings_json))
+    profile = providers_mod.profile_from_snapshot(settings.provider_snapshot())
+    client = providers_mod.make_adapter(profile)
+
+    def provider(prompt, schema):
+        return client.generate_json(prompt, schema, purpose="collections", job_id=job.id)
+
+    return provider
+
+
+def cmd_creator(args: argparse.Namespace) -> int:
+    job = queue.get_job(args.job_id)
+    if job is None:
+        return _creator_response({"ok": False, "error": "job not found"}, code=2)
+    clips = _creator_clips(job)
+    try:
+        from .collections.render import render_collection
+        from .collections.service import (
+            create_collection,
+            delete_collection,
+            list_collections,
+            regenerate_smart_collections,
+            reorder_collection,
+            update_collection,
+        )
+        from .creator_state import apply_title_overrides, load_title_overrides, reset_title_override, set_title_override
+
+        if args.creator_domain == "title":
+            if args.creator_cmd == "get":
+                result = apply_title_overrides(clips, load_title_overrides(job))
+                clip = next((item for item in result if item.get("clip_id") == args.clip_id), None)
+                if clip is None:
+                    raise ValueError("unknown clip ID")
+                return _creator_response({"ok": True, **{key: clip.get(key) for key in ("clip_id", "title", "title_source")}})
+            if args.creator_cmd == "set":
+                set_title_override(job, args.clip_id, args.title, clips)
+                result = apply_title_overrides(clips, load_title_overrides(job))
+                clip = next(item for item in result if item.get("clip_id") == args.clip_id)
+                return _creator_response({"ok": True, "clip_id": args.clip_id, "title": clip.get("title"), "title_source": "user"})
+            reset_title_override(job, args.clip_id, clips)
+            result = apply_title_overrides(clips, load_title_overrides(job))
+            clip = next(item for item in result if item.get("clip_id") == args.clip_id)
+            return _creator_response({"ok": True, "clip_id": args.clip_id, "title": clip.get("title"), "title_source": clip.get("title_source", "deterministic")})
+
+        if args.creator_cmd == "list":
+            return _creator_response({"ok": True, "collections": list_collections(job, clips)})
+        if args.creator_cmd == "create":
+            item = create_collection(job, args.title, args.clip_ids, clips=clips)
+            return _creator_response({"ok": True, "collection": item})
+        if args.creator_cmd == "update":
+            item = update_collection(job, args.collection_id, title=args.title, clip_ids=args.clip_ids or None, clips=clips)
+            return _creator_response({"ok": True, "collection": item})
+        if args.creator_cmd == "delete":
+            delete_collection(job, args.collection_id, clips=clips)
+            return _creator_response({"ok": True, "deleted": args.collection_id})
+        if args.creator_cmd == "reorder":
+            item = reorder_collection(job, args.collection_id, args.clip_ids, clips=clips)
+            return _creator_response({"ok": True, "collection": item})
+        if args.creator_cmd == "regenerate":
+            try:
+                provider = _creator_group_provider(job)
+            except Exception:
+                provider = None
+            rows = regenerate_smart_collections(job, clips, category=config.Settings.from_json(json.loads(job.settings_json)).content_category, group_provider=provider)
+            return _creator_response({"ok": True, "collections": rows})
+        output = render_collection(job, args.collection_id, clips)
+        return _creator_response({"ok": True, "collection_id": args.collection_id, "path": str(output)})
+    except Exception as error:  # noqa: BLE001 - creator boundary returns typed JSON
+        return _creator_error(error)
+
+
 def cmd_edit(args: argparse.Namespace) -> int:
     """Per-clip editing verbs. All output is JSON on stdout for the app."""
     from pathlib import Path
@@ -1307,6 +1402,47 @@ def main(argv: list[str] | None = None) -> int:
 
     p_jobs = sub.add_parser("jobs", help="list jobs")
     p_jobs.set_defaults(fn=cmd_jobs)
+
+    p_title = sub.add_parser("title", help="creator title operations")
+    title_sub = p_title.add_subparsers(dest="creator_cmd", required=True)
+    p_title_get = title_sub.add_parser("get")
+    p_title_get.add_argument("job_id")
+    p_title_get.add_argument("clip_id")
+    p_title_set = title_sub.add_parser("set")
+    p_title_set.add_argument("job_id")
+    p_title_set.add_argument("clip_id")
+    p_title_set.add_argument("--title", required=True)
+    p_title_reset = title_sub.add_parser("reset")
+    p_title_reset.add_argument("job_id")
+    p_title_reset.add_argument("clip_id")
+    p_title.set_defaults(creator_domain="title", fn=cmd_creator)
+
+    p_collections = sub.add_parser("collections", help="creator collection operations")
+    collection_sub = p_collections.add_subparsers(dest="creator_cmd", required=True)
+    p_collection_list = collection_sub.add_parser("list")
+    p_collection_list.add_argument("job_id")
+    p_collection_create = collection_sub.add_parser("create")
+    p_collection_create.add_argument("job_id")
+    p_collection_create.add_argument("--title", required=True)
+    p_collection_create.add_argument("--clip", dest="clip_ids", action="append", required=True)
+    p_collection_update = collection_sub.add_parser("update")
+    p_collection_update.add_argument("job_id")
+    p_collection_update.add_argument("collection_id")
+    p_collection_update.add_argument("--title")
+    p_collection_update.add_argument("--clip", dest="clip_ids", action="append")
+    p_collection_delete = collection_sub.add_parser("delete")
+    p_collection_delete.add_argument("job_id")
+    p_collection_delete.add_argument("collection_id")
+    p_collection_reorder = collection_sub.add_parser("reorder")
+    p_collection_reorder.add_argument("job_id")
+    p_collection_reorder.add_argument("collection_id")
+    p_collection_reorder.add_argument("--clip", dest="clip_ids", action="append", required=True)
+    p_collection_regenerate = collection_sub.add_parser("regenerate")
+    p_collection_regenerate.add_argument("job_id")
+    p_collection_render = collection_sub.add_parser("render")
+    p_collection_render.add_argument("job_id")
+    p_collection_render.add_argument("collection_id")
+    p_collections.set_defaults(creator_domain="collections", fn=cmd_creator)
 
     p_edit = sub.add_parser("edit", help="per-clip editing (context / visuals / render)")
     edit_sub = p_edit.add_subparsers(dest="edit_cmd", required=True)

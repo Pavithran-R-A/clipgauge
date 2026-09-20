@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
-import type { JobResults, JobSummary, LocalSetupInventory, LoopOverview, PreflightResult, PrivacySummary, SaveClipEditsInput, SetupState, StorageCleanupPreview, StorageCleanupResult, SyncSummary, ProviderModelsResult, ProviderTestResult } from './types'
+import type { CreatorOperationResult, CreatorTitle, JobResults, JobSummary, LocalSetupInventory, LoopOverview, PreflightResult, PrivacySummary, SaveClipEditsInput, SetupState, StorageCleanupPreview, StorageCleanupResult, SyncSummary, ProviderModelsResult, ProviderTestResult } from './types'
 
 function legacyMode(provider: string): string | undefined {
   return provider === 'gemini' || provider === 'ollama' ? provider : undefined
@@ -36,6 +36,16 @@ export const api = {
   removeGeminiKey: () => invoke<boolean>('remove_gemini_key'),
   cancelJob: (jobId: string) => invoke<void>('cancel_job', { jobId }),
   jobResults: (jobId: string) => invoke<JobResults>('job_results', { jobId }),
+  getClipTitle: (jobId: string, clipId: string) => invoke<CreatorTitle>('get_clip_title', { jobId, clipId }),
+  setClipTitle: (jobId: string, clipId: string, title: string) => invoke<CreatorOperationResult>('set_clip_title', { jobId, clipId, title }),
+  resetClipTitle: (jobId: string, clipId: string) => invoke<CreatorOperationResult>('reset_clip_title', { jobId, clipId }),
+  listCollections: (jobId: string) => invoke<CreatorOperationResult>('list_collections', { jobId }),
+  createCollection: (jobId: string, title: string, clipIds: string[]) => invoke<CreatorOperationResult>('create_collection', { jobId, title, clipIds }),
+  updateCollection: (jobId: string, collectionId: string, title?: string, clipIds?: string[]) => invoke<CreatorOperationResult>('update_collection', { jobId, collectionId, title, clipIds }),
+  deleteCollection: (jobId: string, collectionId: string) => invoke<CreatorOperationResult>('delete_collection', { jobId, collectionId }),
+  reorderCollection: (jobId: string, collectionId: string, clipIds: string[]) => invoke<CreatorOperationResult>('reorder_collection', { jobId, collectionId, clipIds }),
+  regenerateCollections: (jobId: string) => invoke<CreatorOperationResult>('regenerate_collections', { jobId }),
+  renderCollection: (jobId: string, collectionId: string) => invoke<CreatorOperationResult>('render_collection', { jobId, collectionId }),
   listJobs: () => invoke<JobSummary[]>('list_job_dirs'),
   saveGeminiKey: (key: string) => invoke<boolean>('save_gemini_key', { key }),
   savePexelsKey: (key: string) => invoke<boolean>('save_pexels_key', { key }),
