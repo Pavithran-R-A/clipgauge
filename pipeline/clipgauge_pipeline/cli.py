@@ -29,13 +29,15 @@ YOUTUBE_TEST_HEARTBEAT_SECONDS = 2.0
 
 def _stages() -> list[queue.Stage]:
     # Grows per milestone: ingest → asr → diarize → events → candidates →
-    # score → camera → render. Stage imports are deferred so `clipgauge
+    # score → enrich → collections → camera → render. Stage imports are deferred so `clipgauge
     # jobs` doesn't pay the torch import tax.
     from .asr.stage import AsrStage
     from .camera.stage import CameraStage
     from .candidates.stage import CandidatesStage
     from .diarize.stage import DiarizeStage
     from .events.stage import EventsStage
+    from .enrich.stage import EnrichStage
+    from .collections.stage import CollectionsStage
     from .ingest.stage import IngestStage
     from .render.stage import RenderStage
     from .scoring.stage import ScoreStage
@@ -47,6 +49,8 @@ def _stages() -> list[queue.Stage]:
         EventsStage(),
         CandidatesStage(),
         ScoreStage(),
+        EnrichStage(),
+        CollectionsStage(),
         CameraStage(),
         RenderStage(),
     ]
@@ -833,6 +837,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     settings.quality_mode = quality_mode
     if args.output_preference:
         settings.output_preference = config.validate_output_preference(args.output_preference)
+    if args.category:
+        settings.content_category = config.validate_content_category(args.category)
     if args.camera:
         settings.camera.speaker_change = args.camera
     if args.cookies_from_browser:
@@ -841,7 +847,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.allow_cpu_asr_fallback:
         settings.allow_cpu_asr_fallback = True
     try:
-        job = queue.create_job(source_type, source, json.dumps(settings.to_json()))
+        from .ingest.manifest import default_manifest
+        input_manifest = default_manifest(source_type, source)
+        if args.subtitle:
+            input_manifest["subtitle"].update({"mode": "external", "requested_path": args.subtitle})
+        job = queue.create_job(
+            source_type,
+            source,
+            json.dumps(settings.to_json()),
+            input_manifest=input_manifest,
+        )
     except Exception as err:  # noqa: BLE001 — pre-job protocol boundary
         return _preflight_terminal(args.jsonl, None, "JOB_CREATE_FAILED", f"Could not create a pipeline job: {protocol.safe_message(str(err))}", True)
     return _execute(job, args.jsonl)
@@ -885,6 +900,25 @@ def cmd_resume(args: argparse.Namespace) -> int:
             conn.execute("UPDATE jobs SET settings_json = ? WHERE id = ?", (new_json, job.id))
         job = queue.get_job(args.job_id)
     return _execute(job, args.jsonl, stop_after=args.stop_after)
+
+
+def cmd_mcp(args: argparse.Namespace) -> int:
+    from .mcp_server import serve_stdio
+
+    return serve_stdio()
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    from .server.app import create_app
+
+    token = os.environ.get("CLIPGAUGE_SERVER_TOKEN")
+    if args.token_stdin:
+        token = sys.stdin.readline().strip()
+    app = create_app(host=args.host, token=token, cors_origins=args.allow_origin, import_roots=args.import_root)
+    import uvicorn
+
+    uvicorn.run(app, host=args.host, port=args.port, log_config=None)
+    return 0
 
 
 def _execute(job: queue.Job, jsonl: bool, *, stop_after: str | None = None) -> int:
@@ -992,6 +1026,101 @@ def cmd_jobs(args: argparse.Namespace) -> int:
         done = sum(1 for s in stages.values() if s == "done")
         print(f"{job.id}  {job.status:<8} {done} stage(s) done  {job.title or job.source}")
     return 0
+
+
+def _creator_clips(job: queue.Job) -> list[dict]:
+    for stage_name in ("enrich", "score"):
+        path = job.dir / f"{stage_name}.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        data = value.get("data") if isinstance(value, dict) else None
+        clips = data.get("clips") if isinstance(data, dict) else None
+        if isinstance(clips, list):
+            return [dict(item) for item in clips if isinstance(item, dict)]
+    return []
+
+
+def _creator_response(payload: dict, *, code: int = 0) -> int:
+    print(json.dumps(payload, ensure_ascii=False))
+    return code
+
+
+def _creator_error(error: Exception) -> int:
+    return _creator_response({"ok": False, "error": protocol.safe_message(str(error), limit=300)}, code=2)
+
+
+def _creator_group_provider(job: queue.Job):
+    settings = config.Settings.from_json(json.loads(job.settings_json))
+    profile = providers_mod.profile_from_snapshot(settings.provider_snapshot())
+    client = providers_mod.make_adapter(profile)
+
+    def provider(prompt, schema):
+        return client.generate_json(prompt, schema, purpose="collections", job_id=job.id)
+
+    return provider
+
+
+def cmd_creator(args: argparse.Namespace) -> int:
+    job = queue.get_job(args.job_id)
+    if job is None:
+        return _creator_response({"ok": False, "error": "job not found"}, code=2)
+    clips = _creator_clips(job)
+    try:
+        from .collections.render import render_collection
+        from .collections.service import (
+            create_collection,
+            delete_collection,
+            list_collections,
+            regenerate_smart_collections,
+            reorder_collection,
+            update_collection,
+        )
+        from .creator_state import apply_title_overrides, load_title_overrides, reset_title_override, set_title_override
+
+        if args.creator_domain == "title":
+            if args.creator_cmd == "get":
+                result = apply_title_overrides(clips, load_title_overrides(job))
+                clip = next((item for item in result if item.get("clip_id") == args.clip_id), None)
+                if clip is None:
+                    raise ValueError("unknown clip ID")
+                return _creator_response({"ok": True, **{key: clip.get(key) for key in ("clip_id", "title", "title_source")}})
+            if args.creator_cmd == "set":
+                set_title_override(job, args.clip_id, args.title, clips)
+                result = apply_title_overrides(clips, load_title_overrides(job))
+                clip = next(item for item in result if item.get("clip_id") == args.clip_id)
+                return _creator_response({"ok": True, "clip_id": args.clip_id, "title": clip.get("title"), "title_source": "user"})
+            reset_title_override(job, args.clip_id, clips)
+            result = apply_title_overrides(clips, load_title_overrides(job))
+            clip = next(item for item in result if item.get("clip_id") == args.clip_id)
+            return _creator_response({"ok": True, "clip_id": args.clip_id, "title": clip.get("title"), "title_source": clip.get("title_source", "deterministic")})
+
+        if args.creator_cmd == "list":
+            return _creator_response({"ok": True, "collections": list_collections(job, clips)})
+        if args.creator_cmd == "create":
+            item = create_collection(job, args.title, args.clip_ids, clips=clips)
+            return _creator_response({"ok": True, "collection": item})
+        if args.creator_cmd == "update":
+            item = update_collection(job, args.collection_id, title=args.title, clip_ids=args.clip_ids or None, clips=clips)
+            return _creator_response({"ok": True, "collection": item})
+        if args.creator_cmd == "delete":
+            delete_collection(job, args.collection_id, clips=clips)
+            return _creator_response({"ok": True, "deleted": args.collection_id})
+        if args.creator_cmd == "reorder":
+            item = reorder_collection(job, args.collection_id, args.clip_ids, clips=clips)
+            return _creator_response({"ok": True, "collection": item})
+        if args.creator_cmd == "regenerate":
+            try:
+                provider = _creator_group_provider(job)
+            except Exception:
+                provider = None
+            rows = regenerate_smart_collections(job, clips, category=config.Settings.from_json(json.loads(job.settings_json)).content_category, group_provider=provider)
+            return _creator_response({"ok": True, "collections": rows})
+        output = render_collection(job, args.collection_id, clips)
+        return _creator_response({"ok": True, "collection_id": args.collection_id, "path": str(output)})
+    except Exception as error:  # noqa: BLE001 - creator boundary returns typed JSON
+        return _creator_error(error)
 
 
 def cmd_edit(args: argparse.Namespace) -> int:
@@ -1239,6 +1368,8 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--camera", choices=["cut", "pan", "locked"], default=None)
     p_run.add_argument("--cookies-from-browser", choices=sorted(__import__("clipgauge_pipeline.ingest.ytdlp", fromlist=["SUPPORTED_BROWSER_SESSIONS"]).SUPPORTED_BROWSER_SESSIONS), default=None, help="explicitly use a supported browser session for authenticated video access")
     p_run.add_argument("--allow-cpu-asr-fallback", action="store_true", help="explicitly allow slower CPU speech fallback")
+    p_run.add_argument("--subtitle", default=None, help="optional external SRT or WebVTT subtitle file")
+    p_run.add_argument("--category", choices=config.CONTENT_CATEGORIES, default=None, help="optional content category guidance")
     p_run.set_defaults(fn=cmd_run)
 
     p_resume = sub.add_parser("resume", help="resume a job from its checkpoints")
@@ -1258,8 +1389,60 @@ def main(argv: list[str] | None = None) -> int:
     p_resume.add_argument("--stop-after", choices=["ingest", "asr", "diarize", "events", "candidates", "score", "camera", "render"], default=None, help=argparse.SUPPRESS)
     p_resume.set_defaults(fn=cmd_resume)
 
+    p_mcp = sub.add_parser("mcp", help="serve the persistent ClipGauge MCP interface over stdio")
+    p_mcp.set_defaults(fn=cmd_mcp)
+
+    p_serve = sub.add_parser("serve", help="serve the optional loopback-first headless API")
+    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("--port", type=int, default=8732)
+    p_serve.add_argument("--token-stdin", action="store_true", help=argparse.SUPPRESS)
+    p_serve.add_argument("--allow-origin", action="append", default=[])
+    p_serve.add_argument("--import-root", action="append", default=[])
+    p_serve.set_defaults(fn=cmd_serve)
+
     p_jobs = sub.add_parser("jobs", help="list jobs")
     p_jobs.set_defaults(fn=cmd_jobs)
+
+    p_title = sub.add_parser("title", help="creator title operations")
+    title_sub = p_title.add_subparsers(dest="creator_cmd", required=True)
+    p_title_get = title_sub.add_parser("get")
+    p_title_get.add_argument("job_id")
+    p_title_get.add_argument("clip_id")
+    p_title_set = title_sub.add_parser("set")
+    p_title_set.add_argument("job_id")
+    p_title_set.add_argument("clip_id")
+    p_title_set.add_argument("--title", required=True)
+    p_title_reset = title_sub.add_parser("reset")
+    p_title_reset.add_argument("job_id")
+    p_title_reset.add_argument("clip_id")
+    p_title.set_defaults(creator_domain="title", fn=cmd_creator)
+
+    p_collections = sub.add_parser("collections", help="creator collection operations")
+    collection_sub = p_collections.add_subparsers(dest="creator_cmd", required=True)
+    p_collection_list = collection_sub.add_parser("list")
+    p_collection_list.add_argument("job_id")
+    p_collection_create = collection_sub.add_parser("create")
+    p_collection_create.add_argument("job_id")
+    p_collection_create.add_argument("--title", required=True)
+    p_collection_create.add_argument("--clip", dest="clip_ids", action="append", required=True)
+    p_collection_update = collection_sub.add_parser("update")
+    p_collection_update.add_argument("job_id")
+    p_collection_update.add_argument("collection_id")
+    p_collection_update.add_argument("--title")
+    p_collection_update.add_argument("--clip", dest="clip_ids", action="append")
+    p_collection_delete = collection_sub.add_parser("delete")
+    p_collection_delete.add_argument("job_id")
+    p_collection_delete.add_argument("collection_id")
+    p_collection_reorder = collection_sub.add_parser("reorder")
+    p_collection_reorder.add_argument("job_id")
+    p_collection_reorder.add_argument("collection_id")
+    p_collection_reorder.add_argument("--clip", dest="clip_ids", action="append", required=True)
+    p_collection_regenerate = collection_sub.add_parser("regenerate")
+    p_collection_regenerate.add_argument("job_id")
+    p_collection_render = collection_sub.add_parser("render")
+    p_collection_render.add_argument("job_id")
+    p_collection_render.add_argument("collection_id")
+    p_collections.set_defaults(creator_domain="collections", fn=cmd_creator)
 
     p_edit = sub.add_parser("edit", help="per-clip editing (context / visuals / render)")
     edit_sub = p_edit.add_subparsers(dest="edit_cmd", required=True)

@@ -1,0 +1,15 @@
+services:
+  clipgauge:
+    build:
+      context: .
+      dockerfile: Dockerfile.headless
+    ports:
+      - "127.0.0.1:8732:8732"
+    environment:
+      CLIPGAUGE_HOME: /data/.clipgauge
+      CLIPGAUGE_SERVER_TOKEN: ${CLIPGAUGE_SERVER_TOKEN:?Set a local server token}
+    volumes:
+      - clipgauge_home:/data/.clipgauge
+
+volumes:
+  clipgauge_home:

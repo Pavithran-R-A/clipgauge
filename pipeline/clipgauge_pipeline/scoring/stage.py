@@ -21,7 +21,7 @@ from ..music import brief as music_brief
 from . import constants as constants_mod
 from . import frames as frames_mod
 from . import llm as llm_mod
-from . import providers as providers_mod
+from . import categories, providers as providers_mod
 from . import rubric, short_quality
 
 SELECT_COUNT = 12
@@ -212,9 +212,9 @@ def _events_desc(events: list[dict]) -> str:
     return "; ".join(parts)
 
 
-def _scoring_context(cand: dict, duration: float, events_desc: str) -> dict:
+def _scoring_context(cand: dict, duration: float, events_desc: str, category_guidance: str | None = None) -> dict:
     """Pass candidate evidence to every scoring round as untrusted hints."""
-    return {
+    context = {
         "duration": duration,
         "events_desc": events_desc,
         "candidate_evidence": {
@@ -224,6 +224,9 @@ def _scoring_context(cand: dict, duration: float, events_desc: str) -> dict:
             "central_premise": cand.get("central_premise"),
         },
     }
+    if category_guidance is not None:
+        context["category_guidance"] = category_guidance
+    return context
 
 
 def _generate_t1(client, prompt: str, schema: dict, sentence_ids: set[str]) -> dict:
@@ -1004,6 +1007,7 @@ class ScoreStage(Stage):
         budget = scoring_budget(local=is_local, candidate_count=len(candidates))
         output_preference = getattr(ctx.settings, "output_preference", "recommended")
         quality_mode = getattr(ctx.settings, "quality_mode", "private")
+        category = categories.category_profile(getattr(ctx.settings, "content_category", "auto"))
         try:
             config.validate_quality_mode_for_provider(quality_mode, profile.locality)
         except ValueError as err:
@@ -1049,7 +1053,7 @@ class ScoreStage(Stage):
             ctx.emit(i / max(1, len(prepared)) * 0.6, f"Scoring moment {i + 1}/{len(prepared)}…")
             window_events = _events_in(timeline, start, end)
             near_laughs = [e for e in _events_in(timeline, start, end, pad=3.0) if e["type"] == "laugh"]
-            context = _scoring_context(cand, end - start, _events_desc(window_events))
+            context = _scoring_context(cand, end - start, _events_desc(window_events), category.guidance)
             try:
                 t1_calls += 1
                 t1 = _generate_t1(
@@ -1134,7 +1138,7 @@ class ScoreStage(Stage):
                         e for e in _events_in(timeline, start, end, pad=3.0)
                         if e["type"] == "laugh"
                     ]
-                    context = _scoring_context(cand, end - start, _events_desc(window_events))
+                    context = _scoring_context(cand, end - start, _events_desc(window_events), category.guidance)
                     try:
                         t1_calls += 1
                         t1 = _generate_t1(
@@ -1215,7 +1219,7 @@ class ScoreStage(Stage):
                         e for e in _events_in(timeline, start, end, pad=3.0)
                         if e["type"] == "laugh"
                     ]
-                    context = _scoring_context(cand, end - start, _events_desc(window_events))
+                    context = _scoring_context(cand, end - start, _events_desc(window_events), category.guidance)
                     try:
                         t1_calls += 1
                         t1 = _generate_t1(
@@ -1639,6 +1643,8 @@ class ScoreStage(Stage):
             "requested_model": requested_model,
             "actual_model": actual_model,
             "quality_mode": quality_mode,
+            "content_category": category.category,
+            "category_guidance": category.guidance,
             "output_preference": output_preference,
             "rubric_version": providers_mod.RUBRIC_CACHE_VERSION,
             "capabilities": effective_capabilities,

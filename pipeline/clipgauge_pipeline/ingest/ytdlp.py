@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import threading
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -31,6 +32,8 @@ import httpx
 from .. import config, downloads, runtime
 from ..render import ffmpeg_bin
 from . import youtube_compat
+
+MAX_CAPTION_BYTES = 10 * 1024 * 1024
 
 _MANIFEST = Path(__file__).resolve().parents[2] / "runtime-manifest.json"
 
@@ -474,6 +477,52 @@ def fetch_meta(url: str, progress: ProgressFn, cookies_from_browser: str | None 
         heatmap=heatmap,
         raw=data,
     )
+
+
+def download_caption(url: str, out_path: Path, progress: ProgressFn) -> None:
+    """Download one extractor-selected caption track into the job directory."""
+    parsed = urlsplit(url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise YtDlpError("The selected platform caption URL is invalid.", code="CAPTION_URL_INVALID", retryable=False)
+    try:
+        with httpx.Client(timeout=config.HTTP_TIMEOUT, follow_redirects=True) as client:
+            with client.stream("GET", url) as response:
+                response.raise_for_status()
+                final = urlsplit(str(response.url))
+                if final.scheme not in {"http", "https"} or not final.hostname:
+                    raise YtDlpError("The platform caption redirect was invalid.", code="CAPTION_URL_INVALID", retryable=False)
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in response.iter_bytes():
+                    total += len(chunk)
+                    if total > MAX_CAPTION_BYTES:
+                        raise YtDlpError("Platform captions exceed the 10 MiB limit.", code="CAPTION_TOO_LARGE", retryable=False)
+                    chunks.append(chunk)
+            content = b"".join(chunks)
+    except YtDlpError:
+        raise
+    except (httpx.HTTPError, OSError):
+        raise YtDlpError(
+            "Could not download platform captions.",
+            code="CAPTION_DOWNLOAD_FAILED",
+            retryable=True,
+        )
+    if len(content) > MAX_CAPTION_BYTES:
+        raise YtDlpError("Platform captions exceed the 10 MiB limit.", code="CAPTION_TOO_LARGE", retryable=False)
+    if b"\x00" in content:
+        raise YtDlpError("Platform captions are not valid text.", code="CAPTION_BINARY", retryable=False)
+    try:
+        content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise YtDlpError("Platform captions must use UTF-8 text.", code="CAPTION_ENCODING_INVALID", retryable=False) from exc
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = out_path.with_name(f".{out_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(content)
+        temporary.replace(out_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    progress(0.94, "Accepted platform captions…")
 
 
 DOWNLOAD_FORMAT = (

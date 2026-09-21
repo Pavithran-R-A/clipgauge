@@ -2,6 +2,37 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.6.0] - Unreleased
+
+ClipGauge v0.6.0 expands the creator workflow on the immutable v0.5.22 baseline.
+
+### Added
+
+- External SRT and WebVTT subtitles can be supplied during ingest and reused by captioned renders.
+- Content profiles guide category-aware enrichment for Auto, Knowledge, and Entertainment workflows.
+- Publishing titles and descriptions are generated from validated finalist evidence.
+- Users can edit, save, reset, and persist clip titles across rerenders and restarts.
+- Smart collections use an optional provider-assisted path with explicit privacy boundaries.
+- Invalid or unavailable provider grouping falls back to deterministic collections.
+- Manual collections support create, rename, add, remove, reorder, render, playback, and delete.
+- Collection compilation produces reviewable local media outputs.
+- Headless FastAPI serving and MCP tools expose persistent job and collection operations.
+- Docker packages the headless service as a non-root container with persistent storage.
+- Bilibili ingestion is available as best-effort managed-downloader support.
+
+### Reliability
+
+- Native creator state, category persistence, playback assets, and high-DPI controls were qualified on Windows at 125% scaling.
+- Existing job databases, checkpoints, settings migration, resource guards, and v0.5.22 tag integrity remain preserved.
+- Python, frontend, Rust, Docker, secret-scan, Windows, and macOS qualification gates passed for the qualified branch.
+
+### Known limitations
+
+- Bilibili public-link ingestion is best effort and may fail when upstream yt-dlp or site compatibility changes.
+- The current headless Docker image is approximately 9.0 GB.
+- Linux and Windows release artifacts are unsigned.
+- macOS outputs are qualification builds without signing or notarization claims.
+
 ## [0.5.22] - 2026-09-18
 
 ClipGauge v0.5.22 records the merged Setup, YouTube installation, and recommendation-quality stabilization work.

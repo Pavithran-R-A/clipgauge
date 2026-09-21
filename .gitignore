@@ -37,4 +37,5 @@ app/src-tauri/resources/
 .qualification-artifact-success/
 .windows-pr40-artifact/
 app/.qa-artifacts/
+.superpowers/sdd/
 app/src-tauri/gen/schemas/windows-schema.json

@@ -1,0 +1,144 @@
+name: Docker headless qualification
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact commit, branch, or tag to qualify
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  headless:
+    name: Docker headless build and runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact qualification ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+
+      - name: Build headless image
+        env:
+          IMAGE: clipgauge-headless:qualification
+        run: docker build --pull --file Dockerfile.headless --tag "$IMAGE" .
+
+      - name: Exercise health, readiness, and restart
+        env:
+          IMAGE: clipgauge-headless:qualification
+          PORT: "18732"
+          TOKEN: qualification-token
+          REF: ${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -Eeuo pipefail
+          evidence_dir="$GITHUB_WORKSPACE/docker-qualification-evidence"
+          mkdir -p "$evidence_dir"
+          volume="clipgauge-qualification-${GITHUB_RUN_ID}"
+          container="clipgauge-qualification-${GITHUB_RUN_ID}"
+          cleanup() {
+            docker rm -f "$container" >/dev/null 2>&1 || true
+            docker volume rm "$volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker volume create "$volume" >/dev/null
+          docker run --detach --name "$container" \
+            --env CLIPGAUGE_SERVER_TOKEN="$TOKEN" \
+            --publish "127.0.0.1:${PORT}:8732" \
+            --volume "$volume:/data/.clipgauge" \
+            "$IMAGE" >/dev/null
+
+          health=''
+          readiness=''
+          for attempt in $(seq 1 30); do
+            if health="$(curl --silent --show-error --fail "http://127.0.0.1:${PORT}/v1/health")" \
+              && readiness="$(curl --silent --show-error --fail \
+                --header "X-ClipGauge-Token: ${TOKEN}" \
+                "http://127.0.0.1:${PORT}/v1/readiness")"; then
+              break
+            fi
+            if [[ "$attempt" == 30 ]]; then
+              docker logs "$container" || true
+              exit 1
+            fi
+            sleep 2
+          done
+
+          export HEALTH_JSON="$health"
+          export READINESS_JSON="$readiness"
+          python3 - <<'PY'
+          import json
+          import os
+
+          health = json.loads(os.environ["HEALTH_JSON"])
+          readiness = json.loads(os.environ["READINESS_JSON"])
+          assert health["ok"] is True
+          assert health["service"] == "clipgauge"
+          assert readiness["ok"] is True
+          assert readiness["state"] == "READY"
+          assert readiness["concurrency"] == 1
+          PY
+
+          without_token="$(curl --silent --show-error --fail \
+            "http://127.0.0.1:${PORT}/v1/health")"
+          [[ "$without_token" == "$health" ]]
+
+          volume_bytes="$(docker exec "$container" sh -c \
+            "du -sb /data/.clipgauge | awk '{print \$1}'")"
+          [[ "$volume_bytes" -lt 268435456 ]]
+          printf 'qualification marker\n' | docker exec -i "$container" \
+            sh -c 'cat > /data/.clipgauge/qualification-marker.txt'
+
+          image_bytes="$(docker image inspect "$IMAGE" --format '{{.Size}}')"
+          docker stats --no-stream --format '{{.MemUsage}}' "$container" > "$evidence_dir/container-memory.txt"
+          docker image inspect "$IMAGE" --format '{{.Size}}' > "$evidence_dir/image-size-bytes.txt"
+          printf '%s\n' "$health" > "$evidence_dir/health.json"
+          printf '%s\n' "$readiness" > "$evidence_dir/readiness.json"
+          cat > "$evidence_dir/qualification.json" <<EOF
+          {
+            "ref": "${REF}",
+            "image": "${IMAGE}",
+            "image_size_bytes": ${image_bytes},
+            "health_without_token": true,
+            "readiness_state": "READY",
+            "startup_volume_bytes": ${volume_bytes},
+            "model_download_guard_bytes": 268435456,
+            "persistent_volume_marker": true,
+            "fixture": "not-run; image qualification does not require model assets"
+          }
+          EOF
+
+          docker stop "$container" >/dev/null
+          docker rm "$container" >/dev/null
+          docker run --detach --name "$container" \
+            --env CLIPGAUGE_SERVER_TOKEN="$TOKEN" \
+            --publish "127.0.0.1:${PORT}:8732" \
+            --volume "$volume:/data/.clipgauge" \
+            "$IMAGE" >/dev/null
+          for attempt in $(seq 1 30); do
+            if curl --silent --show-error --fail \
+              "http://127.0.0.1:${PORT}/v1/health" >/dev/null; then
+              break
+            fi
+            if [[ "$attempt" == 30 ]]; then
+              docker logs "$container" || true
+              exit 1
+            fi
+            sleep 2
+          done
+          docker exec "$container" test -f /data/.clipgauge/qualification-marker.txt
+
+      - name: Upload compact Docker evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-headless-qualification-${{ github.run_id }}
+          path: docker-qualification-evidence
+          if-no-files-found: warn

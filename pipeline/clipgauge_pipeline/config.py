@@ -64,6 +64,7 @@ MAX_HEIGHT = 1080
 AUDIO_SR = 16_000
 QUALITY_MODES = ("private", "balanced", "best")
 OUTPUT_PREFERENCES = ("best", "recommended", "more")
+CONTENT_CATEGORIES = ("auto", "general", "knowledge", "business", "opinion", "experience", "speech", "content_review", "entertainment")
 
 
 def validate_quality_mode(value: str) -> str:
@@ -88,6 +89,13 @@ def validate_output_preference(value: str) -> str:
     if preference not in OUTPUT_PREFERENCES:
         raise ValueError(f"output preference must be one of: {', '.join(OUTPUT_PREFERENCES)}")
     return preference
+
+
+def validate_content_category(value: str | None) -> str:
+    category = str(value or "auto").strip().lower()
+    if category not in CONTENT_CATEGORIES:
+        raise ValueError(f"content category must be one of: {', '.join(CONTENT_CATEGORIES)}")
+    return category
 
 
 @dataclass
@@ -161,6 +169,7 @@ class Settings:
     caption_preset: str = "classic"
     laughter_specialist: bool = False
     allow_cpu_asr_fallback: bool = False
+    content_category: str = "auto"
 
     def provider_snapshot(self) -> dict[str, Any]:
         if self.provider_profile_id and self.provider_kind and self.provider_model:
@@ -182,7 +191,7 @@ class Settings:
         quality_mode = validate_quality_mode(self.quality_mode)
         output_preference = validate_output_preference(self.output_preference)
         return {
-            "settings_schema_version": 4,
+            "settings_schema_version": 5,
             "camera": self.camera.__dict__.copy(),
             "lufs_target": self.lufs_target,
             "true_peak_db": self.true_peak_db,
@@ -203,6 +212,7 @@ class Settings:
             "caption_preset": self.caption_preset,
             "laughter_specialist": self.laughter_specialist,
             "allow_cpu_asr_fallback": self.allow_cpu_asr_fallback,
+            "content_category": validate_content_category(self.content_category),
         }
 
     @classmethod
@@ -266,4 +276,5 @@ class Settings:
             caption_preset=data.get("caption_preset", "classic"),
             laughter_specialist=data.get("laughter_specialist", False),
             allow_cpu_asr_fallback=bool(data.get("allow_cpu_asr_fallback", False)),
+            content_category=validate_content_category(data.get("content_category", "auto")),
         )

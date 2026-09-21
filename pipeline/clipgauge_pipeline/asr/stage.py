@@ -271,6 +271,60 @@ class AsrStage(Stage):
         if not audio_path.exists():
             raise StageError("Analysis audio missing — re-run ingest.")
 
+        supplied = ingest.get("subtitle_transcript")
+        subtitle_meta = ingest.get("subtitle")
+        if isinstance(supplied, dict) and isinstance(subtitle_meta, dict) and subtitle_meta.get("mode") in {"external", "platform"}:
+            segments = supplied.get("segments")
+            if not isinstance(segments, list) or not segments:
+                raise StageError(
+                    "The accepted subtitle did not contain usable cues.",
+                    code="SUBTITLE_INVALID",
+                    retryable=False,
+                    stage=self.name,
+                )
+            ctx.emit(-1, "Preparing supplied subtitles…")
+            normalized_segments = [
+                {
+                    "start": round(float(segment["start"]), 3),
+                    "end": round(float(segment["end"]), 3),
+                    "text": str(segment.get("text", "")).strip(),
+                    "words": list(segment.get("words") or []),
+                }
+                for segment in segments
+                if isinstance(segment, dict) and float(segment.get("end", 0)) > float(segment.get("start", 0))
+            ]
+            word_count = sum(len(segment["words"]) for segment in normalized_segments)
+            if not normalized_segments or word_count == 0:
+                raise StageError("The accepted subtitle did not contain usable words.", code="SUBTITLE_INVALID", retryable=False, stage=self.name)
+            return {
+                "language": supplied.get("language", "und"),
+                "model": None,
+                "compute_type": None,
+                "device": "none",
+                "accelerator": "none",
+                "acceleration_state": "SUBTITLE FAST PATH",
+                "acceleration_reason": "Supplied or platform subtitle reused; transcription model was not loaded.",
+                "selected_device": "none",
+                "selected_compute_type": "none",
+                "transcription_device": "none",
+                "transcription_compute_type": "none",
+                "alignment_device": "none",
+                "alignment_status": "subtitle_interpolation",
+                "alignment_asset_id": None,
+                "alignment_reason": "Cue-level timings were deterministically interpolated.",
+                "transcription_batch_size": 0,
+                "transcription_mode": "external_subtitle",
+                "fallback_attempts": [],
+                "fallback_stages": [],
+                "segments": normalized_segments,
+                "word_count": word_count,
+                "transcript_source": supplied.get("transcript_source", "external_subtitle"),
+                "word_timing_source": supplied.get("word_timing_source", "subtitle_interpolation"),
+                "subtitle_language": supplied.get("subtitle_language"),
+                "subtitle_sha256": supplied.get("subtitle_sha256"),
+                "benchmark": {"audio_sec": float(ingest.get("probe", {}).get("duration_sec", 0.0)), "model_load_sec": 0.0, "transcribe_sec": 0.0, "align_sec": 0.0, "realtime_factor": None},
+            }
+
         _point_caches_at_home()
         asset_manager = downloads.DownloadManager()
         if not managed.ready(asset_manager):

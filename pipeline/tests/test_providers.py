@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 
 import httpx
@@ -346,8 +347,11 @@ def test_scoring_request_timeout_has_a_bounded_phase_cap(monkeypatch):
 
 
 def test_scoring_request_stops_waiting_at_wall_deadline(monkeypatch):
+    finished = threading.Event()
+
     def slow_post(*args, **kwargs):
         time.sleep(0.25)
+        finished.set()
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": '{"ok": true}'}}]},
@@ -356,8 +360,6 @@ def test_scoring_request_stops_waiting_at_wall_deadline(monkeypatch):
     monkeypatch.setattr(providers.httpx, "post", slow_post)
     adapter = providers.OpenAICompatibleAdapter(profile(), "secret-value")
     adapter.set_scoring_deadline(providers.time.monotonic() + 0.05)
-    started = time.monotonic()
-
     with pytest.raises(providers.ProviderError) as error:
         adapter.infer(
             providers.InferenceRequest(
@@ -369,7 +371,8 @@ def test_scoring_request_stops_waiting_at_wall_deadline(monkeypatch):
 
     assert error.value.code == "TIMEOUT"
     assert error.value.details["structured_output_status"] == "not_returned"
-    assert time.monotonic() - started < 0.2
+    assert not finished.is_set()
+    assert finished.wait(timeout=1.0)
 
 
 def test_scoring_request_respects_phase_timeout_when_provider_hangs(monkeypatch):

@@ -37,6 +37,7 @@ describe('desktop security configuration', () => {
   it('scopes assets to media directories rather than whole application state', () => {
     const scope = config.app.security.assetProtocol.scope
     expect(scope).toContain('$HOME/.clipgauge/jobs/*/clips/**/*')
+    expect(scope).toContain('$HOME/.clipgauge/jobs/*/collections/**/*')
     expect(scope).toContain('$HOME/.clipgauge/jobs/*/media*.mp4')
     expect(scope).toContain('$HOME/.clipgauge/jobs/*/overlays/**/*')
     expect(scope).toContain('$HOME/.clipgauge/ig_thumbs/**/*')

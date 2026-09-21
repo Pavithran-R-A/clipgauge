@@ -136,7 +136,7 @@ describe('application navigation handoffs', () => {
   it('revalidates the cached local model before running', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.22',
+      app_version: '0.6.0',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: 1_700_000_000,
@@ -170,7 +170,7 @@ describe('application navigation handoffs', () => {
   it('does not reuse a local model from an incomplete inventory envelope', async () => {
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.5.22',
+      app_version: '0.6.0',
       value: {
         state: 'ready',
         local_ai: { selected_model_id: 'clipgauge-local/balanced', preferred_model_id: 'clipgauge-local/balanced', runnable_model_id: 'clipgauge-local/balanced', runtime_ready: true, model_ready: true },
@@ -208,7 +208,7 @@ describe('application navigation handoffs', () => {
     await waitFor(() => expect(mocks.api.runJob).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(JSON.parse(window.localStorage.getItem('clipgauge.setup.inventory.v1') ?? '{}')).toMatchObject({
       schema_version: 1,
-      app_version: '0.5.22',
+      app_version: '0.6.0',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       value: { local_ai: { selected_model_id: 'clipgauge-local/balanced' } },

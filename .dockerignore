@@ -1,0 +1,15 @@
+.git/
+.github/
+.codex/
+app/node_modules/
+app/dist/
+app/src-tauri/target/
+pipeline/.venv/
+pipeline/.pytest_cache/
+pipeline/.ruff_cache/
+pipeline/.qualification-artifact-current/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+docs/
+*.log

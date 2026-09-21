@@ -1,6 +1,6 @@
 [project]
 name = "clipgauge-pipeline"
-version = "0.5.22"
+version = "0.6.0"
 description = "ClipGauge — local AI video clipper"
 license = "AGPL-3.0-or-later"
 requires-python = ">=3.12,<3.13"
@@ -21,6 +21,12 @@ dependencies = [
     "torchaudio==2.8.0",
     "torchvision==0.23.0",
     "whisperx==3.8.6",
+]
+
+[project.optional-dependencies]
+headless = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
 ]
 
 [project.scripts]
