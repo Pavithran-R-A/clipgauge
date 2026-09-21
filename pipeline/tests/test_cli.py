@@ -45,7 +45,7 @@ def test_youtube_test_emits_heartbeat_during_silent_provider(monkeypatch, capsys
     monkeypatch.setattr(cli, "YOUTUBE_TEST_HEARTBEAT_SECONDS", 0.01)
 
     def silent_probe():
-        cli.time.sleep(0.035)
+        cli.time.sleep(0.2)
         return {"ok": True}
 
     result = cli._run_with_setup_heartbeat(
@@ -72,7 +72,7 @@ def test_youtube_test_command_keeps_sidecar_active(monkeypatch, capsys):
     monkeypatch.setattr(cli.downloads, "DownloadManager", lambda event: object())
 
     def silent_probe():
-        cli.time.sleep(0.035)
+        cli.time.sleep(0.2)
         return {"ok": True}
 
     monkeypatch.setattr(youtube_compat, "test", silent_probe)
