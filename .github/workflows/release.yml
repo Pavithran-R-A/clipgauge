@@ -671,22 +671,30 @@ jobs:
           cat > RELEASE_NOTES.md <<EOF
           ## ClipGauge ${RELEASE_TAG}
 
-          ClipGauge ${RELEASE_TAG} is a qualified repair release for the local-first desktop pipeline.
+          ClipGauge ${RELEASE_TAG} delivers the qualified v0.6.0 creator capability suite.
 
-          - The Windows installer lifecycle now removes application resources during uninstall while preserving user-created ClipGauge data.
-          - Managed model and checkpoint loading now enforces approved identities, exact sizes, SHA-256 hashes, and repository/configuration restrictions.
-          - The qualification vault is isolated from production credentials during testing.
-          - Windows audio and import reliability improved through ASR CPU fallback and deterministic audio-analysis fallback behavior.
-          - Native creator and editor lifecycle qualification covered rendering, playback, editing, export, reopening, cancellation, and process cleanup.
-          - Windows DPI and high-scaling qualification covered the supported screen sizes, dialogs, long names, and progress or error states.
-          - Outstanding upstream Python advisories are documented individually in the v0.5.4 VEX; qualified ClipGauge paths are either not affected or mitigated.
-          - Public YouTube support remains best-effort. Local-file import is the reliable supported fallback; no login or bot restriction bypass is claimed.
+          - External SRT and WebVTT subtitles can be supplied during ingest and reused by captioned renders.
+          - Content profiles guide Auto, Knowledge, and Entertainment enrichment.
+          - Validated finalist evidence supports publishing title and description generation.
+          - Users can edit, save, reset, and persist clip titles across rerenders and restarts.
+          - Smart collections use an optional provider-assisted path with an explicit privacy boundary; invalid or unavailable provider output uses deterministic fallback grouping.
+          - Manual collections support create, rename, add, remove, reorder, render, playback, and delete.
+          - Optional loopback-first FastAPI serving and persistent MCP tools expose headless job and collection operations.
+          - Docker packages the headless service as a non-root container with persistent storage.
+          - Bilibili public-link ingestion remains best effort and environmentally dependent.
+          - Native creator, playback, export, persistence, and 125% Windows DPI qualification passed on the exact tag.
           - Linux amd64 Debian and Windows x64 NSIS artifacts are unsigned.
           - Native macOS ARM and Intel builds are qualification results; no signing or notarization is claimed.
           - The exact-tag publication is gated by a real managed-model E2E using the production-default captioned 1080x1920 render path; its summary is attached as \`MODEL_E2E_SUMMARY.json\`.
+          - The current headless Docker image is approximately 9.0 GB.
           - The CycloneDX SBOM, checksums, and provenance are generated from the immutable ${RELEASE_TAG} tag.
-          - \`SHA256SUMS\`, \`RELEASE_PROVENANCE.md\`, and \`ATTESTATION_STATUS.md\` describe the exact attached assets and distinguish checksums, metadata, GitHub attestations, and platform signing.
+          - \`SHA256SUMS\`, \`RELEASE_PROVENANCE.md\`, and \`ATTESTATION_STATUS.md\` describe exact assets, metadata, GitHub attestations, and signing status.
           - AGPL-3.0-or-later licensing and upstream publikclip attribution remain preserved.
+
+          Known limitations:
+
+          - Bilibili ingestion may fail when upstream yt-dlp or site compatibility changes.
+          - The Docker image is approximately 9.0 GB.
           EOF
       - name: Generate checksums from exact final release assets
         working-directory: release-assets

@@ -3,7 +3,7 @@ import { isLocalSetupInventory } from './nativeValidation'
 
 export const SETUP_INVENTORY_CACHE_KEY = 'clipgauge.setup.inventory.v1'
 export const SETUP_INVENTORY_CACHE_SCHEMA_VERSION = 1
-export const SETUP_INVENTORY_CACHE_APP_VERSION = '0.5.22'
+export const SETUP_INVENTORY_CACHE_APP_VERSION = '0.6.0'
 export const SETUP_INVENTORY_CACHE_TTL_MS = 15 * 60 * 1000
 
 type InventoryCacheRecord = {

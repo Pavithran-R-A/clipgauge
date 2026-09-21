@@ -73,8 +73,8 @@ if not re.search(r"^## \[0\.6\.0\](?:\s|$)", changelog, re.MULTILINE):
     errors.append("CHANGELOG.md: missing current v0.6.0 section")
 
 readme = (ROOT / "README.md").read_text()
-if "Current stable release: [v0.5.21]" not in readme:
-    errors.append("README.md: missing current stable v0.5.21 marker")
+if "Current stable release: [v0.5.22]" not in readme:
+    errors.append("README.md: missing current stable v0.5.22 marker")
 if "unsigned release candidate" in readme.lower():
     errors.append("README.md: stale 'unsigned release candidate' wording remains")
 

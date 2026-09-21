@@ -1,6 +1,6 @@
-# Installing ClipGauge v0.5.22
+# Installing ClipGauge
 
-ClipGauge v0.5.22 is being prepared from source. Public v0.5.21 remains the current stable release until v0.5.22 is published. When the native release gates succeed, the release workflow may produce unsigned Linux Debian, Windows NSIS, and macOS qualification artifacts. No signing or notarization is implied unless release evidence explicitly proves it.
+ClipGauge v0.5.22 is the current public stable release. The v0.6.0 candidate remains unreleased until its immutable-tag workflow completes. Source builds and release artifacts produce unsigned Linux Debian and Windows NSIS packages unless signing evidence explicitly proves otherwise. macOS builds remain qualification outputs unless signing and notarization are explicitly shown.
 
 ## Source-build prerequisites
 
@@ -57,7 +57,7 @@ Do not treat an unsigned artifact as proof of publisher identity. Verify `SHA256
 
 ## Windows and macOS release artifacts
 
-The v0.5.22 release workflow will build a fresh Windows x64 NSIS installer from the v0.5.22 tag only after native tests, resource staging, silent installation, and installed-process smoke checks pass. Any installer will be unsigned. Do not describe it as Authenticode-signed.
+The v0.6.0 release workflow will build a fresh Windows x64 NSIS installer from the v0.6.0 tag only after native tests, resource staging, silent installation, and installed-process smoke checks pass. Any installer will be unsigned. Do not describe it as Authenticode-signed.
 
 The release workflow also attempts native Apple Silicon and Intel macOS qualification. These jobs inspect `.app` metadata and packaged resources and may build unsigned DMG files for engineering validation. A successful macOS compilation is not a signed or notarized distribution claim; use the release notes to determine whether any macOS artifact is attached publicly.
 
