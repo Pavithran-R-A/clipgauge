@@ -96,7 +96,7 @@ describe('onboarding setup controls', () => {
     } })
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.6.0',
+      app_version: '0.6.1',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: 1_700_000_000,
@@ -126,7 +126,7 @@ describe('onboarding setup controls', () => {
     } })
     window.localStorage.setItem('clipgauge.setup.inventory.v1', JSON.stringify({
       schema_version: 1,
-      app_version: '0.6.0',
+      app_version: '0.6.1',
       platform: 'windows-x86_64',
       runtime_manifest_digest: 'manifest-a',
       last_verified_at: 1_700_000_000,

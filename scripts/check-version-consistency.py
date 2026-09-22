@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import re
 import sys
-import tomllib
 from pathlib import Path
 
-EXPECTED = "0.6.0"
+import tomllib
+
+EXPECTED = "0.6.1"
+PUBLIC_STABLE = "0.6.0"
 ROOT = Path(__file__).resolve().parents[1]
 errors: list[str] = []
 
@@ -69,18 +71,18 @@ init_match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']\s*$', init_text,
 require("clipgauge_pipeline.__version__", init_match.group(1) if init_match else None)
 
 changelog = (ROOT / "CHANGELOG.md").read_text()
-if not re.search(r"^## \[0\.6\.0\](?:\s|$)", changelog, re.MULTILINE):
-    errors.append("CHANGELOG.md: missing current v0.6.0 section")
+if not re.search(r"^## \[0\.6\.1\](?:\s|$)", changelog, re.MULTILINE):
+    errors.append("CHANGELOG.md: missing current v0.6.1 section")
 
 readme = (ROOT / "README.md").read_text()
-if "Current stable release: [v0.6.0]" not in readme:
+if f"Current stable release: [v{PUBLIC_STABLE}]" not in readme:
     errors.append("README.md: missing current stable v0.6.0 marker")
 if "unsigned release candidate" in readme.lower():
     errors.append("README.md: stale 'unsigned release candidate' wording remains")
 
 about = (ROOT / "app/src/components/About.tsx").read_text()
-if "ClipGauge v0.6.0" not in about:
-    errors.append("About.tsx: missing current ClipGauge v0.6.0 marker")
+if f"ClipGauge v{EXPECTED}" not in about:
+    errors.append(f"About.tsx: missing current ClipGauge v{EXPECTED} marker")
 
 if errors:
     print("Version consistency check FAILED:")

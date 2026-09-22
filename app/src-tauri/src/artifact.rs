@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 
 use crate::path_security::{resolve_existing_file, resolve_job_dir};
 
@@ -65,6 +66,45 @@ fn apply_creator_title_overrides(stage: &mut Value, overrides: &Value) {
             "title_source".to_string(),
             Value::String("user".to_string()),
         );
+    }
+}
+
+fn clip_number(clip: &Value, key: &str) -> f64 {
+    clip.get(key)
+        .and_then(|value| value.as_f64().or_else(|| value.as_str()?.parse().ok()))
+        .unwrap_or(0.0)
+}
+
+fn stable_clip_id(clip: &Value, index: usize) -> String {
+    let raw = format!(
+        "{index}:{:.3}:{:.3}",
+        clip_number(clip, "start"),
+        clip_number(clip, "end")
+    );
+    let digest = Sha256::digest(raw.as_bytes());
+    let suffix = digest[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("clip-{suffix}")
+}
+
+fn normalize_clip_ids(stage: &mut Value) {
+    let Some(clips) = stage.get_mut("clips").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for (index, clip) in clips.iter_mut().enumerate() {
+        let has_id = clip
+            .get("clip_id")
+            .and_then(Value::as_str)
+            .is_some_and(|identifier| !identifier.trim().is_empty());
+        if !has_id {
+            let identifier = stable_clip_id(clip, index);
+            let Some(object) = clip.as_object_mut() else {
+                continue;
+            };
+            object.insert("clip_id".to_string(), Value::String(identifier));
+        }
     }
 }
 
@@ -178,6 +218,8 @@ pub fn job_results(home: &Path, job_id: &str) -> Result<Value, String> {
     });
 
     let mut score = score;
+    let mut enrich = enrich;
+    normalize_clip_ids(&mut enrich);
     if let (Some(score_clips), Some(enriched_clips)) = (
         score.get_mut("clips").and_then(Value::as_array_mut),
         enrich.get("clips").and_then(Value::as_array),
@@ -197,13 +239,21 @@ pub fn job_results(home: &Path, job_id: &str) -> Result<Value, String> {
                 "description_source",
             ] {
                 if let Some(value) = enriched.get(key) {
+                    if key == "clip_id"
+                        && target
+                            .get(key)
+                            .and_then(Value::as_str)
+                            .is_some_and(|identifier| !identifier.trim().is_empty())
+                    {
+                        continue;
+                    }
                     target.insert(key.to_string(), value.clone());
                 }
             }
         }
     }
+    normalize_clip_ids(&mut score);
     apply_creator_title_overrides(&mut score, &creator_overrides);
-    let mut enrich = enrich;
     apply_creator_title_overrides(&mut enrich, &creator_overrides);
 
     if let Some(outputs) = render.get_mut("outputs").and_then(Value::as_array_mut) {
@@ -478,6 +528,58 @@ mod tests {
             "Bait phrases were checked against the candidate transcript."
         );
         assert_eq!(result["outcome"], "SUCCESS_WITH_CLIPS");
+    }
+
+    #[test]
+    fn normalizes_legacy_score_only_clip_ids_for_creator_identity() {
+        let home = fixture();
+        let job = home.join("jobs/20260818-155237-c6b118");
+        fs::write(
+            job.join("score.json"),
+            serde_json::to_vec(&json!({
+                "data": {
+                    "outcome": "SUCCESS_WITH_CLIPS",
+                    "clips": [
+                        {"start": 0.0, "end": 5.0, "title": "First"},
+                        {"start": 8.0, "end": 12.0, "title": "Second"}
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let result = job_results(&home, "20260818-155237-c6b118").unwrap();
+
+        assert_eq!(result["score"]["clips"][0]["clip_id"], "clip-1371c190c71b");
+        assert_eq!(result["score"]["clips"][1]["clip_id"], "clip-7d164382761c");
+    }
+
+    #[test]
+    fn preserves_enriched_clip_identity_when_normalizing_score() {
+        let home = fixture();
+        let job = home.join("jobs/20260818-155237-c6b118");
+        fs::write(
+            job.join("score.json"),
+            serde_json::to_vec(&json!({
+                "data": {"clips": [{"start": 0.0, "end": 5.0, "title": "Score"}]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            job.join("enrich.json"),
+            serde_json::to_vec(&json!({
+                "data": {"clips": [{"clip_id": "clip-custom", "title": "Enriched"}]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let result = job_results(&home, "20260818-155237-c6b118").unwrap();
+
+        assert_eq!(result["score"]["clips"][0]["clip_id"], "clip-custom");
+        assert_eq!(result["score"]["clips"][0]["title"], "Enriched");
     }
 
     #[test]

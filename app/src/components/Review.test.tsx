@@ -308,6 +308,38 @@ describe('Review media trust states', () => {
     expect(screen.getByRole('button', { name: 'Create' })).toBeEnabled()
   })
 
+  it('uses enriched creator clips when score clips are legacy', () => {
+    const legacy = creatorResults()
+    legacy.score = {
+      ...legacy.score!,
+      clips: legacy.score!.clips.map(({ clip_id: _clipId, ...clipWithoutId }) => clipWithoutId),
+    }
+    render(<Review results={legacy} onBack={vi.fn()} onRestyle={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create collection' }))
+
+    expect(screen.getByLabelText('First generated')).toBeInTheDocument()
+    expect(screen.getByLabelText('Second generated')).toBeInTheDocument()
+  })
+
+  it('surfaces a missing collection render path', async () => {
+    vi.mocked(api.renderCollection).mockResolvedValueOnce({ ok: true } as never)
+    render(<Review results={creatorResults()} onBack={vi.fn()} onRestyle={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Render series' }))
+
+    expect(await screen.findByText('Collection render could not be completed.')).toBeInTheDocument()
+  })
+
+  it('surfaces typed collection render failures', async () => {
+    vi.mocked(api.renderCollection).mockRejectedValueOnce(new Error('render collection failed'))
+    render(<Review results={creatorResults()} onBack={vi.fn()} onRestyle={vi.fn()} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Render series' }))
+
+    expect(await screen.findByText('Collection render could not be completed.')).toBeInTheDocument()
+  })
+
   it('rejects duplicate output identities instead of choosing one clip', () => {
     const duplicate: JobResults = {
       ...results({ path: '/managed/jobs/job/clips/clip_00.mp4', artifact_status: 'available', clip_id: 'clip-duplicate' }),

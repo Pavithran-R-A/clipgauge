@@ -671,7 +671,7 @@ jobs:
           cat > RELEASE_NOTES.md <<EOF
           ## ClipGauge ${RELEASE_TAG}
 
-          ClipGauge ${RELEASE_TAG} delivers the qualified v0.6.0 creator capability suite.
+          ClipGauge ${RELEASE_TAG} delivers the qualified creator workflow and the v0.6.1 public Windows collection and upgrade repairs.
 
           - External SRT and WebVTT subtitles can be supplied during ingest and reused by captioned renders.
           - Content profiles guide Auto, Knowledge, and Entertainment enrichment.
