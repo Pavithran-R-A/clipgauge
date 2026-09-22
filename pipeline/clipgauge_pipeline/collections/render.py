@@ -6,15 +6,15 @@ import subprocess
 import uuid
 from pathlib import Path
 
-from ..render import ffmpeg_bin
+from ..creator_state import clip_id_for
 from ..ingest import normalize
-from ..enrich.stage import stable_clip_id
+from ..render import ffmpeg_bin
 from .model import safe_name
 from .service import list_collections, set_collection_render_path
 
 
 def _clip_paths(job, clips: list[dict], clip_ids: list[str]) -> list[Path]:
-    mapping = {stable_clip_id(clip, index): clip for index, clip in enumerate(clips)}
+    mapping = {clip_id_for(clip, index): clip for index, clip in enumerate(clips)}
     paths: list[Path] = []
     for identifier in clip_ids:
         clip = mapping.get(identifier)
@@ -23,11 +23,11 @@ def _clip_paths(job, clips: list[dict], clip_ids: list[str]) -> list[Path]:
         raw = clip.get("render_path") or clip.get("path")
         if not raw:
             raise ValueError(f"collection clip {identifier} has no rendered output")
-        root = job.dir.resolve()
+        root = (job.dir / "clips").resolve()
         raw_path = Path(str(raw))
-        candidate = (root / raw_path if not raw_path.is_absolute() else raw_path).resolve()
+        candidate = (job.dir / raw_path if not raw_path.is_absolute() else raw_path).resolve()
         if root not in candidate.parents or not candidate.is_file():
-            raise ValueError("collection clip is outside the managed job directory")
+            raise ValueError("collection clip is outside the managed clips directory")
         paths.append(candidate)
     return paths
 
@@ -51,10 +51,10 @@ def render_collection(job, identifier: str, clips: list[dict]) -> Path:
     temporary = output_dir / f".{target.name}.{uuid.uuid4().hex}.tmp.mp4"
     try:
         command = [ffmpeg_bin.ffmpeg(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_path), "-c", "copy", "-movflags", "+faststart", str(temporary)]
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=3600)
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=3600, check=False)
         if completed.returncode != 0:
             command = [ffmpeg_bin.ffmpeg(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_path), "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart", str(temporary)]
-            completed = subprocess.run(command, capture_output=True, text=True, timeout=3600)
+            completed = subprocess.run(command, capture_output=True, text=True, timeout=3600, check=False)
         if completed.returncode != 0 or not temporary.is_file():
             raise ValueError("FFmpeg could not compile the collection")
         probe = normalize.probe(temporary)

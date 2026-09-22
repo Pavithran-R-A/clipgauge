@@ -2,6 +2,18 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.6.1] - Unreleased
+
+ClipGauge v0.6.1 is a narrowly scoped post-release repair.
+
+### Fixed
+
+- Legacy score-only jobs now receive stable creator clip IDs.
+- Persisted render outputs now assemble into collection source clips.
+- Collection sidecar failures and missing output paths are surfaced.
+- In-place Windows upgrades refresh active uninstall metadata.
+- Creator titles and collection state remain persistent across rerenders and restarts.
+
 ## [0.6.0] - Unreleased
 
 ClipGauge v0.6.0 expands the creator workflow on the immutable v0.5.22 baseline.

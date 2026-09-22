@@ -1029,17 +1029,9 @@ def cmd_jobs(args: argparse.Namespace) -> int:
 
 
 def _creator_clips(job: queue.Job) -> list[dict]:
-    for stage_name in ("enrich", "score"):
-        path = job.dir / f"{stage_name}.json"
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        data = value.get("data") if isinstance(value, dict) else None
-        clips = data.get("clips") if isinstance(data, dict) else None
-        if isinstance(clips, list):
-            return [dict(item) for item in clips if isinstance(item, dict)]
-    return []
+    from .creator_state import creator_clips_for_job
+
+    return creator_clips_for_job(job)
 
 
 def _creator_response(payload: dict, *, code: int = 0) -> int:

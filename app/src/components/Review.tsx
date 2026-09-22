@@ -189,7 +189,7 @@ export default function Review({ results, onBack, onRestyle }: Props) {
   const titleOverride = selectedClipId ? titleOverrides[selectedClipId] : undefined
   const selectedTitle = titleOverride?.title ?? pair?.scoreClip.title ?? ''
   const selectedTitleSource = titleOverride?.title_source ?? pair?.scoreClip.title_source ?? 'deterministic'
-  const creatorClips = results.score?.clips ?? results.enrich?.clips ?? []
+  const creatorClips = results.enrich?.clips?.length ? results.enrich.clips : results.score?.clips ?? []
 
   useEffect(() => {
     setTitleDraft(selectedTitle)
@@ -317,7 +317,8 @@ export default function Review({ results, onBack, onRestyle }: Props) {
     try {
       const result = await api.renderCollection(results.job_id, collection.id)
       if (!mountedRef.current) return
-      if (result.path) setCollections((current) => current.map((item) => item.id === collection.id ? { ...item, render_path: result.path } : item))
+      if (!result.path?.trim()) throw new Error('Collection render returned no output path.')
+      setCollections((current) => current.map((item) => item.id === collection.id ? { ...item, render_path: result.path } : item))
     } catch (error) {
       if (mountedRef.current) setCreatorError(friendlyErrorMessage(error, 'Collection render could not be completed.'))
     } finally {

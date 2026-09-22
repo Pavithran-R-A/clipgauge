@@ -2,8 +2,9 @@ import json
 from pathlib import Path
 
 import pytest
-
-from clipgauge_pipeline import config
+from clipgauge_pipeline import cli, config
+from clipgauge_pipeline.collections import render as collection_render
+from clipgauge_pipeline.collections.render import render_collection
 from clipgauge_pipeline.collections.service import (
     create_collection,
     delete_collection,
@@ -12,8 +13,7 @@ from clipgauge_pipeline.collections.service import (
     reorder_collection,
     update_collection,
 )
-from clipgauge_pipeline.collections.render import render_collection
-from clipgauge_pipeline.collections import render as collection_render
+from clipgauge_pipeline.creator_state import creator_clips_for_job
 from clipgauge_pipeline.enrich.stage import stable_clip_id
 from clipgauge_pipeline.ingest.manifest import default_manifest
 from clipgauge_pipeline.jobs import queue
@@ -128,3 +128,55 @@ def test_render_collection_resolves_relative_render_paths_inside_job(tmp_path, m
     assert output.read_bytes() == b"compiled"
     assert list_collections(job, clips)[0]["render_path"] == str(output)
     assert not list((job.dir / "collections").glob(".*.txt"))
+
+
+def test_legacy_score_only_job_renders_collection_from_persisted_outputs(tmp_path, monkeypatch):
+    job = _job(tmp_path)
+    score_clips = _clips()
+    clips_dir = job.dir / "clips"
+    clips_dir.mkdir()
+    (clips_dir / "clip_00.mp4").write_bytes(b"first")
+    (clips_dir / "clip_01.mp4").write_bytes(b"second")
+    (job.dir / "score.json").write_text(
+        json.dumps({"data": {"clips": score_clips}}), encoding="utf-8"
+    )
+    (job.dir / "render.json").write_text(json.dumps({
+        "data": {
+            "outputs": [
+                {"clip": 0, "path": "clips/clip_00.mp4"},
+                {"clip": 1, "path": "clips/clip_01.mp4"},
+            ]
+        }
+    }), encoding="utf-8")
+    clips = creator_clips_for_job(job)
+    ids = [item["clip_id"] for item in clips]
+    (job.dir / "collections.json").write_text(json.dumps({
+        "schema_version": 1,
+        "job_id": job.id,
+        "collections": [{
+            "id": "legacy-series",
+            "title": "Legacy series",
+            "clip_ids": ids,
+            "source": "manual",
+            "user_edited": True,
+        }],
+    }), encoding="utf-8")
+
+    def fake_run(command, **_kwargs):
+        temporary = Path(command[-1])
+        temporary.write_bytes(b"compiled")
+        return type("Completed", (), {"returncode": 0, "stderr": ""})()
+
+    monkeypatch.setattr(collection_render.ffmpeg_bin, "ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(collection_render.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        collection_render.normalize,
+        "probe",
+        lambda _path: type("Probe", (), {"has_audio": True, "duration_sec": 10.0})(),
+    )
+
+    assert cli.main(["collections", "render", job.id, "legacy-series"]) == 0
+    output = job.dir / "collections" / "Legacy-series.mp4"
+
+    assert output.is_file()
+    assert list_collections(job, clips)[0]["render_path"] == str(output)

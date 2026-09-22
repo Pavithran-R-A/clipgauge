@@ -1259,6 +1259,88 @@ where
     }
 }
 
+fn sidecar_failure_message(value: &Value, operation: &str) -> Option<String> {
+    if value.get("ok").and_then(Value::as_bool) != Some(false) {
+        return None;
+    }
+    let detail = value
+        .get("error")
+        .and_then(Value::as_str)
+        .map(diagnostics::redact)
+        .unwrap_or_else(|| "sidecar reported failure".to_string());
+    Some(format!(
+        "{operation} failed: {}",
+        detail.chars().take(400).collect::<String>()
+    ))
+}
+
+fn validate_sidecar_result(
+    status_success: bool,
+    value: Option<Value>,
+    operation: &str,
+    stderr: &str,
+) -> Result<Value, String> {
+    let stderr_tail = diagnostics::redact(stderr);
+    if !status_success {
+        if let Some(value) = value
+            .as_ref()
+            .and_then(|item| sidecar_failure_message(item, operation))
+        {
+            return Err(value);
+        }
+        return Err(format!(
+            "{operation} failed: {}",
+            stderr_tail.chars().take(400).collect::<String>()
+        ));
+    }
+    let value = value.ok_or_else(|| {
+        format!(
+            "{operation} returned no JSON result: {}",
+            stderr_tail.chars().take(400).collect::<String>()
+        )
+    })?;
+    if let Some(error) = sidecar_failure_message(&value, operation) {
+        return Err(error);
+    }
+    Ok(value)
+}
+
+fn validate_render_collection_result(
+    home: &Path,
+    job_id: &str,
+    value: Value,
+) -> Result<Value, String> {
+    let mut value = validate_sidecar_result(true, Some(value), "render collection", "")?;
+    let raw = value
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| "render collection returned no output path".to_string())?;
+    let job_dir = path_security::resolve_job_dir(home, job_id)?;
+    let raw_path = Path::new(raw);
+    let candidate = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        job_dir.join(raw_path)
+    };
+    let resolved = path_security::resolve_existing_file(&job_dir.join("collections"), &candidate)?;
+    if resolved
+        .extension()
+        .and_then(|extension| extension.to_str())
+        != Some("mp4")
+    {
+        return Err("render collection returned a non-MP4 output".to_string());
+    }
+    value
+        .as_object_mut()
+        .ok_or_else(|| "render collection returned malformed JSON".to_string())?
+        .insert(
+            "path".to_string(),
+            Value::String(resolved.to_string_lossy().to_string()),
+        );
+    Ok(value)
+}
+
 fn run_json_sidecar(command: Command, operation: &str) -> Result<Value, String> {
     let output =
         sidecar::run_bounded(command, sidecar::RunPolicy::initialization()).map_err(|error| {
@@ -1284,17 +1366,8 @@ fn run_json_sidecar(command: Command, operation: &str) -> Result<Value, String> 
         .lines()
         .rev()
         .find(|line| line.trim_start().starts_with('{'));
-    match line.and_then(|line| serde_json::from_str::<Value>(line).ok()) {
-        Some(value) => Ok(value),
-        None if !output.status.success() => Err(format!(
-            "{operation} failed: {}",
-            stderr_tail.chars().take(400).collect::<String>()
-        )),
-        None => Err(format!(
-            "{operation} returned no JSON result: {}",
-            stderr_tail.chars().take(400).collect::<String>()
-        )),
-    }
+    let value = line.and_then(|line| serde_json::from_str::<Value>(line).ok());
+    validate_sidecar_result(output.status.success(), value, operation, &stderr_tail)
 }
 
 fn stream_pipeline(
@@ -2343,11 +2416,12 @@ async fn regenerate_collections(job_id: String) -> Result<Value, String> {
 async fn render_collection(job_id: String, collection_id: String) -> Result<Value, String> {
     let sidecar_job = job_id.clone();
     spawn_blocking_result(move || {
-        creator_sidecar_blocking(
+        let value = creator_sidecar_blocking(
             vec!["collections".into(), "render".into(), job_id, collection_id],
             &sidecar_job,
             "render collection",
-        )
+        )?;
+        validate_render_collection_result(&home_dir(), &sidecar_job, value)
     })
     .await
 }
@@ -2755,7 +2829,8 @@ mod tests {
         migrate_legacy_data_from, privacy_summary, read_bounded_line, selected_provider_env,
         setup_start_failure_message, spawn_blocking_result, valid_setup_tool_args,
         valid_start_setup_args, validate_browser_session, validate_creator_job_id,
-        ResumeJobRequest, RunJobRequest,
+        validate_render_collection_result, validate_sidecar_result, ResumeJobRequest,
+        RunJobRequest,
     };
     use serde_json::json;
 
@@ -2817,6 +2892,64 @@ mod tests {
             Some(true)
         );
         assert_eq!(line, br#"{"event":"terminal"}"#);
+    }
+
+    #[test]
+    fn nonzero_sidecar_exit_is_failure_even_with_json() {
+        let result = validate_sidecar_result(
+            false,
+            Some(json!({"ok": true})),
+            "render collection",
+            "process failed",
+        );
+        assert!(result.unwrap_err().contains("process failed"));
+    }
+
+    #[test]
+    fn sidecar_ok_false_is_failure_with_safe_error() {
+        let result = validate_sidecar_result(
+            true,
+            Some(json!({"ok": false, "error": "render failed"})),
+            "render collection",
+            "",
+        );
+        assert!(result.unwrap_err().contains("render failed"));
+    }
+
+    #[test]
+    fn render_collection_requires_a_path() {
+        let root = std::env::temp_dir().join(format!(
+            "clipgauge-render-result-{}",
+            super::diagnostics::diagnostic_id()
+        ));
+        fs::create_dir_all(root.join("jobs/20260818-155237-c6b118/collections")).unwrap();
+        let result =
+            validate_render_collection_result(&root, "20260818-155237-c6b118", json!({"ok": true}));
+        assert!(result.unwrap_err().contains("path"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn render_collection_accepts_existing_managed_mp4_path() {
+        let root = std::env::temp_dir().join(format!(
+            "clipgauge-render-result-{}",
+            super::diagnostics::diagnostic_id()
+        ));
+        let collections = root.join("jobs/20260818-155237-c6b118/collections");
+        fs::create_dir_all(&collections).unwrap();
+        let output = collections.join("series.mp4");
+        fs::write(&output, b"video").unwrap();
+        let result = validate_render_collection_result(
+            &root,
+            "20260818-155237-c6b118",
+            json!({"ok": true, "path": "collections/series.mp4"}),
+        )
+        .unwrap();
+        assert_eq!(
+            result["path"],
+            output.canonicalize().unwrap().to_string_lossy().to_string()
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(target_os = "windows")]
