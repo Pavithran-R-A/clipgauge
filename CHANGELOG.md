@@ -2,6 +2,18 @@
 
 All notable ClipGauge changes are recorded here. The v0.1.0 release is the first public ClipGauge release in this repository and is a modified derivative of publikclip; see [`ORIGIN.md`](ORIGIN.md) for the exact baseline.
 
+## [0.6.2] - Unreleased
+
+ClipGauge v0.6.2 is a product-quality and ingest-reliability repair pass.
+
+### Fixed
+
+- YouTube failures preserve bounded stdout and stderr evidence.
+- Public-transfer readiness separates last success from latest attempt.
+- Failed sessions retain source identity and terminal summaries.
+- Creator errors separate actionable copy from diagnostic identifiers.
+- Create and Setup views use focused progressive disclosure.
+
 ## [0.6.1] - Unreleased
 
 ClipGauge v0.6.1 is a narrowly scoped post-release repair.

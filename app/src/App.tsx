@@ -20,6 +20,7 @@ import { readCachedSetupInventory, writeCachedSetupInventory } from './setupInve
 import { normalizeJobResults } from './jobResultsValidation'
 import { isInstagramStatus, isJobSummaryList, isLocalSetupInventory, isPreflightResult, isSetupState } from './nativeValidation'
 import { friendlyErrorMessage } from './errorMessaging'
+import { presentPipelineError } from './errorPresentation'
 import { isCloudProvider, type QualityMode } from './providerContract'
 import './styles.css'
 
@@ -392,8 +393,9 @@ export default function App() {
           setRunErrorCode(payload.code ?? null)
           setRunNotice(null)
           const friendly = payload.code ? FRIENDLY_FAILURES[payload.code] : undefined
+          const presentation = presentPipelineError(payload.code, payload.diagnostic_id, friendly ?? payload.message ?? 'The video could not be processed.')
           const diagnostic = payload.diagnostic_id ? ` Technical details: ${payload.diagnostic_id}.` : ''
-          setRunError(`${friendly ?? payload.message ?? 'The video could not be processed.'}${diagnostic}`)
+          setRunError(`${presentation.message}${diagnostic}`)
         }
       } else if (payload.event === 'result') {
         setCpuResumeAvailable(false)
@@ -424,8 +426,9 @@ export default function App() {
         setRunErrorCode(payload.code ?? 'PIPELINE_NATIVE_CRASH')
         setCpuResumeAvailable(payload.allow_cpu_resume === true)
         const friendly = payload.code ? FRIENDLY_FAILURES[payload.code] : undefined
+        const presentation = presentPipelineError(payload.code, payload.diagnostic_id, friendly ?? payload.message ?? 'The video stopped unexpectedly.')
         const diagnostic = payload.diagnostic_id ? ` Technical details: ${payload.diagnostic_id}.` : ''
-        setRunError(`${friendly ?? payload.message ?? 'The video stopped unexpectedly.'}${diagnostic}`)
+        setRunError(`${presentation.message}${diagnostic}`)
       }
     }).then((unlisten) => { if (disposed) unlisten(); else unlistenRef.current = unlisten }).catch(() => {
       if (!disposed) setRunError('Pipeline events are unavailable. Restart ClipGauge and retry.')
@@ -597,8 +600,8 @@ export default function App() {
   }
 
   let content
-  if (section === 'create') content = <Studio jobs={jobs} running={running} runState={runState} cancelling={cancelling} startedAt={runStartedAt} elapsedSeconds={finalElapsedSeconds} stages={stages} error={runError} errorCode={runErrorCode} cpuResumeAvailable={cpuResumeAvailable} notice={runNotice} resultsLoadFailed={Boolean(resultsLoadJobId)} onRetryResults={retryResults} onRun={startRun} localModelId={selectedLocalProvider === 'clipgauge-local' ? localModelState.preferredModelId ?? undefined : undefined} localModelReady={selectedLocalProvider === 'clipgauge-local' ? Boolean(localModelState.runnableModelId && localModelState.runnableModelId === localModelState.preferredModelId) : undefined} localModelLoading={selectedLocalProvider === 'clipgauge-local' ? localModelState.loading : false} localModelError={selectedLocalProvider === 'clipgauge-local' ? localModelState.error : null} selectedLocalProvider={selectedLocalProvider} selectedCloudProvider={selectedCloudProvider} selectedCloudModel={selectedCloudModel} cloudModelAvailable={providerQualification?.modelAvailable} cloudModelCompatible={providerQualification?.modelCompatible} cloudServiceReady={providerQualification?.serviceReady} cloudConfigured={cloudConfigured} providerEndpoint={selectedCloudProvider === 'custom' || selectedCloudProvider === 'cloudflare' ? readSavedProviderEndpoint(selectedCloudProvider) : undefined} qualityMode={qualityMode} onQualityModeChange={selectQualityMode} onContinueCpu={continueCpu} onRepairGpu={repairGpu} gpuRepairing={gpuRepairing} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { if (!mountedRef.current) return; setCancelling(false); setRunError(friendlyErrorMessage(error, 'The job could not be cancelled. Retry the action.')) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={selectProvider} onOpenJob={openJob} onResume={(id) => { void resumeJobAction(id) }} />
-  else if (section === 'sessions') content = <Sessions jobs={jobs} onBack={() => setSection('create')} onOpenJob={openJob} onResume={resumeFromSessions} />
+  if (section === 'create') content = <Studio jobs={jobs} running={running} runState={runState} cancelling={cancelling} startedAt={runStartedAt} elapsedSeconds={finalElapsedSeconds} stages={stages} error={runError} errorCode={runErrorCode} diagnosticId={activeDiagnosticId} cpuResumeAvailable={cpuResumeAvailable} notice={runNotice} resultsLoadFailed={Boolean(resultsLoadJobId)} onRetryResults={retryResults} onRun={startRun} localModelId={selectedLocalProvider === 'clipgauge-local' ? localModelState.preferredModelId ?? undefined : undefined} localModelReady={selectedLocalProvider === 'clipgauge-local' ? Boolean(localModelState.runnableModelId && localModelState.runnableModelId === localModelState.preferredModelId) : undefined} localModelLoading={selectedLocalProvider === 'clipgauge-local' ? localModelState.loading : false} localModelError={selectedLocalProvider === 'clipgauge-local' ? localModelState.error : null} selectedLocalProvider={selectedLocalProvider} selectedCloudProvider={selectedCloudProvider} selectedCloudModel={selectedCloudModel} cloudModelAvailable={providerQualification?.modelAvailable} cloudModelCompatible={providerQualification?.modelCompatible} cloudServiceReady={providerQualification?.serviceReady} cloudConfigured={cloudConfigured} providerEndpoint={selectedCloudProvider === 'custom' || selectedCloudProvider === 'cloudflare' ? readSavedProviderEndpoint(selectedCloudProvider) : undefined} qualityMode={qualityMode} onQualityModeChange={selectQualityMode} onContinueCpu={continueCpu} onRepairGpu={repairGpu} gpuRepairing={gpuRepairing} onCancel={() => { if (!activeJob) return; setCancelling(true); api.cancelJob(activeJob).catch((error) => { if (!mountedRef.current) return; setCancelling(false); setRunError(friendlyErrorMessage(error, 'The job could not be cancelled. Retry the action.')) }) }} onNavigate={navigate} selectedProvider={selectedProvider} onSelectProvider={selectProvider} onOpenJob={openJob} onResume={(id) => { void resumeJobAction(id) }} />
+  else if (section === 'sessions') content = <Sessions jobs={jobs} onBack={() => setSection('create')} onOpenJob={openJob} onResume={resumeFromSessions} onRefresh={refreshJobs} />
   else if (section === 'setup') content = <SetupCenter jobs={jobs} localModelState={localModelState} onRefreshLocalModelState={refreshLocalModelState} onSaveLocalModel={saveAndRefreshLocalModel} onBack={() => { void refreshLocalModelState(); setSection('create') }} onUseLocal={(modelId) => { if (typeof modelId === 'string' && modelId !== localModelState.preferredModelId) void saveAndRefreshLocalModel(modelId); selectProvider('clipgauge-local'); selectQualityMode('private'); setSection('create') }} />
   else if (section === 'providers') content = <ProviderCenter selectedProvider={selectedProvider} localModelState={localModelState} onRefreshLocalModelState={refreshLocalModelState} onSaveLocalModel={saveAndRefreshLocalModel} onSelectCloudModel={(provider, model) => { setSelectedCloudProvider(provider); setSelectedCloudModel(model); writeSavedValue('clipgauge.cloud-provider.v1', provider); writeSavedValue(`clipgauge.provider-model.${provider}`, model) }} onSelectProvider={selectProvider} onBack={() => { void refreshSetupState(); void refreshLocalModelState(); setSection('create') }} onOpenSetup={() => setSection('setup')} />
   else if (section === 'integrations') content = <Integrations onBack={() => setSection('create')} onOpenLoop={() => setView('loop')} />

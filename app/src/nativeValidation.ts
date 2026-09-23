@@ -108,8 +108,15 @@ export function isJobSummaryList(value: unknown): value is JobSummary[] {
     && (typeof item.title === 'string' || item.title === null)
     && typeof item.ingested === 'boolean'
     && typeof item.rendered === 'boolean'
+    && (item.source_type === undefined || typeof item.source_type === 'string')
+    && (item.source_platform === undefined || typeof item.source_platform === 'string' || item.source_platform === null)
+    && (item.source_label === undefined || typeof item.source_label === 'string' || item.source_label === null)
     && (item.lifecycle_state === undefined || typeof item.lifecycle_state === 'string')
     && (item.last_stage === undefined || typeof item.last_stage === 'string' || item.last_stage === null)
+    && (item.terminal_stage === undefined || typeof item.terminal_stage === 'string' || item.terminal_stage === null)
+    && (item.terminal_code === undefined || typeof item.terminal_code === 'string' || item.terminal_code === null)
+    && (item.terminal_summary === undefined || typeof item.terminal_summary === 'string' || item.terminal_summary === null)
+    && (item.updated_at === undefined || typeof item.updated_at === 'number' || item.updated_at === null)
     && (item.resume_safe === undefined || typeof item.resume_safe === 'boolean')
     && (item.outcome === undefined || item.outcome === null || item.outcome === 'SUCCESS_WITH_CLIPS' || item.outcome === 'SUCCESS_NO_RECOMMENDATIONS' || item.outcome === 'FAILED'))
 }

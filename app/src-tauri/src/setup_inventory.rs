@@ -863,7 +863,7 @@ fn asset_row(
         "consent_granted": false,
         "readiness": readiness,
         "lifecycle_state": lifecycle_state,
-        "lifecycle_label": if lifecycle_state == "VERIFIED" { "Installed · reused for future videos" } else if lifecycle_state == "NEEDS_REPAIR" { "Needs repair" } else { "Download required" },
+        "lifecycle_label": if lifecycle_state == "VERIFIED" { "Ready" } else if lifecycle_state == "NEEDS_REPAIR" { "Needs repair" } else { "Download required" },
         "required_download_bytes": if is_installed { 0 } else { spec.size_bytes },
     })
 }

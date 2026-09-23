@@ -82,7 +82,7 @@ def enrich_model_row(row: Mapping[str, Any]) -> dict[str, Any]:
         label = "Needs repair"
     elif installed:
         lifecycle = "VERIFIED"
-        label = "Installed · reused for future videos"
+        label = "Ready"
     else:
         lifecycle = "DOWNLOAD_REQUIRED"
         label = "Download required"

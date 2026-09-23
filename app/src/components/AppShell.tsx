@@ -12,6 +12,7 @@ import {
   X
 } from 'lucide-react'
 import type { JobSummary } from '../types'
+import { sessionPresentation } from '../sessionPresentation'
 
 export type AppSection = 'create' | 'sessions' | 'setup' | 'providers' | 'integrations' | 'privacy' | 'help' | 'about'
 
@@ -101,12 +102,13 @@ export default function AppShell({ active, onNavigate, jobs, jobsError, running,
         </nav>
         <div className="sidebar-sessions">
           <div className="sidebar-section-head"><span>Recent sessions</span><button type="button" onClick={() => navigate('sessions')}>See all</button></div>
-          {jobsError ? <p className="sidebar-empty" role="alert">{jobsError}</p> : jobs.length === 0 ? <p className="sidebar-empty">Your finished clips will appear here.</p> : jobs.slice(0, 3).map((job) => (
-            <button type="button" key={job.id} className="sidebar-session" onClick={() => job.rendered ? onOpenJob(job.id) : onResume(job.id)} disabled={running}>
-              <span className={`session-status ${job.rendered ? 'ready' : 'partial'}`} aria-hidden="true" />
-              <span><strong>{job.title ?? 'Untitled video'}</strong><small>{job.rendered ? 'Ready to review' : 'Continue setup'}</small></span>
+          {jobsError ? <p className="sidebar-empty" role="alert">{jobsError}</p> : jobs.length === 0 ? <p className="sidebar-empty">Your finished clips will appear here.</p> : jobs.slice(0, 3).map((job) => {
+            const view = sessionPresentation(job)
+            return <button type="button" key={job.id} className="sidebar-session" onClick={() => view.ready ? onOpenJob(job.id) : onResume(job.id)} disabled={running}>
+              <span className={`session-status ${view.ready ? 'ready' : 'partial'}`} aria-hidden="true" />
+              <span><strong>{view.title}</strong><small>{view.state}</small></span>
             </button>
-          ))}
+          })}
         </div>
         <div className="sidebar-footer">
           <div className="privacy-prompt"><ShieldCheck size={16} aria-hidden="true" /><span><strong>Local-first by default</strong><small>You choose what leaves this computer.</small></span></div>

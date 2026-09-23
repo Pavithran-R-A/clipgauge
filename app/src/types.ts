@@ -318,8 +318,15 @@ export interface JobSummary {
   title: string | null
   ingested: boolean
   rendered: boolean
+  source_type?: 'url' | 'file' | string
+  source_platform?: string | null
+  source_label?: string | null
   lifecycle_state?: string
   last_stage?: string | null
+  terminal_stage?: string | null
+  terminal_code?: string | null
+  terminal_summary?: string | null
+  updated_at?: number | null
   resume_safe?: boolean
   outcome?: PipelineOutcome | null
 }
@@ -377,8 +384,12 @@ export interface YouTubeReadiness {
   dependency_checked_at?: string
   provider_self_tested_at?: string | null
   public_transfer_verified_at?: string | null
+  last_successful_public_transfer_at?: string | null
+  last_public_transfer_attempt_at?: string | null
+  last_public_transfer_result?: string | null
+  last_public_transfer_error_code?: string | null
   public_download_verified?: boolean
-  public_compatibility?: { verified?: boolean; verified_at?: string; yt_dlp_version?: string; provider_version?: string; method?: string }
+  public_compatibility?: { verified?: boolean; verified_at?: string; last_successful_public_transfer_at?: string | null; last_public_transfer_attempt_at?: string | null; last_public_transfer_result?: string | null; last_public_transfer_error_code?: string | null; yt_dlp_version?: string; provider_version?: string; method?: string }
   wpc?: { available?: boolean; browser_path?: string | null; plugin_installed?: boolean; version?: string; source?: string; license?: string; reason?: string }
   reason: string
   actions: string[]

@@ -9,8 +9,8 @@ from pathlib import Path
 
 import tomllib
 
-EXPECTED = "0.6.1"
-PUBLIC_STABLE = "0.6.0"
+EXPECTED = "0.6.2"
+PUBLIC_STABLE = "0.6.1"
 ROOT = Path(__file__).resolve().parents[1]
 errors: list[str] = []
 
@@ -71,12 +71,12 @@ init_match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']\s*$', init_text,
 require("clipgauge_pipeline.__version__", init_match.group(1) if init_match else None)
 
 changelog = (ROOT / "CHANGELOG.md").read_text()
-if not re.search(r"^## \[0\.6\.1\](?:\s|$)", changelog, re.MULTILINE):
-    errors.append("CHANGELOG.md: missing current v0.6.1 section")
+if not re.search(r"^## \[0\.6\.2\](?:\s|$)", changelog, re.MULTILINE):
+    errors.append("CHANGELOG.md: missing current v0.6.2 section")
 
 readme = (ROOT / "README.md").read_text()
 if f"Current stable release: [v{PUBLIC_STABLE}]" not in readme:
-    errors.append("README.md: missing current stable v0.6.0 marker")
+    errors.append(f"README.md: missing current stable v{PUBLIC_STABLE} marker")
 if "unsigned release candidate" in readme.lower():
     errors.append("README.md: stale 'unsigned release candidate' wording remains")
 

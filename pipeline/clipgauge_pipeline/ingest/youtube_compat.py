@@ -463,9 +463,20 @@ def public_compatibility_status() -> dict[str, Any]:
         return {"verified": False}
     if not isinstance(payload, dict):
         return {"verified": False}
-    allowed = {"verified_at", "yt_dlp_version", "provider_version", "method"}
+    allowed = {
+        "verified_at",
+        "yt_dlp_version",
+        "provider_version",
+        "method",
+        "last_successful_public_transfer_at",
+        "last_public_transfer_attempt_at",
+        "last_public_transfer_result",
+        "last_public_transfer_error_code",
+    }
     current_provider = payload.get("provider_version") == PROVIDER_VERSION
-    return {key: payload[key] for key in allowed if key in payload} | {"verified": bool(payload.get("verified")) and current_provider}
+    result = {key: payload[key] for key in allowed if key in payload}
+    result.setdefault("last_successful_public_transfer_at", payload.get("verified_at"))
+    return result | {"verified": bool(payload.get("verified")) and current_provider}
 
 
 def invalidate_public_compatibility() -> None:
@@ -487,14 +498,40 @@ def invalidate_public_compatibility() -> None:
 def record_public_compatibility_success(*, method: str, ytdlp_version: str, provider_version: str = PROVIDER_VERSION) -> None:
     """Cache successful public compatibility metadata, never tokens or session data."""
     config.ensure_home()
+    now = datetime.now(UTC).isoformat()
     payload = {
         "verified": True,
-        "verified_at": datetime.now(UTC).isoformat(),
+        "verified_at": now,
+        "last_successful_public_transfer_at": now,
+        "last_public_transfer_attempt_at": now,
+        "last_public_transfer_result": "success",
+        "last_public_transfer_error_code": None,
         "yt_dlp_version": str(ytdlp_version)[:64],
         "provider_version": str(provider_version)[:64],
         "method": str(method)[:64],
     }
     path = _public_compatibility_path()
+    _atomic_write_text(path, json.dumps(payload, sort_keys=True))
+
+
+def record_public_compatibility_attempt(*, error_code: str | None, result: str = "failed") -> None:
+    """Record the latest transfer attempt without erasing prior success."""
+    config.ensure_home()
+    path = _public_compatibility_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    now = datetime.now(UTC).isoformat()
+    payload.update({
+        "verified": False if result != "success" else bool(payload.get("verified")),
+        "last_public_transfer_attempt_at": now,
+        "last_public_transfer_result": str(result)[:32],
+        "last_public_transfer_error_code": str(error_code)[:96] if error_code else None,
+    })
+    payload.setdefault("last_successful_public_transfer_at", payload.get("verified_at"))
     _atomic_write_text(path, json.dumps(payload, sort_keys=True))
 
 
@@ -570,34 +607,41 @@ def readiness() -> dict[str, Any]:
     public_status = public_compatibility_status()
     dependency_checked_at = datetime.now(UTC).isoformat()
     public_transfer_at = public_status.get("verified_at")
+    transfer_fields = {
+        "public_transfer_verified_at": public_transfer_at,
+        "last_successful_public_transfer_at": public_status.get("last_successful_public_transfer_at"),
+        "last_public_transfer_attempt_at": public_status.get("last_public_transfer_attempt_at"),
+        "last_public_transfer_result": public_status.get("last_public_transfer_result"),
+        "last_public_transfer_error_code": public_status.get("last_public_transfer_error_code"),
+    }
     wpc_status = wpc_availability()
     ytdlp_ok = _yt_dlp_ready()
     checks.append({"name": "yt-dlp", "ready": ytdlp_ok, "message": "Pinned yt-dlp is verified." if ytdlp_ok else "Pinned yt-dlp is not installed or failed verification."})
     if not ytdlp_ok:
-        return {"state": "NOT_INSTALLED", "ready": False, "dependency_state": "NOT_INSTALLED", "public_download_verified": False, "public_transfer_verified_at": public_transfer_at, "dependency_checked_at": dependency_checked_at, "provider_self_tested_at": None, "wpc": wpc_status, "reason": "Install the verified YouTube runtime before testing public links.", "actions": ["Install"], "checks": checks}
+        return {"state": "NOT_INSTALLED", "ready": False, "dependency_state": "NOT_INSTALLED", "public_download_verified": False, **transfer_fields, "dependency_checked_at": dependency_checked_at, "provider_self_tested_at": None, "wpc": wpc_status, "reason": "Install the verified YouTube runtime before testing public links.", "actions": ["Install"], "checks": checks}
 
     rows = DownloadManager().inventory(assets())
     installed = [bool(row.get("installed")) for row in rows]
     checks.extend({"name": str(row.get("asset_id", "youtube-asset")), "ready": bool(row.get("installed")), "message": "Verified asset is installed." if row.get("installed") else "Verified asset is missing or needs repair."} for row in rows)
     if not all(installed):
         state = "NOT_INSTALLED" if not any(installed) else "INSTALL_INCOMPLETE"
-        return {"state": state, "ready": False, "dependency_state": state, "public_download_verified": False, "public_transfer_verified_at": public_transfer_at, "dependency_checked_at": dependency_checked_at, "provider_self_tested_at": None, "wpc": wpc_status, "reason": "Install the complete YouTube support bundle, then test it.", "actions": ["Install", "Retry"], "checks": checks}
+        return {"state": state, "ready": False, "dependency_state": state, "public_download_verified": False, **transfer_fields, "dependency_checked_at": dependency_checked_at, "provider_self_tested_at": None, "wpc": wpc_status, "reason": "Install the complete YouTube support bundle, then test it.", "actions": ["Install", "Retry"], "checks": checks}
 
     if not _server_ready():
         checks.append({"name": "provider-build", "ready": False, "message": "The PO-token provider build or plugin is incomplete."})
-        return {"state": "BUILD_REQUIRED", "ready": False, "dependency_state": "BUILD_REQUIRED", "public_download_verified": False, "public_transfer_verified_at": public_transfer_at, "dependency_checked_at": dependency_checked_at, "provider_self_tested_at": None, "wpc": wpc_status, "reason": "Build the installed PO-token provider before using YouTube.", "actions": ["Repair", "Retry"], "checks": checks}
+        return {"state": "BUILD_REQUIRED", "ready": False, "dependency_state": "BUILD_REQUIRED", "public_download_verified": False, **transfer_fields, "dependency_checked_at": dependency_checked_at, "provider_self_tested_at": None, "wpc": wpc_status, "reason": "Build the installed PO-token provider before using YouTube.", "actions": ["Repair", "Retry"], "checks": checks}
 
     plugin_ok = _provider_plugin_ready()
     checks.append({"name": "plugin", "ready": plugin_ok, "message": "The YouTube plugin is discoverable." if plugin_ok else "The YouTube plugin is not discoverable."})
     if not plugin_ok:
-        return {"state": "REPAIR_REQUIRED", "ready": False, "dependency_state": "REPAIR_REQUIRED", "public_download_verified": False, "public_transfer_verified_at": public_transfer_at, "dependency_checked_at": dependency_checked_at, "provider_self_tested_at": None, "wpc": wpc_status, "reason": "Repair the installed YouTube support components, then test again.", "actions": ["Repair", "Retry"], "checks": checks}
+        return {"state": "REPAIR_REQUIRED", "ready": False, "dependency_state": "REPAIR_REQUIRED", "public_download_verified": False, **transfer_fields, "dependency_checked_at": dependency_checked_at, "provider_self_tested_at": None, "wpc": wpc_status, "reason": "Repair the installed YouTube support components, then test again.", "actions": ["Repair", "Retry"], "checks": checks}
     checks.append({
         "name": "provider-lifecycle",
         "ready": True,
         "message": "The managed provider starts when a YouTube operation begins.",
     })
     public_verified = bool(public_status.get("verified"))
-    return {"state": "PUBLIC_DOWNLOAD_VERIFIED" if public_verified else "DEPENDENCIES_READY", "ready": True, "dependency_state": "DEPENDENCIES_READY", "provider_state": "DORMANT", "public_download_verified": public_verified, "public_transfer_verified_at": public_transfer_at, "dependency_checked_at": dependency_checked_at, "provider_self_tested_at": None, "public_compatibility": public_status, "wpc": wpc_status, "reason": "YouTube download was tested successfully." if public_verified else "YouTube tools are ready. A public download has not been verified on this installation.", "actions": ["Test"], "checks": checks}
+    return {"state": "PUBLIC_DOWNLOAD_VERIFIED" if public_verified else "DEPENDENCIES_READY", "ready": True, "dependency_state": "DEPENDENCIES_READY", "provider_state": "DORMANT", "public_download_verified": public_verified, **transfer_fields, "dependency_checked_at": dependency_checked_at, "provider_self_tested_at": None, "public_compatibility": public_status, "wpc": wpc_status, "reason": "YouTube download was tested successfully." if public_verified else "YouTube tools are ready. A public download has not been verified on this installation.", "actions": ["Test"], "checks": checks}
 
 
 def _merge_live_health_checks(status: dict[str, Any], result: dict[str, Any]) -> list[dict[str, Any]]:
