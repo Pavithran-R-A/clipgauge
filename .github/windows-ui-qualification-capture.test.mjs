@@ -102,6 +102,7 @@ test('each packaged viewport resets scroll before layout evidence', () => {
   assert.match(qualificationScript, /document\.querySelector\(selector\)\?\.scrollTo\(0, 0\)/)
   assert.match(qualificationScript, /async function assertLayout\(page, state\) \{\s+await resetScrollPosition\(page\)/)
   assert.match(qualificationScript, /await page\.getByRole\('button', \{ name, exact: true \}\)\.first\(\)\.click\(\)\s+await resetScrollPosition\(page\)/)
+  assert.match(qualificationScript, /clipped_control_details/)
 })
 
 test('fresh Windows qualification canonicalizes its isolated home path', () => {

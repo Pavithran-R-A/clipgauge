@@ -212,8 +212,12 @@ async function assertLayout(page, state) {
     const mainRect = rect(main)
     const descendants = [...sidebar.querySelectorAll('*')].filter(visible).map(rect)
     const maxSidebarRight = descendants.reduce((value, item) => Math.max(value, item.right), sidebarRect.right)
-    const controls = [...document.querySelectorAll('button, input, textarea, select, a')].filter(visible).map(rect)
-    const clippedControls = controls.filter((item) => item.left < -1 || item.right > window.innerWidth + 1).length
+    const controls = [...document.querySelectorAll('button, input, textarea, select, a')].filter(visible).map((element) => ({
+      ...rect(element),
+      tag: element.tagName,
+      text: (element.innerText || element.getAttribute('aria-label') || element.getAttribute('name') || '').trim().slice(0, 120),
+    }))
+    const clippedControlDetails = controls.filter((item) => item.left < -1 || item.right > window.innerWidth + 1)
     const cardSelectors = layoutState === 'create'
       ? ['.create-main-column > section', '.create-side-column > section']
       : layoutState === 'help' ? ['.support-page > section'] : ['.setup-page > section']
@@ -235,7 +239,8 @@ async function assertLayout(page, state) {
       sidebar_contained: maxSidebarRight <= sidebarRect.right + 2,
       main_begins_after_sidebar: mainRect.left >= sidebarRect.right - 2,
       no_horizontal_scroll: !horizontalScroll,
-      clipped_controls: clippedControls,
+      clipped_controls: clippedControlDetails.length,
+      clipped_control_details: clippedControlDetails,
       overlapping_cards: overlappingCards,
       active_breakpoint: window.innerWidth <= 760 ? 'mobile' : window.innerWidth <= 1050 ? 'stacked' : 'wide',
     }
