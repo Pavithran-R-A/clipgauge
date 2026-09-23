@@ -54,6 +54,10 @@ async function setLogicalSize(page) {
     const viewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio }))
     throw new Error(`logical viewport mismatch: expected ${targetWidth}x${targetHeight}, observed ${JSON.stringify(viewport)}`, { cause: error })
   }
+  await resetScrollPosition(page)
+}
+
+async function resetScrollPosition(page) {
   await page.evaluate(() => {
     window.scrollTo(0, 0)
     document.documentElement.scrollTop = 0
@@ -163,6 +167,7 @@ async function text(page, value, label = value) {
 async function clickNav(page, name) {
   await visible(page.getByRole('button', { name, exact: true }).first(), `navigation ${name}`)
   await page.getByRole('button', { name, exact: true }).first().click()
+  await resetScrollPosition(page)
 }
 
 async function clickProvider(page, name) {
