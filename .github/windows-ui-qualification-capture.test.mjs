@@ -94,6 +94,13 @@ test('no-recommendation fixture matches the v0.6.2 session presentation', () => 
   assert.doesNotMatch(qualificationScript, /detail: \/no recommended clips\//)
 })
 
+test('each packaged viewport resets scroll before layout evidence', () => {
+  const qualificationScript = readFileSync(new URL('./windows-ui-qualification.mjs', import.meta.url), 'utf8')
+  assert.match(qualificationScript, /window\.scrollTo\(0, 0\)/)
+  assert.match(qualificationScript, /document\.documentElement\.scrollTop = 0/)
+  assert.match(qualificationScript, /document\.querySelector\(selector\)\?\.scrollTo\(0, 0\)/)
+})
+
 test('fresh Windows qualification canonicalizes its isolated home path', () => {
   const outputRoot = qualificationScript.indexOf('$OutputDir = [IO.Path]::GetFullPath($OutputDir)')
   const homeSelection = qualificationScript.indexOf('$qualificationHome =')

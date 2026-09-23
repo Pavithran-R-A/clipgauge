@@ -54,6 +54,12 @@ async function setLogicalSize(page) {
     const viewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio }))
     throw new Error(`logical viewport mismatch: expected ${targetWidth}x${targetHeight}, observed ${JSON.stringify(viewport)}`, { cause: error })
   }
+  await page.evaluate(() => {
+    window.scrollTo(0, 0)
+    document.documentElement.scrollTop = 0
+    document.body.scrollTop = 0
+    for (const selector of ['.app-sidebar', '.app-main']) document.querySelector(selector)?.scrollTo(0, 0)
+  })
 }
 
 async function collectDisplayFacts(page) {
