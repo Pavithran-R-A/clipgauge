@@ -296,7 +296,7 @@ async function sessionsState(page) {
     'Interview with Alex': { state: /Ready/, source: /Interview with Alex\.mp4/, action: /Open clips/ },
     'QA YouTube failed': { state: /Needs attention/, source: /YouTube · qa-fail01/, detail: /Download failed/, action: /Resume/ },
     'Cancelled local fixture': { state: /^Cancelled$/, source: /cancelled-local\.mp4/, action: /Resume/ },
-    'Controlled no-clip fixture': { state: /Analysis complete/, detail: /no recommended clips/, action: /Open analysis/ },
+    'Controlled no-clip fixture': { state: /Analysis complete.*no recommended clips/i, detail: /quality bar was not met/i, action: /Open analysis/ },
     'Resumable incomplete job': { state: /^Continue$/, action: /Resume/ },
   }
   for (const [title, expectation] of Object.entries(required)) {

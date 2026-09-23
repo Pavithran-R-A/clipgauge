@@ -87,6 +87,13 @@ test('hostile sidebar fixtures use the supported session metadata contract', () 
   assert.match(hostileSeed[0], /state = 'RESUMABLE'/)
 })
 
+test('no-recommendation fixture matches the v0.6.2 session presentation', () => {
+  const qualificationScript = readFileSync(new URL('./windows-ui-qualification.mjs', import.meta.url), 'utf8')
+  assert.match(qualificationScript, /Analysis complete\.\*no recommended clips\/i/)
+  assert.match(qualificationScript, /quality bar was not met\/i/)
+  assert.doesNotMatch(qualificationScript, /detail: \/no recommended clips\//)
+})
+
 test('fresh Windows qualification canonicalizes its isolated home path', () => {
   const outputRoot = qualificationScript.indexOf('$OutputDir = [IO.Path]::GetFullPath($OutputDir)')
   const homeSelection = qualificationScript.indexOf('$qualificationHome =')
