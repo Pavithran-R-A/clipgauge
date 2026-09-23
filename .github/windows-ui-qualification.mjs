@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
 import { parseWinAppJsonText } from './windows-ui-json.mjs'
 import { getTauriBridgeFacts } from './windows-ui-bridge.mjs'
-import { isLocalAiActionLabel, isLocalAiHeading, isSetupReadyLabel, isSetupReuseLabel } from './windows-ui-evidence-contract.mjs'
+import { isSessionState, isSetupHealthState, isSetupReadyLabel, isSetupReuseLabel } from './windows-ui-evidence-contract.mjs'
 const args = new Map()
 for (let index = 2; index < process.argv.length; index += 2) args.set(process.argv[index].replace(/^--/, ''), process.argv[index + 1])
 const state = args.get('state')
@@ -240,9 +240,29 @@ async function writeLayoutEvidence(name, payload) {
 async function createState(page, hostile = false) {
   await clickNav(page, 'Create')
   await visible(page.getByRole('heading', { name: 'Create clips', exact: true }), 'Create heading')
-  await text(page, 'Add a video', 'Create Step 1')
-  await text(page, 'Choose AI', 'Create Step 2')
-  await text(page, 'Choose caption style', 'Create Step 3')
+  await visible(page.getByRole('heading', { name: 'Add a video', exact: true }), 'Create source heading')
+  await visible(page.getByLabel('Video link', { exact: true }), 'Create source input')
+  await visible(page.getByRole('heading', { name: 'What should ClipGauge find?', exact: true }), 'Create intent heading')
+  await visible(page.getByRole('radiogroup', { name: 'Content intent', exact: true }), 'Create intent choices')
+  for (const label of ['Auto', 'Knowledge', 'Business', 'Interview', 'Story']) {
+    await visible(page.getByRole('radio', { name: label, exact: true }), `Create intent ${label}`)
+  }
+  await visible(page.getByRole('button', { name: 'More', exact: true }), 'Create intent More')
+  await visible(page.getByRole('heading', { name: 'Choose the balance', exact: true }), 'Create scoring heading')
+  await visible(page.getByRole('radiogroup', { name: 'Scoring mode', exact: true }), 'Create scoring choices')
+  for (const label of ['Private / Local', 'Hybrid', 'Best Quality']) {
+    await visible(page.getByRole('radio', { name: label, exact: true }), `Create scoring ${label}`)
+  }
+  const advanced = page.locator('#advanced-create-settings')
+  await visible(advanced.locator('summary'), 'Advanced creation settings')
+  if (await advanced.evaluate((node) => node.open)) throw new Error('Create advanced settings opened by default')
+  await advanced.locator('summary').click()
+  await visible(page.getByRole('heading', { name: 'Choose how many options', exact: true }), 'Create output preferences')
+  await advanced.locator('summary').click()
+  if (await advanced.evaluate((node) => node.open)) throw new Error('Create advanced settings did not collapse')
+  await visible(page.getByRole('button', { name: 'Create clips', exact: true }), 'Create clips action')
+  const staleSteps = await page.locator('text=/^Step [123]$/').count()
+  if (staleSteps !== 0) throw new Error(`obsolete Create step labels remain: ${staleSteps}`)
   if (hostile) {
     const hostileTitle = page.locator('.sidebar-session strong').filter({ hasText: 'MrBeast 2' }).first()
     const unicodeTitle = page.locator('.sidebar-session strong').filter({ hasText: 'Unicode' }).first()
@@ -257,6 +277,52 @@ async function createState(page, hostile = false) {
     ...facts,
   })
   await capture(`${hostile ? 'create-hostile' : 'create'}-${suffix}`)
+}
+
+async function sessionsState(page) {
+  await clickNav(page, 'Sessions')
+  await visible(page.getByRole('heading', { name: 'Your recent work.', exact: true }), 'Sessions heading')
+  const rows = page.locator('.session-row')
+  if (await rows.count() < 5) throw new Error(`mixed Sessions fixture rows missing: ${await rows.count()}`)
+  const observed = await rows.evaluateAll((elements) => elements.map((element) => ({
+    title: element.querySelector('h2')?.textContent?.trim() ?? '',
+    source: element.querySelector('.session-kicker span')?.textContent?.trim() ?? '',
+    state: element.querySelector('.session-copy > p:not(.session-detail)')?.textContent?.trim() ?? '',
+    detail: element.querySelector('.session-detail')?.textContent?.trim() ?? '',
+    action: element.querySelector('.session-actions button:not(.icon-button)')?.textContent?.trim() ?? '',
+  })))
+  const byTitle = new Map(observed.map((row) => [row.title, row]))
+  const required = {
+    'Interview with Alex': { state: /Ready/, source: /Interview with Alex\.mp4/, action: /Open clips/ },
+    'QA YouTube failed': { state: /Needs attention/, source: /YouTube · qa-fail01/, detail: /Download failed/, action: /Resume/ },
+    'Cancelled local fixture': { state: /^Cancelled$/, source: /cancelled-local\.mp4/, action: /Resume/ },
+    'Controlled no-clip fixture': { state: /Analysis complete/, detail: /no recommended clips/, action: /Open analysis/ },
+    'Resumable incomplete job': { state: /^Continue$/, action: /Resume/ },
+  }
+  for (const [title, expectation] of Object.entries(required)) {
+    const row = byTitle.get(title)
+    if (!row) throw new Error(`Sessions fixture missing: ${title}`)
+    if (!isSessionState(row.state)) throw new Error(`unknown session state for ${title}: ${row.state}`)
+    if (!expectation.state.test(row.state) || (expectation.source && !expectation.source.test(row.source)) || (expectation.detail && !expectation.detail.test(row.detail)) || !expectation.action.test(row.action)) {
+      throw new Error(`Sessions fixture mismatch for ${title}: ${JSON.stringify(row)}`)
+    }
+  }
+  const body = await page.locator('.sessions-page').innerText()
+  if (/Untitled video|Stopped during setup/.test(body)) throw new Error('Sessions showed an inappropriate fallback state')
+  const sidebar = await page.locator('.sidebar-session').evaluateAll((elements) => elements.slice(0, 3).map((element) => ({
+    title: element.querySelector('strong')?.textContent?.trim() ?? '',
+    state: element.querySelector('small')?.textContent?.trim() ?? '',
+  })))
+  for (const item of sidebar) {
+    const row = byTitle.get(item.title)
+    if (!row || row.state !== item.state) throw new Error(`sidebar/session status mismatch: ${JSON.stringify({ sidebar: item, session: row })}`)
+  }
+  const failedRow = rows.filter({ has: page.getByRole('heading', { name: 'QA YouTube failed', exact: true }) }).first()
+  await failedRow.getByRole('button', { name: /Session actions for QA YouTube failed/ }).click()
+  await visible(failedRow.getByRole('menuitem', { name: 'Remove failed session', exact: true }), 'failed session cleanup')
+  const facts = await assertLayout(page, 'sessions')
+  await writeLayoutEvidence('sessions-mixed', { state: 'SESSIONS_MIXED_FIXTURES', target_viewport: { width: targetWidth, height: targetHeight }, fixtures: observed, sidebar, cleanup_available: true, ...facts })
+  await capture(`sessions-${suffix}`)
 }
 
 async function displayDiagnosticsState(page) {
@@ -348,7 +414,44 @@ async function setupState(page) {
     cached_state_visible_before_native_inventory: firstMeaningfulRenderMs < 250,
   })
   await text(page, 'Core components are ready.', 'core setup completion marker')
+  for (const label of ['AI summary', 'Acceleration', 'YouTube', 'Storage']) {
+    await visible(page.getByText(label, { exact: true }).first(), `Setup overview ${label}`)
+  }
+  const overviewGpu = page.locator('.gpu-diagnostics .status-pill').first()
+  const overviewGpuState = (await overviewGpu.innerText()).trim()
+  if (!isSetupHealthState(overviewGpuState)) throw new Error(`unknown GPU health state: ${overviewGpuState}`)
+  if (overviewGpuState === 'READY' && await page.locator('.gpu-diagnostics').getByRole('button', { name: 'Repair GPU acceleration', exact: true }).count() > 0) {
+    throw new Error('healthy GPU exposed a repair action')
+  }
+  const overviewFacts = await assertLayout(page, 'setup')
+  await writeLayoutEvidence('setup-overview', { state: 'SETUP_OVERVIEW', target_viewport: { width: targetWidth, height: targetHeight }, gpu_state: overviewGpuState, ...overviewFacts })
   await capture(`setup-${suffix}`)
+
+  await page.getByRole('button', { name: 'Storage', exact: true }).click()
+  await page.locator('.setup-page').evaluate((node) => { if (!node.classList.contains('setup-tab-storage')) throw new Error('Storage tab did not activate') })
+  await visible(page.getByRole('heading', { name: 'Choose a saved session', exact: true }), 'Storage session cleanup')
+  await visible(page.getByRole('heading', { name: 'What uses disk space', exact: true }), 'Storage breakdown')
+  for (const label of ['Clear safe cache', 'Remove obsolete runtime archives']) {
+    await visible(page.getByRole('button', { name: label, exact: true }), `Storage ${label}`)
+  }
+  const storageHeading = page.locator('.setup-page h1').first()
+  const storagePicker = page.locator('.storage-session-picker').first()
+  const [headingBox, pickerBox] = await Promise.all([storageHeading.boundingBox(), storagePicker.boundingBox()])
+  if (!headingBox || !pickerBox || pickerBox.y < headingBox.y) throw new Error('Storage cleanup selector appeared above page heading')
+  await writeLayoutEvidence('setup-storage', { state: 'SETUP_STORAGE', target_viewport: { width: targetWidth, height: targetHeight }, ...await assertLayout(page, 'setup') })
+  await capture(`setup-storage-${suffix}`)
+
+  await page.getByRole('button', { name: 'Advanced', exact: true }).click()
+  await page.locator('.setup-page').evaluate((node) => { if (!node.classList.contains('setup-tab-advanced')) throw new Error('Advanced tab did not activate') })
+  await visible(page.locator('.component-section').first(), 'Advanced component details')
+  await visible(page.locator('.local-model-section').first(), 'Advanced local model details')
+  await visible(page.locator('.local-install-action').first(), 'Advanced local runtime details')
+  const componentDetails = page.getByRole('button', { name: 'Advanced component details', exact: true })
+  await visible(componentDetails, 'Advanced component disclosure')
+  await componentDetails.click()
+  await visible(page.locator('.advanced-panel .technical-table').first(), 'Advanced technical table')
+  await writeLayoutEvidence('setup-advanced', { state: 'SETUP_ADVANCED', target_viewport: { width: targetWidth, height: targetHeight }, ...await assertLayout(page, 'setup') })
+  await capture(`setup-advanced-${suffix}`)
 }
 
 async function completeFreshOnboarding(page) {
@@ -421,11 +524,7 @@ async function localState(page) {
   if (await choices.count() !== 1) throw new Error(`expected exactly one selected local model, found ${await choices.count()}`)
   const action = page.getByRole('button', { name: /^(Install|Use) ClipGauge Local$/ }).first()
   await action.scrollIntoViewIfNeeded()
-  await visible(action, 'Install ClipGauge Local action')
-  if (!isLocalAiActionLabel((await action.innerText()).trim())) throw new Error('unexpected Local AI action label')
-  const localHeading = page.getByRole('heading', { name: /^(Run scoring locally|ClipGauge Local is ready)$/ }).first()
-  await visible(localHeading, 'local scoring heading')
-  if (!isLocalAiHeading((await localHeading.innerText()).trim())) throw new Error('unexpected Local AI heading')
+  await visible(action, 'Local AI action')
   await capture(`local-ai-${suffix}`)
 }
 
@@ -697,6 +796,7 @@ try {
   else if (state === 'setup-fresh') await setupFreshState(page)
   else if (state === 'create') await createState(page)
   else if (state === 'create-hostile') await createState(page, true)
+  else if (state === 'sessions') await sessionsState(page)
   else if (state === 'help') await helpState(page)
   else if (state === 'display-diagnostics') await displayDiagnosticsState(page)
   else if (state === 'local-ai') await localState(page)

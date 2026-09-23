@@ -37,6 +37,28 @@ test('full Windows qualification requires a local OpenRouter fixture endpoint', 
   assert.match(qualificationScript, /127\\\.0\\\.0\\\.1:\\d\{1,5\}\/v1/)
 })
 
+test('v0.6.2 Create qualification uses semantic controls', () => {
+  const qualificationScript = readFileSync(new URL('./windows-ui-qualification.mjs', import.meta.url), 'utf8')
+  assert.match(qualificationScript, /What should ClipGauge find\?/)
+  assert.match(qualificationScript, /Content intent/)
+  assert.match(qualificationScript, /Choose the balance/)
+  assert.match(qualificationScript, /Scoring mode/)
+  assert.match(qualificationScript, /Advanced creation settings/)
+  assert.match(qualificationScript, /Choose how many options/)
+  assert.doesNotMatch(qualificationScript, /Create Step 2/)
+  assert.doesNotMatch(qualificationScript, /Create Step 3/)
+})
+
+test('v0.6.2 Sessions qualification seeds mixed supported fixtures', () => {
+  const powershell = readFileSync(new URL('./windows-ui-qualification.ps1', import.meta.url), 'utf8')
+  const qualificationScript = readFileSync(new URL('./windows-ui-qualification.mjs', import.meta.url), 'utf8')
+  assert.match(powershell, /function Seed-SessionFixtures/)
+  assert.match(powershell, /ClipGauge QA\\Interview with Alex\.mp4/)
+  assert.match(powershell, /YTDLP_TRANSFER_FAILED/)
+  assert.match(qualificationScript, /SESSIONS_MIXED_FIXTURES/)
+  assert.match(qualificationScript, /Remove failed session/)
+})
+
 test('fresh Windows qualification canonicalizes its isolated home path', () => {
   const outputRoot = qualificationScript.indexOf('$OutputDir = [IO.Path]::GetFullPath($OutputDir)')
   const homeSelection = qualificationScript.indexOf('$qualificationHome =')

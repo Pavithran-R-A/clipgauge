@@ -24,7 +24,7 @@ $qualificationRunId = [Guid]::NewGuid().ToString('N')
 $qualificationService = "io.github.pavithranra.clipgauge.qualification.$qualificationRunId"
 $previousClipGaugeHome = $env:CLIPGAUGE_HOME
 $previousQaHome = $env:CLIPGAUGE_QA_HOME
-$useIsolatedHome = [bool]$FreshOnly
+$useIsolatedHome = [bool]($FreshOnly -or (-not $SetupOnly) -or $GroqOnly)
 $qualificationHome = if ($useIsolatedHome) {
   Join-Path $OutputDir "clipgauge-home-$qualificationRunId"
 } else {
@@ -40,9 +40,51 @@ function Remove-QualificationCredential {
   if ($LASTEXITCODE -notin @(0, 1)) { throw "qualification credential cleanup failed: $target ($LASTEXITCODE)" }
 }
 
-function Seed-HostileSessions {
+function Write-QualificationJson {
+  param([Parameter(Mandatory = $true)] [string] $Path, [Parameter(Mandatory = $true)] $Value)
+  $parent = Split-Path -Parent $Path
+  New-Item -ItemType Directory -Force $parent | Out-Null
+  [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
+}
+
+function Seed-SessionFixtures {
   $jobs = Join-Path $qualificationHome 'jobs'
   New-Item -ItemType Directory -Force $jobs | Out-Null
+  $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  $records = @(
+    @{ id = '20260923-050001-aaaaaa'; title = 'Interview with Alex'; source_type = 'file'; source = 'C:\ClipGauge QA\Interview with Alex.mp4'; platform = 'local'; lifecycle = 'COMPLETED'; stage = 'render'; terminal = $null; outcome = 'SUCCESS_WITH_CLIPS'; rendered = $true },
+    @{ id = '20260923-050002-bbbbbb'; title = 'QA YouTube failed'; source_type = 'url'; source = 'https://www.youtube.com/watch?v=qa-fail01'; platform = 'youtube'; lifecycle = 'FAILED'; stage = 'ingest'; terminal = @{ stage = 'ingest'; code = 'YTDLP_TRANSFER_FAILED'; message = 'The public transfer failed during download.'; updated_at = $now }; outcome = $null; rendered = $false },
+    @{ id = '20260923-050003-cccccc'; title = 'Cancelled local fixture'; source_type = 'file'; source = 'C:\ClipGauge QA\cancelled-local.mp4'; platform = 'local'; lifecycle = 'CANCELLED'; stage = 'asr'; terminal = @{ stage = 'asr'; code = 'CANCELLED'; message = 'The user cancelled this session.'; updated_at = $now }; outcome = $null; rendered = $false },
+    @{ id = '20260923-050004-dddddd'; title = 'Controlled no-clip fixture'; source_type = 'file'; source = 'C:\ClipGauge QA\controlled-no-clip.mp4'; platform = 'local'; lifecycle = 'COMPLETED_NO_RECOMMENDATIONS'; stage = 'scoring'; terminal = $null; outcome = 'SUCCESS_NO_RECOMMENDATIONS'; rendered = $false },
+    @{ id = '20260923-050005-eeeeee'; title = 'Resumable incomplete job'; source_type = 'file'; source = 'C:\ClipGauge QA\resumable-incomplete.mp4'; platform = 'local'; lifecycle = 'RESUMABLE'; stage = 'scoring'; terminal = $null; outcome = $null; rendered = $false }
+  )
+  foreach ($record in $records) {
+    $dir = Join-Path $jobs $record.id
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    Write-QualificationJson (Join-Path $dir 'input.json') @{ media = @{ source_type = $record.source_type; source = $record.source; platform = $record.platform } }
+    if ($record.title) { Write-QualificationJson (Join-Path $dir 'ingest.json') @{ stage = 'ingest'; schema_version = 1; created_at = $now; data = @{ title = $record.title } } }
+    Write-QualificationJson (Join-Path $dir 'lifecycle.json') @{ state = $record.lifecycle; stage = $record.stage; updated_at = $now }
+    if ($record.terminal) { Write-QualificationJson (Join-Path $dir 'terminal.json') $record.terminal }
+    if ($record.outcome) {
+      if ($record.id -eq '20260923-050001-aaaaaa') {
+        $clips = @(
+          @{ clip_id = 'clip-alex-01'; start = 0; end = 10; score = 88; recommendation_score = 88; best_platform = 'reels'; platform_scores = @{ reels = 88 }; subscores = @{ hook = 8 }; adjustments = @(); signals_fired = @(); signals_missing = @(); confidence = 'high'; summary = 'A clear interview insight.'; title = 'The turning point'; title_source = 'deterministic'; arousal_pct = 0.8; heatmap_pct = $null; curve_score = 0.8; music = $null },
+          @{ clip_id = 'clip-alex-02'; start = 12; end = 22; score = 82; recommendation_score = 82; best_platform = 'shorts'; platform_scores = @{ shorts = 82 }; subscores = @{ hook = 7 }; adjustments = @(); signals_fired = @(); signals_missing = @(); confidence = 'standard'; summary = 'A useful practical answer.'; title = 'A useful answer'; title_source = 'deterministic'; arousal_pct = 0.7; heatmap_pct = $null; curve_score = 0.7; music = $null }
+        )
+        Write-QualificationJson (Join-Path $dir 'score.json') @{ stage = 'score'; data = @{ outcome = $record.outcome; clips = $clips; llm_mode = 'local'; model = 'qualification-fixture'; scored_count = 2 } }
+        Write-QualificationJson (Join-Path $dir 'enrich.json') @{ stage = 'enrich'; data = @{ category = 'interview'; clips = $clips } }
+        Write-QualificationJson (Join-Path $dir 'collections.json') @{ stage = 'collections'; data = @{ category = 'interview'; collections = @(@{ id = 'collection-alex'; title = 'Interview highlights'; summary = 'Two related interview moments.'; clip_ids = @('clip-alex-01', 'clip-alex-02'); source = 'deterministic'; user_edited = $false }) } }
+      } else {
+        Write-QualificationJson (Join-Path $dir 'score.json') @{ stage = 'score'; data = @{ outcome = $record.outcome; clips = @() } }
+      }
+    }
+    if ($record.rendered) { Write-QualificationJson (Join-Path $dir 'render.json') @{ stage = 'render'; data = @{ outputs = @(@{ clip = 0; clip_id = 'clip-alex-01'; path = 'outputs\clip-01.mp4'; score = 88; best_platform = 'reels'; duration = 10; words = 20; event_tags = 2 }, @{ clip = 1; clip_id = 'clip-alex-02'; path = 'outputs\clip-02.mp4'; score = 82; best_platform = 'shorts'; duration = 10; words = 22; event_tags = 1 }); caption_preset = 'classic' } } }
+  }
+  Write-Host "SESSION_FIXTURES_SEEDED count=$($records.Count) home=$qualificationHome"
+}
+
+function Seed-HostileSessions {
+  $jobs = Join-Path $qualificationHome 'jobs'
   $records = @(
     @{ id = '20990830-120001-a1b2c3'; title = 'How I Tricked The Internet - MrBeast 2' },
     @{ id = '20990830-120002-d4e5f6'; title = 'Unicode session title for containment' }
@@ -57,7 +99,7 @@ function Seed-HostileSessions {
 
 function Remove-HostileSessions {
   $jobs = Join-Path $qualificationHome 'jobs'
-  foreach ($id in @('20990830-120001-a1b2c3', '20990830-120002-d4e5f6', '20260825-120001-a1b2c3', '20260825-120002-d4e5f6')) {
+  foreach ($id in @('20990830-120001-a1b2c3', '20990830-120002-d4e5f6', '20260825-120001-a1b2c3', '20260825-120002-d4e5f6', '20260923-050001-aaaaaa', '20260923-050002-bbbbbb', '20260923-050003-cccccc', '20260923-050004-dddddd', '20260923-050005-eeeeee')) {
     $path = Join-Path $jobs $id
     if (Test-Path -LiteralPath $path) { [IO.Directory]::Delete($path, $true) }
   }
@@ -321,7 +363,7 @@ $realFfmpeg = Get-ChildItem -Path (Join-Path $chocoRoot 'lib\ffmpeg') -Filter 'f
 $realFfmpegPath = if ($realFfmpeg) { $realFfmpeg.FullName } else { (Get-Command ffmpeg -ErrorAction Stop).Source }
 $env:PATH = "$(Split-Path -Parent $realFfmpegPath);$env:PATH"
 Write-Host "qualification system FFmpeg: $realFfmpegPath"
-if (-not $FreshOnly) { Seed-HostileSessions }
+if (-not $FreshOnly -and -not $SetupOnly -and -not $GroqOnly) { Seed-SessionFixtures; Seed-HostileSessions }
 $proc = Start-Process -FilePath $AppPath -PassThru
 $deadline = (Get-Date).AddSeconds(30)
 while ((Get-Date) -lt $deadline) {
@@ -409,6 +451,7 @@ try {
   Invoke-State 'credential-removal-confirmation' 1920 1200 '1920x1200'
   Invoke-State 'create' 1920 1200 '1920x1200'
   Invoke-State 'create-hostile' 1920 1200 '1920x1200'
+  Invoke-State 'sessions' 1920 1200 '1920x1200'
   Invoke-State 'help' 1920 1200 '1920x1200'
   Invoke-State 'display-diagnostics' 1920 1200 '1920x1200'
 
@@ -425,6 +468,7 @@ try {
     Invoke-State 'local-ai' $viewport[0] $viewport[1] $viewport[2]
     Invoke-State 'providers' $viewport[0] $viewport[1] $viewport[2]
     Invoke-State 'create-hostile' $viewport[0] $viewport[1] $viewport[2]
+    Invoke-State 'sessions' $viewport[0] $viewport[1] $viewport[2]
     Invoke-State 'help' $viewport[0] $viewport[1] $viewport[2]
   }
 

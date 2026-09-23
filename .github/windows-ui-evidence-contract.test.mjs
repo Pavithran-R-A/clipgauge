@@ -1,10 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { finalizeEvidence, isLocalAiActionLabel, isLocalAiHeading, isSetupReadyLabel, isSetupReuseLabel } from './windows-ui-evidence-contract.mjs'
+import { finalizeEvidence, isLocalAiActionLabel, isLocalAiHeading, isSessionState, isSetupHealthState, isSetupReadyLabel, isSetupReuseLabel } from './windows-ui-evidence-contract.mjs'
 
 test('accepts ready setup labels for managed and system video tools', () => {
   assert.equal(isSetupReadyLabel('Ready'), true)
   assert.equal(isSetupReadyLabel('Ready · System'), true)
+  assert.equal(isSetupReadyLabel('Everything needed is installed'), true)
   assert.equal(isSetupReadyLabel('Core setup needed'), false)
 })
 
@@ -24,6 +25,18 @@ test('accepts local AI setup and ready headings', () => {
   assert.equal(isLocalAiHeading('Run scoring locally'), true)
   assert.equal(isLocalAiHeading('ClipGauge Local is ready'), true)
   assert.equal(isLocalAiHeading('Local AI unavailable'), false)
+})
+
+test('accepts v0.6.2 setup health states', () => {
+  assert.equal(isSetupHealthState('READY'), true)
+  assert.equal(isSetupHealthState('PUBLIC_DOWNLOAD_VERIFIED'), true)
+  assert.equal(isSetupHealthState('unknown'), false)
+})
+
+test('accepts v0.6.2 session presentation states', () => {
+  assert.equal(isSessionState('Needs attention'), true)
+  assert.equal(isSessionState('Download failed. The transfer timed out.'), false)
+  assert.equal(isSessionState('Analysis complete · no recommended clips'), true)
 })
 
 test('finalizes semantic metadata with PowerShell-measured image facts', () => {

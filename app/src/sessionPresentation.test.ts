@@ -12,8 +12,31 @@ describe('sessionPresentation', () => {
     })
 
     expect(result.title).toBe('YouTube · aqz-KE-bpKQ')
-    expect(result.state).toBe('Stopped during ingest')
+    expect(result.state).toBe('Needs attention')
+    expect(result.detail).toContain('Download failed')
     expect(result.detail).toContain('temporarily rate-limiting')
+    expect(result.action).toBe('Resume')
+  })
+
+  it('presents cancelled sessions distinctly', () => {
+    const result = sessionPresentation({
+      id: 'job-c', title: 'Interview', ingested: true, rendered: false,
+      lifecycle_state: 'CANCELLED', last_stage: 'asr', resume_safe: true,
+      terminal_summary: 'The user stopped this session.'
+    })
+
+    expect(result.state).toBe('Cancelled')
+    expect(result.detail).toContain('user stopped')
+    expect(result.action).toBe('Resume')
+  })
+
+  it('presents incomplete jobs as continuable', () => {
+    const result = sessionPresentation({
+      id: 'job-d', title: 'Draft', ingested: true, rendered: false,
+      lifecycle_state: 'RESUMABLE', last_stage: 'scoring'
+    })
+
+    expect(result.state).toBe('Continue')
     expect(result.action).toBe('Resume')
   })
 
