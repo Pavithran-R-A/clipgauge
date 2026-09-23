@@ -97,8 +97,10 @@ test('no-recommendation fixture matches the v0.6.2 session presentation', () => 
 test('each packaged viewport resets scroll before layout evidence', () => {
   const qualificationScript = readFileSync(new URL('./windows-ui-qualification.mjs', import.meta.url), 'utf8')
   assert.match(qualificationScript, /window\.scrollTo\(0, 0\)/)
+  assert.match(qualificationScript, /document\.scrollingElement\.scrollTop = 0/)
   assert.match(qualificationScript, /document\.documentElement\.scrollTop = 0/)
   assert.match(qualificationScript, /document\.querySelector\(selector\)\?\.scrollTo\(0, 0\)/)
+  assert.match(qualificationScript, /async function assertLayout\(page, state\) \{\s+await resetScrollPosition\(page\)/)
   assert.match(qualificationScript, /await page\.getByRole\('button', \{ name, exact: true \}\)\.first\(\)\.click\(\)\s+await resetScrollPosition\(page\)/)
 })
 

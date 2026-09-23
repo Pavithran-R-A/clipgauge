@@ -60,9 +60,10 @@ async function setLogicalSize(page) {
 async function resetScrollPosition(page) {
   await page.evaluate(() => {
     window.scrollTo(0, 0)
+    if (document.scrollingElement) document.scrollingElement.scrollTop = 0
     document.documentElement.scrollTop = 0
     document.body.scrollTop = 0
-    for (const selector of ['.app-sidebar', '.app-main']) document.querySelector(selector)?.scrollTo(0, 0)
+    for (const selector of ['#root', '.app-shell', '.app-sidebar', '.app-main']) document.querySelector(selector)?.scrollTo(0, 0)
   })
 }
 
@@ -193,6 +194,7 @@ async function capture(name, selector = ['-w', hwnd]) {
 }
 
 async function assertLayout(page, state) {
+  await resetScrollPosition(page)
   const facts = await page.evaluate((layoutState) => {
     const rect = (element) => {
       const value = element.getBoundingClientRect()
