@@ -5,7 +5,8 @@ param(
   [switch] $FreshOnly,
   [switch] $SetupOnly,
   [switch] $AllowProductionSetupOnly,
-  [switch] $GroqOnly
+  [switch] $GroqOnly,
+  [string] $QualificationHome
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,7 +26,9 @@ $qualificationService = "io.github.pavithranra.clipgauge.qualification.$qualific
 $previousClipGaugeHome = $env:CLIPGAUGE_HOME
 $previousQaHome = $env:CLIPGAUGE_QA_HOME
 $useIsolatedHome = [bool]($FreshOnly -or (-not $SetupOnly) -or $GroqOnly)
-$qualificationHome = if ($useIsolatedHome) {
+$qualificationHome = if ($QualificationHome) {
+  [IO.Path]::GetFullPath($QualificationHome)
+} elseif ($useIsolatedHome) {
   Join-Path $OutputDir "clipgauge-home-$qualificationRunId"
 } else {
   Join-Path ([Environment]::GetFolderPath('UserProfile')) '.clipgauge'

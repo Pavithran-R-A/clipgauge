@@ -393,13 +393,17 @@ async function setupState(page) {
   while (Date.now() < setupDeadline) {
     headingText = (await heading.innerText()).trim()
     console.log(`SETUP_HEADING ${headingText}`)
-    if (headingText === 'Ready to create clips') {
+    const readySummary = await page.getByText('Core components are ready.', { exact: true }).count()
+    const readyStatus = await page.getByText('Everything needed is installed', { exact: true }).count()
+    if (readySummary > 0 || readyStatus > 0) {
       readyAtMs = Date.now() - navigationStartedAt
       break
     }
     await page.waitForTimeout(500)
   }
-  if (headingText !== 'Ready to create clips') {
+  const hasReadySummary = await page.getByText('Core components are ready.', { exact: true }).count()
+  const hasReadyStatus = await page.getByText('Everything needed is installed', { exact: true }).count()
+  if (hasReadySummary === 0 && hasReadyStatus === 0) {
     const bodyText = (await page.locator('.setup-page').innerText()).replaceAll(sentinel, '[REDACTED]')
     throw new Error(`Setup is not ready: ${headingText}; page=${bodyText.slice(0, 2400)}`)
   }
@@ -505,24 +509,13 @@ async function setupFreshState(page) {
 
 async function localState(page) {
   await clickNav(page, 'Setup & Storage')
-  const heading = await visible(page.locator('.setup-page h1').first(), 'Setup heading for Local AI')
-  let headingText = ''
-  const localSetupDeadline = Date.now() + 180_000
-  while (Date.now() < localSetupDeadline) {
-    headingText = (await heading.innerText()).trim()
-    console.log(`LOCAL_SETUP_HEADING ${headingText}`)
-    if (headingText === 'Ready to create clips') break
-    await page.waitForTimeout(500)
-  }
-  if (headingText !== 'Ready to create clips') {
-    const bodyText = (await page.locator('.setup-page').innerText()).replaceAll(sentinel, '[REDACTED]')
-    throw new Error(`Local-AI setup is not ready: ${headingText}; page=${bodyText.slice(0, 2400)}`)
-  }
-  await visible(page.getByText('Optional local AI', { exact: true }).first(), 'optional Local AI section')
-  await visible(page.getByRole('heading', { name: 'Choose one model', exact: true }), 'local model choices heading')
+  await visible(page.locator('.local-model-section').first(), 'local model section')
+  await visible(page.locator('.local-install-action').first(), 'local scoring section')
+  await visible(page.locator('.local-install-action .status-pill').first(), 'local scoring status')
+  if (await page.locator('.model-choice').count() === 0) throw new Error('local model choices were not rendered')
   const choices = page.locator('input[name="local-model"]:checked')
   if (await choices.count() !== 1) throw new Error(`expected exactly one selected local model, found ${await choices.count()}`)
-  const action = page.getByRole('button', { name: /^(Install|Use) ClipGauge Local$/ }).first()
+  const action = page.locator('.local-install-action button').first()
   await action.scrollIntoViewIfNeeded()
   await visible(action, 'Local AI action')
   await capture(`local-ai-${suffix}`)

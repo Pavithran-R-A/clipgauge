@@ -49,6 +49,18 @@ test('v0.6.2 Create qualification uses semantic controls', () => {
   assert.doesNotMatch(qualificationScript, /Create Step 3/)
 })
 
+test('v0.6.2 Setup qualification avoids removed local-AI copy contracts', () => {
+  const qualificationScript = readFileSync(new URL('./windows-ui-qualification.mjs', import.meta.url), 'utf8')
+  assert.match(qualificationScript, /Core components are ready\./)
+  assert.match(qualificationScript, /Everything needed is installed/)
+  assert.match(qualificationScript, /\.local-model-section/)
+  assert.match(qualificationScript, /\.local-install-action/)
+  assert.doesNotMatch(qualificationScript, /Ready to create clips/)
+  assert.doesNotMatch(qualificationScript, /Choose one model/)
+  assert.doesNotMatch(qualificationScript, /Run scoring locally/)
+  assert.doesNotMatch(qualificationScript, /ClipGauge Local is ready/)
+})
+
 test('v0.6.2 Sessions qualification seeds mixed supported fixtures', () => {
   const powershell = readFileSync(new URL('./windows-ui-qualification.ps1', import.meta.url), 'utf8')
   const qualificationScript = readFileSync(new URL('./windows-ui-qualification.mjs', import.meta.url), 'utf8')
@@ -64,6 +76,14 @@ test('fresh Windows qualification canonicalizes its isolated home path', () => {
   const homeSelection = qualificationScript.indexOf('$qualificationHome =')
   assert.ok(outputRoot >= 0, 'qualification output root must be absolute')
   assert.ok(homeSelection > outputRoot, 'isolated home must use the absolute output root')
+})
+
+test('full qualification reuses its clean, bootstrapped isolated home', () => {
+  assert.match(qualificationScript, /\[string\] \$QualificationHome/)
+  const workflow = readFileSync(new URL('./workflows/windows.yml', import.meta.url), 'utf8')
+  assert.match(workflow, /windows-ui-qualification\.ps1.*-QualificationHome \$nativeHome/)
+  assert.match(workflow, /Remove-Item -Recurse -Force -ErrorAction SilentlyContinue \$nativeHome/)
+  assert.match(workflow, /New-Item -ItemType File -Force \(Join-Path \$nativeHome "onboarded"\)/)
 })
 
 test('Groq picker state tests selected-model refresh and restart persistence', () => {
