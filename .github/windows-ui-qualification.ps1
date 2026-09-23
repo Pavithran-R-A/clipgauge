@@ -95,8 +95,10 @@ function Seed-HostileSessions {
   foreach ($record in $records) {
     $dir = Join-Path $jobs $record.id
     New-Item -ItemType Directory -Force $dir | Out-Null
+    Write-QualificationJson (Join-Path $dir 'input.json') @{ media = @{ source_type = 'file'; source = "C:\ClipGauge QA\$($record.id).mp4"; platform = 'local' } }
     $payload = @{ stage = 'ingest'; schema_version = 1; created_at = 0; data = @{ title = $record.title } } | ConvertTo-Json -Depth 5
     [IO.File]::WriteAllText((Join-Path $dir 'ingest.json'), $payload, [Text.UTF8Encoding]::new($false))
+    Write-QualificationJson (Join-Path $dir 'lifecycle.json') @{ state = 'RESUMABLE'; stage = 'ingest'; updated_at = 0 }
   }
 }
 

@@ -77,6 +77,16 @@ test('v0.6.2 Sessions qualification seeds mixed supported fixtures', () => {
   assert.match(qualificationScript, /Remove failed session/)
 })
 
+test('hostile sidebar fixtures use the supported session metadata contract', () => {
+  const powershell = readFileSync(new URL('./windows-ui-qualification.ps1', import.meta.url), 'utf8')
+  const hostileSeed = powershell.match(/function Seed-HostileSessions[\s\S]*?\n}\r?\n\r?\nfunction Remove-HostileSessions/)
+  assert.ok(hostileSeed, 'hostile session seeding must remain discoverable')
+  assert.match(hostileSeed[0], /input\.json/)
+  assert.match(hostileSeed[0], /source_type = 'file'/)
+  assert.match(hostileSeed[0], /lifecycle\.json/)
+  assert.match(hostileSeed[0], /state = 'RESUMABLE'/)
+})
+
 test('fresh Windows qualification canonicalizes its isolated home path', () => {
   const outputRoot = qualificationScript.indexOf('$OutputDir = [IO.Path]::GetFullPath($OutputDir)')
   const homeSelection = qualificationScript.indexOf('$qualificationHome =')
