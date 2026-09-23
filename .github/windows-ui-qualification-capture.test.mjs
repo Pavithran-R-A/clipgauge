@@ -49,6 +49,12 @@ test('v0.6.2 Create qualification uses semantic controls', () => {
   assert.doesNotMatch(qualificationScript, /Create Step 3/)
 })
 
+test('v0.6.2 Create qualification accepts descriptive radio names', () => {
+  const qualificationScript = readFileSync(new URL('./windows-ui-qualification.mjs', import.meta.url), 'utf8')
+  assert.match(qualificationScript, /getByRole\('radio'\)\.filter\(\{ hasText: label \}\)\.first\(\)/)
+  assert.doesNotMatch(qualificationScript, /getByRole\('radio', \{ name: label, exact: true \}\)/)
+})
+
 test('v0.6.2 Setup qualification avoids removed local-AI copy contracts', () => {
   const qualificationScript = readFileSync(new URL('./windows-ui-qualification.mjs', import.meta.url), 'utf8')
   assert.match(qualificationScript, /Core components are ready\./)

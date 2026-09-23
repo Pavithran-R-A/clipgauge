@@ -245,13 +245,13 @@ async function createState(page, hostile = false) {
   await visible(page.getByRole('heading', { name: 'What should ClipGauge find?', exact: true }), 'Create intent heading')
   await visible(page.getByRole('radiogroup', { name: 'Content intent', exact: true }), 'Create intent choices')
   for (const label of ['Auto', 'Knowledge', 'Business', 'Interview', 'Story']) {
-    await visible(page.getByRole('radio', { name: label, exact: true }), `Create intent ${label}`)
+    await visible(page.getByRole('radio').filter({ hasText: label }).first(), `Create intent ${label}`)
   }
   await visible(page.getByRole('button', { name: 'More', exact: true }), 'Create intent More')
   await visible(page.getByRole('heading', { name: 'Choose the balance', exact: true }), 'Create scoring heading')
   await visible(page.getByRole('radiogroup', { name: 'Scoring mode', exact: true }), 'Create scoring choices')
   for (const label of ['Private / Local', 'Hybrid', 'Best Quality']) {
-    await visible(page.getByRole('radio', { name: label, exact: true }), `Create scoring ${label}`)
+    await visible(page.getByRole('radio').filter({ hasText: label }).first(), `Create scoring ${label}`)
   }
   const advanced = page.locator('#advanced-create-settings')
   await visible(advanced.locator('summary'), 'Advanced creation settings')
