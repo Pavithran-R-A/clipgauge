@@ -1,18 +1,18 @@
-# ClipGauge v0.6.2 (development)
+# ClipGauge v0.6.2
 
 ClipGauge is a local-first desktop application for finding, ranking, reviewing, and exporting short-form clips from long-form video.
 
 It combines speech transcription, speaker information, audio events, replay signals, story structure, and optional model-based scoring. The output is intentionally reviewable: ClipGauge keeps the recommendation score, supporting signals, and edit controls visible before export instead of treating clip selection as a black box.
 
-**Current stable release: [v0.6.1](https://github.com/Pavithran-R-A/clipgauge/releases/tag/v0.6.1)**
+**Current stable release: [v0.6.2](https://github.com/Pavithran-R-A/clipgauge/releases/tag/v0.6.2)**
 
-[Download for Windows](https://github.com/Pavithran-R-A/clipgauge/releases/download/v0.6.1/ClipGauge_0.6.1_Windows_x64_NSIS.exe) · [Download for Linux](https://github.com/Pavithran-R-A/clipgauge/releases/download/v0.6.1/ClipGauge_0.6.1_amd64.deb) · [Release notes](https://github.com/Pavithran-R-A/clipgauge/releases/tag/v0.6.1) · [Report an issue](https://github.com/Pavithran-R-A/clipgauge/issues)
+[Download for Windows](https://github.com/Pavithran-R-A/clipgauge/releases/download/v0.6.2/ClipGauge_0.6.2_Windows_x64_NSIS.exe) · [Download for Linux](https://github.com/Pavithran-R-A/clipgauge/releases/download/v0.6.2/ClipGauge_0.6.2_amd64.deb) · [Release notes](https://github.com/Pavithran-R-A/clipgauge/releases/tag/v0.6.2) · [Report an issue](https://github.com/Pavithran-R-A/clipgauge/issues)
 
 ## Release status
 
-v0.6.1 is the current stable release. v0.6.2 remains under qualification.
+v0.6.2 is the current stable release.
 
-| Item | v0.6.1 |
+| Item | v0.6.2 |
 | --- | --- |
 | Windows | x64 NSIS installer |
 | Linux | amd64 Debian package |
@@ -82,27 +82,27 @@ When a cloud provider is selected, source-derived material may leave the machine
 
 Download the current x64 installer:
 
-[**ClipGauge_0.6.1_Windows_x64_NSIS.exe**](https://github.com/Pavithran-R-A/clipgauge/releases/download/v0.6.1/ClipGauge_0.6.1_Windows_x64_NSIS.exe)
+[**ClipGauge_0.6.2_Windows_x64_NSIS.exe**](https://github.com/Pavithran-R-A/clipgauge/releases/download/v0.6.2/ClipGauge_0.6.2_Windows_x64_NSIS.exe)
 
 SHA-256:
 
 ```text
-9DACF6F6D33A8B26D9FB581F804006C72466C063217E3B5ADDD406472D1CF7B5
+E66CCD74D9B9C2F3439E0B878A85E003562602B8845C8DCA1A5C3A810F295441
 ```
 
 ### Linux
 
 Download the current amd64 Debian package:
 
-[**ClipGauge_0.6.1_amd64.deb**](https://github.com/Pavithran-R-A/clipgauge/releases/download/v0.6.1/ClipGauge_0.6.1_amd64.deb)
+[**ClipGauge_0.6.2_amd64.deb**](https://github.com/Pavithran-R-A/clipgauge/releases/download/v0.6.2/ClipGauge_0.6.2_amd64.deb)
 
 SHA-256:
 
 ```text
-8FA5C7B1FFD0263DB1DC52BEA28607C75BEFB7B8274DB8F033A5FD2D9141907A
+1CE6028767B669D8C99131A6960AB25E312B6AA7B70C0DE9C19F4DD4FF8C45AF
 ```
 
-For the complete checksum manifest and release metadata, use the [v0.6.1 release page](https://github.com/Pavithran-R-A/clipgauge/releases/tag/v0.6.1).
+For the complete checksum manifest and release metadata, use the [v0.6.2 release page](https://github.com/Pavithran-R-A/clipgauge/releases/tag/v0.6.2).
 
 ## First run
 
