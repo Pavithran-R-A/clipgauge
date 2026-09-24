@@ -1607,6 +1607,49 @@ async fn list_job_dirs() -> Result<Vec<Value>, String> {
     spawn_blocking_result(list_job_dirs_blocking).await
 }
 
+fn source_label(source_type: Option<&str>, source: Option<&str>, platform: Option<&str>) -> String {
+    let source_type = source_type.unwrap_or("url");
+    let source = source.unwrap_or("");
+    if source_type == "file" {
+        return Path::new(source)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Local video")
+            .to_string();
+    }
+    let kind = match platform.unwrap_or("") {
+        "youtube" => "YouTube",
+        "bilibili" => "Bilibili",
+        other if !other.is_empty() => other,
+        _ => "Online video",
+    };
+    let identifier = if platform == Some("youtube") {
+        source
+            .split("v=")
+            .nth(1)
+            .and_then(|value| value.split('&').next())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                source
+                    .split("youtu.be/")
+                    .nth(1)
+                    .and_then(|value| value.split('?').next())
+            })
+    } else if platform == Some("bilibili") {
+        source
+            .split("/video/")
+            .nth(1)
+            .and_then(|value| value.split(['/', '?', '#']).next())
+            .filter(|value| !value.is_empty())
+    } else {
+        None
+    };
+    match identifier {
+        Some(value) => format!("{kind} · {value}"),
+        None => format!("{kind} link"),
+    }
+}
+
 fn list_job_dirs_blocking() -> Result<Vec<Value>, String> {
     let jobs_dir = home_dir().join("jobs");
     let mut out = vec![];
@@ -1621,6 +1664,21 @@ fn list_job_dirs_blocking() -> Result<Vec<Value>, String> {
             let dir = entry.path();
             let has_render = dir.join("render.json").exists();
             let has_ingest = dir.join("ingest.json").exists();
+            let input = fs::read_to_string(dir.join("input.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+            let source_type = input
+                .as_ref()
+                .and_then(|value| value["media"]["source_type"].as_str())
+                .or_else(|| input.as_ref().and_then(|value| value["type"].as_str()));
+            let source = input
+                .as_ref()
+                .and_then(|value| value["media"]["source"].as_str())
+                .or_else(|| input.as_ref().and_then(|value| value["source"].as_str()));
+            let source_platform = input
+                .as_ref()
+                .and_then(|value| value["media"]["platform"].as_str());
+            let source_label = source_label(source_type, source, source_platform);
             let outcome = fs::read_to_string(dir.join("score.json"))
                 .ok()
                 .and_then(|text| serde_json::from_str::<Value>(&text).ok())
@@ -1641,6 +1699,17 @@ fn list_job_dirs_blocking() -> Result<Vec<Value>, String> {
                     },
                 );
             let last_stage = lifecycle.as_ref().and_then(|value| value["stage"].as_str());
+            let terminal = fs::read_to_string(dir.join("terminal.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+            let terminal_stage = terminal.as_ref().and_then(|value| value["stage"].as_str());
+            let terminal_code = terminal.as_ref().and_then(|value| value["code"].as_str());
+            let terminal_summary = terminal
+                .as_ref()
+                .and_then(|value| value["message"].as_str());
+            let updated_at = terminal
+                .as_ref()
+                .and_then(|value| value["updated_at"].as_f64());
             let resume_safe = !has_render
                 && matches!(
                     lifecycle_state,
@@ -1652,10 +1721,17 @@ fn list_job_dirs_blocking() -> Result<Vec<Value>, String> {
                 .and_then(|v| v["data"]["title"].as_str().map(String::from));
             out.push(json!({
                 "id": id, "title": title,
+                "source_type": source_type,
+                "source_platform": source_platform,
+                "source_label": source_label,
                 "ingested": has_ingest, "rendered": has_render,
                 "outcome": outcome,
                 "lifecycle_state": lifecycle_state,
                 "last_stage": last_stage,
+                "terminal_stage": terminal_stage,
+                "terminal_code": terminal_code,
+                "terminal_summary": terminal_summary,
+                "updated_at": updated_at,
                 "resume_safe": resume_safe,
             }));
         }

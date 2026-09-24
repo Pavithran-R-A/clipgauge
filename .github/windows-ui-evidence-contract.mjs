@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 
 export function isSetupReadyLabel(value) {
-  return value === 'Ready' || value === 'Ready · System'
+  return value === 'Ready' || value === 'Ready · System' || value === 'Everything needed is installed'
 }
 
 export function isSetupReuseLabel(value) {
@@ -14,6 +14,14 @@ export function isLocalAiActionLabel(value) {
 
 export function isLocalAiHeading(value) {
   return value === 'Run scoring locally' || value === 'ClipGauge Local is ready'
+}
+
+export function isSetupHealthState(value) {
+  return ['CHECKING', 'READY', 'CPU_ONLY', 'UNAVAILABLE', 'DEGRADED', 'REPAIR_REQUIRED', 'PUBLIC_DOWNLOAD_VERIFIED', 'DEPENDENCIES_READY', 'LOW', 'CRITICAL', 'OK'].includes(value)
+}
+
+export function isSessionState(value) {
+  return ['Ready', 'Ready to review', 'Needs attention', 'Cancelled', 'Continue', 'Analysis complete · no recommended clips'].some((state) => value === state || value.startsWith(`${state} `))
 }
 
 function requireImageFacts(facts, label) {

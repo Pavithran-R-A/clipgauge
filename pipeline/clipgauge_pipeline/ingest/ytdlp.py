@@ -29,11 +29,13 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
-from .. import config, downloads, runtime
+from .. import config, downloads, protocol, runtime
 from ..render import ffmpeg_bin
 from . import youtube_compat
 
 MAX_CAPTION_BYTES = 10 * 1024 * 1024
+MAX_DIAGNOSTIC_TAIL = 4_000
+DOCUMENTED_YOUTUBE_FALLBACKS = {"mweb": ("web_safari",)}
 
 _MANIFEST = Path(__file__).resolve().parents[2] / "runtime-manifest.json"
 
@@ -88,6 +90,12 @@ def _browser_auth_args(browser: str | None) -> list[str]:
 def _youtube_provider_args(url: str, compatibility_method: str = "mweb") -> list[str]:
     if not _needs_youtube_provider(url):
         return []
+    if compatibility_method not in {"bgutil", "mweb", "web_safari"}:
+        raise YtDlpError(
+            "The selected YouTube compatibility method is unsupported.",
+            code="YTDLP_PROVIDER_FAILED",
+            retryable=False,
+        )
     try:
         endpoint = _provider_supervisor.start()
     except runtime.RuntimeIntegrityError as error:
@@ -110,8 +118,8 @@ def _youtube_provider_args(url: str, compatibility_method: str = "mweb") -> list
         "--js-runtimes", f"node:{youtube_compat.node_path()}",
         "--extractor-args", f"youtubepot-bgutilhttp:base_url={endpoint}",
     ]
-    if compatibility_method == "mweb":
-        provider_args.extend(["--extractor-args", "youtube:player_client=mweb"])
+    if compatibility_method != "bgutil":
+        provider_args.extend(["--extractor-args", f"youtube:player_client={compatibility_method}"])
     return provider_args
 
 
@@ -120,35 +128,48 @@ def _first_match(pattern: str, text: str) -> str | None:
     return match.group(1) if match else None
 
 
-def compatibility_diagnostic(*, phase: str, method: str, stderr: str = "", http_status: int | None = None, accepted: bool | None = None, cache_invalidated: bool = False) -> dict[str, object]:
+def _bounded_tail(text: str) -> str:
+    return protocol.redact_text(text[-MAX_DIAGNOSTIC_TAIL:])
+
+
+def compatibility_diagnostic(*, phase: str, method: str, stderr: str = "", stdout: str = "", exit_code: int | None = None, http_status: int | None = None, accepted: bool | None = None, cache_invalidated: bool = False) -> dict[str, object]:
     """Return bounded provider-path facts without token, cookie, or session contents."""
-    provider = (_first_match(r"PO Token Providers:\s*([^\n]+)", stderr) or method).split(" ", 1)[0]
-    client = _first_match(r"player_client[=:]([A-Za-z0-9_, -]+)", stderr)
-    format_id = _first_match(r"(?:format|format_id)[=: ]+([A-Za-z0-9+/._-]+)", stderr)
-    protocol = _first_match(r"(?:protocol|proto)[=: ]+([A-Za-z0-9_-]+)", stderr)
+    combined = f"{stderr}\n{stdout}"
+    provider = (_first_match(r"PO Token Providers:\s*([^\n]+)", combined) or method).split(" ", 1)[0]
+    client = _first_match(r"player_client[=:]([A-Za-z0-9_, -]+)", combined)
+    format_id = _first_match(r"(?:format|format_id)[=: ]+([A-Za-z0-9+/._-]+)", combined)
+    protocol_name = _first_match(r"(?:protocol|proto)[=: ]+([A-Za-z0-9_-]+)", combined)
     contexts = []
     for name in ("GVS", "Player", "Subs"):
-        if re.search(rf"\b{name}\b", stderr, flags=re.IGNORECASE):
+        if re.search(rf"\b{name}\b", combined, flags=re.IGNORECASE):
             contexts.append(name)
     if not contexts and phase.upper() == "GVS_TRANSFER":
         contexts = ["GVS"]
     status = http_status
     if status is None:
-        raw_status = _first_match(r"HTTP Error\s+(\d{3})", stderr)
+        raw_status = _first_match(r"HTTP Error\s+(\d{3})", combined)
         status = int(raw_status) if raw_status else None
-    summary = _clean_error(stderr) or (f"HTTP {status}" if status else "compatibility operation failed")
+    summary = _clean_error(stderr, stdout) or (f"HTTP {status}" if status else "compatibility operation failed")
     return {
         "failure_phase": str(phase)[:64],
+        "method": str(method)[:64],
         "player_client": client,
         "provider": provider[:120],
         "token_contexts_requested": contexts,
         "provider_response_accepted": accepted,
         "selected_format": format_id,
-        "selected_protocol": protocol,
+        "selected_protocol": protocol_name,
         "http_status": status,
+        "exit_code": exit_code,
+        "stdout_tail": _bounded_tail(stdout),
+        "stderr_tail": _bounded_tail(stderr),
         "cache_invalidated": bool(cache_invalidated),
-        "error_summary": re.sub(r"(?i)token\s*[:=]\s*[^\s,;]+", "token=[REDACTED]", summary)[:300],
+        "error_summary": protocol_module_redact_summary(summary),
     }
+
+
+def protocol_module_redact_summary(summary: str) -> str:
+    return protocol.redact_text(summary)[:300]
 
 
 class YtDlpError(Exception):
@@ -241,11 +262,21 @@ def ensure_ytdlp(progress: ProgressFn) -> Path:
     return result
 
 
-def _clean_error(stderr: str) -> str:
-    """Last ERROR: line, with extractor prefixes stripped (clip-forge)."""
-    for line in reversed(stderr.splitlines()):
+def _clean_error(stderr: str, stdout: str = "") -> str:
+    """Return the most useful bounded process message from both streams."""
+    lines = [*stderr.splitlines(), *stdout.splitlines()]
+    for line in reversed(lines):
         if line.startswith("ERROR:"):
             return re.sub(r"^ERROR:\s*(\[[^\]]+\]\s*[^\s:]*:?\s*)?", "", line).strip()
+    for line in reversed(lines):
+        cleaned = line.strip()
+        if re.search(r"HTTP Error|failed|forbidden|unavailable|too many requests|timed out", cleaned, flags=re.IGNORECASE):
+            return cleaned[:MAX_DIAGNOSTIC_TAIL]
+    ignored = ("[download]", "[info]", "[debug]", "[youtube]", "[Merger]")
+    for line in reversed(lines):
+        cleaned = line.strip()
+        if cleaned and not cleaned.startswith(ignored):
+            return cleaned[:MAX_DIAGNOSTIC_TAIL]
     return ""
 
 
@@ -257,6 +288,18 @@ def _windows_cmd_escape(value: str) -> str:
 def classify_error(message: str) -> str:
     """Map yt-dlp's changing prose to stable, creator-facing states."""
     lowered = message.lower()
+    if re.search(r"po.?token\s+(?:provider|server)|provider\s+(?:failed|error|unavailable|not ready)|bgutil", lowered):
+        return "YTDLP_PROVIDER_FAILED"
+    if re.search(r"429|too many requests|rate.?limit", lowered):
+        return "YTDLP_RATE_LIMITED"
+    if re.search(r"could not resolve|name or service not known|nodename nor servname|dns", lowered):
+        return "YTDLP_DNS_FAILED"
+    if re.search(r"connection reset|connection refused|connection timed out|network is unreachable|temporarily unavailable|ssl error|socket", lowered):
+        return "YTDLP_NETWORK_FAILED"
+    if re.search(r"requested format|format is not available|no video formats", lowered):
+        return "YTDLP_FORMAT_UNAVAILABLE"
+    if re.search(r"download failed|transfer failed|unable to download|incomplete fragment|fragment", lowered):
+        return "YTDLP_TRANSFER_FAILED"
     if re.search(r"po.?token|attestation|playback verification|signature extraction|403|forbidden", lowered):
         return "YTDLP_ATTESTATION_REQUIRED"
     if re.search(r"sign ?in|log ?in|cookies|password|authentication required|401|authoriz", lowered):
@@ -269,7 +312,7 @@ def classify_error(message: str) -> str:
         return "YTDLP_REGION_RESTRICTED"
     if re.search(r"video unavailable|video has been removed|deleted|does not exist|not found", lowered):
         return "YTDLP_UNAVAILABLE"
-    return "YTDLP_ERROR"
+    return "YTDLP_UNKNOWN_FAILURE"
 
 
 def is_auth_error(message: str) -> bool:
@@ -342,11 +385,23 @@ def _run(
     for t in threads:
         t.join(timeout=5)
     if code != 0:
-        stderr = "".join(stderr_parts)[-65536:]
-        msg = _clean_error(stderr) or f"yt-dlp exited with code {code}"
-        if code in (-9, -15) and not _clean_error(stderr):
+        stdout = "".join(stdout_parts)
+        stderr = "".join(stderr_parts)
+        msg = _clean_error(stderr, stdout) or f"yt-dlp exited with code {code}"
+        if code in (-9, -15) and not _clean_error(stderr, stdout):
             msg = "yt-dlp stalled (no output for a while) and was stopped. Check your connection and retry."
-        raise YtDlpError(msg, code=classify_error(msg), retryable=True, details=compatibility_diagnostic(phase="GVS_TRANSFER", method="bgutil-http", stderr=stderr))
+        raise YtDlpError(
+            msg,
+            code=classify_error(msg),
+            retryable=True,
+            details=compatibility_diagnostic(
+                phase="GVS_TRANSFER",
+                method="bgutil-http",
+                stdout=stdout,
+                stderr=stderr,
+                exit_code=code,
+            ),
+        )
     return "".join(stdout_parts)
 
 
@@ -378,8 +433,10 @@ def _run_youtube_recovery(
     *,
     source_url: str,
     cookies_from_browser: str | None,
+    compatibility_method: str = "mweb",
+    operation_for_method: Callable[[str], str] | None = None,
 ) -> str:
-    """Retry one attestation transfer after refreshing public compatibility."""
+    """Retry attestation once, then use one documented fallback."""
     try:
         return fn()
     except YtDlpError as first_error:
@@ -387,16 +444,25 @@ def _run_youtube_recovery(
             raise
         youtube_compat.invalidate_public_compatibility()
         _stop_operation_provider()
+        attempted_methods = [compatibility_method, compatibility_method]
         try:
             return fn()
         except YtDlpError as final_error:
+            if operation_for_method is not None:
+                for fallback_method in DOCUMENTED_YOUTUBE_FALLBACKS.get(compatibility_method, ()):
+                    attempted_methods.append(fallback_method)
+                    try:
+                        return operation_for_method(fallback_method)
+                    except YtDlpError as fallback_error:
+                        final_error = fallback_error
             final_error.details = {
                 **final_error.details,
                 "cache_invalidated": True,
                 "retry_count": 1,
-                "recovery": "provider_restart",
+                "recovery": "web_safari_fallback" if len(attempted_methods) > 2 else "provider_restart",
+                "attempted_methods": attempted_methods,
             }
-            raise
+            raise final_error
 
 
 @dataclass
@@ -430,23 +496,25 @@ def fetch_meta(url: str, progress: ProgressFn, cookies_from_browser: str | None 
     bin_path = ensure_ytdlp(progress)
     source_url = normalize_youtube_url(url) if _needs_youtube_provider(url) else url
 
-    def _go() -> str:
-        args = [*_youtube_provider_args(source_url, compatibility_method=compatibility_method), *_browser_auth_args(cookies_from_browser)]
+    def _go(method: str = compatibility_method) -> str:
+        args = [*_youtube_provider_args(source_url, compatibility_method=method), *_browser_auth_args(cookies_from_browser)]
         try:
             return _run(
                 bin_path,
-                [*args, "-f", download_format_for(compatibility_method), "-J", "--no-playlist", "--no-warnings", source_url],
+                [*args, "-f", download_format_for(method), "-J", "--no-playlist", "--no-warnings", source_url],
             )
         except YtDlpError as error:
             if error.details:
-                error.details["method"] = compatibility_method
+                error.details["method"] = method
             raise
 
     try:
         out = _run_youtube_recovery(
-            _go,
+            lambda: _go(),
             source_url=source_url,
             cookies_from_browser=cookies_from_browser,
+            compatibility_method=compatibility_method,
+            operation_for_method=_go,
         )
     finally:
         if _needs_youtube_provider(source_url):
@@ -551,11 +619,15 @@ def download(url: str, out_path: Path, progress: ProgressFn, cookies_from_browse
         elif "[Merger]" in line:
             progress(0.96, "Merging streams…")
 
-    def _go() -> str:
+    selected_method = compatibility_method
+
+    def _go(method: str = compatibility_method) -> str:
+        nonlocal selected_method
+        selected_method = method
         args = [
-            *_youtube_provider_args(source_url, compatibility_method=compatibility_method),
+            *_youtube_provider_args(source_url, compatibility_method=method),
             *_browser_auth_args(cookies_from_browser),
-            "-f", download_format_for(compatibility_method),
+            "-f", download_format_for(method),
             "--merge-output-format", "mp4",
             "--no-playlist",
             "--no-warnings",
@@ -569,14 +641,16 @@ def download(url: str, out_path: Path, progress: ProgressFn, cookies_from_browse
             return _run(bin_path, args, on_line=_on_line)
         except YtDlpError as error:
             if error.details:
-                error.details["method"] = compatibility_method
+                error.details["method"] = method
             raise
 
     try:
         _run_youtube_recovery(
-            _go,
+            lambda: _go(),
             source_url=source_url,
             cookies_from_browser=cookies_from_browser,
+            compatibility_method=compatibility_method,
+            operation_for_method=_go,
         )
     finally:
         if _needs_youtube_provider(source_url):
@@ -596,6 +670,6 @@ def download(url: str, out_path: Path, progress: ProgressFn, cookies_from_browse
     if _needs_youtube_provider(source_url):
         manifest, _record, _name = _manifest_record()
         youtube_compat.record_public_compatibility_success(
-            method="bgutil-http",
+            method=selected_method,
             ytdlp_version=str(manifest["runtimes"]["yt-dlp"]["version"]),
         )

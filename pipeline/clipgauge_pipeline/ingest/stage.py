@@ -61,7 +61,6 @@ class IngestStage(Stage):
         browser_session = ctx.settings.provider_metadata.get("cookies_from_browser")
         if browser_session is not None and not isinstance(browser_session, str):
             browser_session = None
-        compatibility_method = "mweb"
         input_manifest = manifest.load_from_job(job)
         subtitle_metadata = input_manifest.get("subtitle", {})
         if job.source_type == "url":
@@ -119,6 +118,9 @@ class IngestStage(Stage):
                     code = platforms.map_bilibili_error(message)
                 if code == "YTDLP_ERROR" and ("download" in message.lower() or "connection" in message.lower()):
                     code = "YTDLP_DOWNLOAD_FAILED"
+                if platform == platforms.SourcePlatform.YOUTUBE and not browser_session:
+                    from . import youtube_compat
+                    youtube_compat.record_public_compatibility_attempt(error_code=code)
                 diagnostic_id = None
                 details = getattr(err, "details", None)
                 if isinstance(details, dict) and details:
@@ -186,15 +188,6 @@ class IngestStage(Stage):
             input_manifest["subtitle"] = subtitle_metadata
             manifest.persist(job, input_manifest)
             prog(0.975, "Accepted supplied subtitles…")
-        if job.source_type == "url" and not browser_session:
-            try:
-                runtime_manifest, _, _ = ytdlp._manifest_record()
-                ytdlp_version = str(runtime_manifest["runtimes"]["yt-dlp"]["version"])
-                from . import youtube_compat
-                youtube_compat.record_public_compatibility_success(method=compatibility_method, ytdlp_version=ytdlp_version)
-            except (KeyError, TypeError, ValueError, OSError):
-                pass
-
         if info.vfr:
             cfr_path = ctx.job_dir / "media_cfr.mp4"
             if not cfr_path.exists():

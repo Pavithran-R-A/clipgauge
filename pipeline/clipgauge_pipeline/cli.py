@@ -933,6 +933,21 @@ def _execute(job: queue.Job, jsonl: bool, *, stop_after: str | None = None) -> i
         print(json.dumps({"event": "job", "job_id": job.id, "attempt_id": attempt_id}), flush=True)
     else:
         print(f"job {job.id} → {job.dir}", file=sys.stderr)
+    def persist_terminal(*, ok: bool, code: str, message: str, retryable: bool, stage: str | None, diagnostic: str | None = None) -> None:
+        try:
+            protocol.write_terminal_snapshot(job.dir, {
+                "job_id": job.id,
+                "ok": ok,
+                "code": code,
+                "message": message,
+                "retryable": retryable,
+                "stage": stage,
+                "diagnostic_id": diagnostic,
+                "updated_at": time.time(),
+            })
+        except (OSError, TypeError, ValueError):
+            pass
+
     warning = _disk_warning(job.source)
     if warning:
         emit("pipeline", -1, warning)
@@ -948,6 +963,7 @@ def _execute(job: queue.Job, jsonl: bool, *, stop_after: str | None = None) -> i
             )
         if diagnostic is None and err.__cause__ is not None:
             diagnostic = protocol.write_diagnostic(job.dir, err.stage or "pipeline", err.__cause__)
+        persist_terminal(ok=False, code=err.code, message=str(err), retryable=err.retryable, stage=err.stage, diagnostic=diagnostic)
         if jsonl:
             terminal.terminal(
                 ok=False,
@@ -963,6 +979,7 @@ def _execute(job: queue.Job, jsonl: bool, *, stop_after: str | None = None) -> i
     except queue.StageExecutionError as err:
         diagnostic = protocol.write_diagnostic(job.dir, err.stage, err.original)
         message = f"Pipeline failed unexpectedly. Diagnostic ID: {diagnostic}."
+        persist_terminal(ok=False, code="INTERNAL_ERROR", message=message, retryable=False, stage=err.stage, diagnostic=diagnostic)
         if jsonl:
             terminal.terminal(
                 ok=False,
@@ -978,6 +995,7 @@ def _execute(job: queue.Job, jsonl: bool, *, stop_after: str | None = None) -> i
     except Exception as err:  # noqa: BLE001 — final protocol guard
         diagnostic = protocol.write_diagnostic(job.dir, "pipeline", err)
         message = f"Pipeline failed unexpectedly. Diagnostic ID: {diagnostic}."
+        persist_terminal(ok=False, code="INTERNAL_ERROR", message=message, retryable=False, stage="pipeline", diagnostic=diagnostic)
         if jsonl:
             terminal.terminal(
                 ok=False,
@@ -1006,6 +1024,14 @@ def _execute(job: queue.Job, jsonl: bool, *, stop_after: str | None = None) -> i
         else "Pipeline completed."
     )
     summary.update({"outcome": outcome, "code": code, "counts": terminal_result.get("counts", {})})
+    persist_terminal(
+        ok=True,
+        code=code,
+        message=message,
+        retryable=False,
+        stage=terminal_stage if outcome == "SUCCESS_NO_RECOMMENDATIONS" else "pipeline",
+        diagnostic=terminal_result.get("diagnostic_id"),
+    )
     if jsonl:
         terminal.terminal(
             ok=True,

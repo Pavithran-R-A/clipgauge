@@ -147,7 +147,7 @@ jobs:
             if ($fixtureResponse.StatusCode -ne 200) { throw "QA provider fixture did not start" }
             $exe = Get-ChildItem $dir -Filter *.exe | Where-Object { $_.Name -notmatch "uninstall" } | Select-Object -First 1
             if (-not $exe) { throw "no app exe under $dir" }
-            & "$env:GITHUB_WORKSPACE\.github\windows-ui-qualification.ps1" -AppPath $exe.FullName -OutputDir "$env:GITHUB_WORKSPACE\windows-screenshots" -Sentinel $sentinel
+            & "$env:GITHUB_WORKSPACE\.github\windows-ui-qualification.ps1" -AppPath $exe.FullName -OutputDir "$env:GITHUB_WORKSPACE\windows-screenshots" -Sentinel $sentinel -QualificationHome $nativeHome
             if ($LASTEXITCODE -ne 0) { throw "deterministic Windows UI qualification failed with exit code $LASTEXITCODE" }
           } finally {
             if ($fixture -and -not $fixture.HasExited) { Stop-Process -Id $fixture.Id -Force }

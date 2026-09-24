@@ -99,6 +99,17 @@ def write_json_diagnostic(job_dir: Path, stage: str, payload: dict[str, Any]) ->
     return identifier
 
 
+def write_terminal_snapshot(job_dir: Path, payload: dict[str, Any]) -> None:
+    """Persist the latest safe terminal state for desktop session lists."""
+    job_dir.mkdir(parents=True, exist_ok=True)
+    path = job_dir / "terminal.json"
+    _atomic_write_text(path, json.dumps(_redact_json(payload), indent=2, sort_keys=True))
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
 def write_diagnostic(job_dir: Path, stage: str, exc: BaseException) -> str:
     """Persist a bounded, redacted traceback in the job's private diagnostics dir."""
     identifier = diagnostic_id()
