@@ -19,6 +19,7 @@ const targetWidth = Number(args.get('target-width') || '0')
 const targetHeight = Number(args.get('target-height') || '0')
 const port = Number(args.get('port') || '9222')
 const windowProbe = fileURLToPath(new URL('./windows-window-probe.ps1', import.meta.url))
+const nativeTextProbe = fileURLToPath(new URL('./windows-ui-native-text.ps1', import.meta.url))
 if (!state || !suffix || !outputDir || !hwnd || !pid || !sentinel || !targetWidth || !targetHeight) throw new Error('state, suffix, output, hwnd, pid, sentinel, target-width, and target-height are required')
 let lastNativeWindowList = ''
 
@@ -677,6 +678,7 @@ async function removalConfirmation(page) {
   let dialogText = ''
   let controlsText = ''
   let contentText = ''
+  let contentTextReadMethod = 'winapp-ui-get-value-json'
   const expectedText = 'does not revoke the provider key'
   const expectedProvider = 'OpenRouter Free'
   await clickProvider(page, 'OpenRouter Free')
@@ -706,10 +708,31 @@ async function removalConfirmation(page) {
           try {
             const contentEvidence = await readWinAppJsonTextUntil(
               () => execFileSync('winapp', ['ui', 'get-value', 'ContentText', '-w', handle, '--json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
-              { expectedProvider, expectedPhrase: expectedText, timeoutMs: 5_000, intervalMs: 250 },
+              {
+                expectedProvider,
+                expectedPhrase: expectedText,
+                fallbackReadValue: () => execFileSync('powershell.exe', [
+                  '-NoProfile',
+                  '-NonInteractive',
+                  '-ExecutionPolicy',
+                  'Bypass',
+                  '-File',
+                  nativeTextProbe,
+                  '-WindowHandle',
+                  handle,
+                  '-AutomationId',
+                  'ContentText',
+                ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
+                fallbackSource: 'direct-uia-textpattern-json',
+                timeoutMs: 5_000,
+                intervalMs: 250,
+              },
             )
             contentText = contentEvidence.text
-            console.log(`NATIVE_CONFIRMATION_TEXT_JSON ${JSON.stringify({ method: 'winapp-ui-get-value-json', attempts: contentEvidence.attempts, nonempty: contentText.trim().length > 0, length: contentText.length, provider_observed: contentEvidence.providerObserved, non_revocation_phrase_observed: contentEvidence.phraseObserved })}`)
+            contentTextReadMethod = contentEvidence.source === 'winapp-cli-json'
+              ? 'winapp-ui-get-value-json'
+              : contentEvidence.source
+            console.log(`NATIVE_CONFIRMATION_TEXT_JSON ${JSON.stringify({ method: contentTextReadMethod, attempts: contentEvidence.attempts, nonempty: contentText.trim().length > 0, length: contentText.length, provider_observed: contentEvidence.providerObserved, non_revocation_phrase_observed: contentEvidence.phraseObserved })}`)
           } catch (error) {
             throw new Error(`machine-readable ContentText retrieval failed: ${String(error).replaceAll(sentinel, '[REDACTED]').slice(0, 320)}`)
           }
@@ -771,7 +794,7 @@ async function removalConfirmation(page) {
     class_name: '#32770',
     title: 'ClipGauge',
     ui_automation_inspected: true,
-    content_text_read_method: 'winapp-ui-get-value-json',
+    content_text_read_method: contentTextReadMethod,
     content_text_nonempty: contentText.trim().length > 0,
     expected_provider_observed: providerObserved,
     non_revocation_phrase_observed: messageObserved,

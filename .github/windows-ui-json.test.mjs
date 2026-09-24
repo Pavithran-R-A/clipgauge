@@ -39,3 +39,23 @@ test('waits for complete native confirmation text', async () => {
   assert.equal(result.phraseObserved, true)
   assert.equal(attempts, 2)
 })
+
+test('uses direct UIA text when WinAppCLI stays incomplete', async () => {
+  const incomplete = '{"text":"Remove the saved OpenRouter Free credential from this computer? This removes only"}'
+  const complete = '{"text":"Remove the saved OpenRouter Free credential from this computer? This removes only ClipGauge’s saved credential and does not revoke the provider key."}'
+  const result = await readWinAppJsonTextUntil(
+    () => incomplete,
+    {
+      expectedProvider: 'OpenRouter Free',
+      expectedPhrase: 'does not revoke the provider key',
+      fallbackReadValue: () => complete,
+      fallbackSource: 'direct-uia-textpattern-json',
+      timeoutMs: 20,
+      intervalMs: 1,
+      sleep: async () => {},
+    },
+  )
+
+  assert.equal(result.source, 'direct-uia-textpattern-json')
+  assert.equal(result.phraseObserved, true)
+})

@@ -199,6 +199,7 @@ jobs:
             .github/windows-ui-qualification.ps1
             .github/windows-ui-qualification.mjs
             .github/windows-ui-json.mjs
+            .github/windows-ui-native-text.ps1
             .github/windows-ui-bridge.mjs
             .github/windows-ui-bridge.test.mjs
             .github/windows-ui-qualification-capture.test.mjs

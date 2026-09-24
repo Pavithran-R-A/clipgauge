@@ -14,6 +14,8 @@ export function parseWinAppJsonText(stdout, label = 'WinAppCLI UIA value') {
 export async function readWinAppJsonTextUntil(readValue, {
   expectedProvider = '',
   expectedPhrase = '',
+  fallbackReadValue = null,
+  fallbackSource = 'fallback',
   timeoutMs = 5_000,
   intervalMs = 250,
   sleep = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
@@ -24,16 +26,22 @@ export async function readWinAppJsonTextUntil(readValue, {
   let lastError
 
   while (true) {
-    attempts += 1
-    try {
-      text = parseWinAppJsonText(await readValue(), 'ContentText')
-    } catch (error) {
-      lastError = error
-    }
+    const readers = fallbackReadValue
+      ? [[readValue, 'winapp-cli-json'], [fallbackReadValue, fallbackSource]]
+      : [[readValue, 'winapp-cli-json']]
+    for (const [reader, source] of readers) {
+      attempts += 1
+      try {
+        text = parseWinAppJsonText(await reader(), 'ContentText')
+      } catch (error) {
+        lastError = error
+        continue
+      }
 
-    const providerObserved = !expectedProvider || text.includes(expectedProvider)
-    const phraseObserved = !expectedPhrase || text.toLowerCase().includes(expectedPhrase.toLowerCase())
-    if (providerObserved && phraseObserved) return { text, attempts, providerObserved, phraseObserved }
+      const providerObserved = !expectedProvider || text.includes(expectedProvider)
+      const phraseObserved = !expectedPhrase || text.toLowerCase().includes(expectedPhrase.toLowerCase())
+      if (providerObserved && phraseObserved) return { text, attempts, providerObserved, phraseObserved, source }
+    }
     if (Date.now() >= deadline) break
     await sleep(intervalMs)
   }
@@ -44,5 +52,6 @@ export async function readWinAppJsonTextUntil(readValue, {
     attempts,
     providerObserved: !expectedProvider || text.includes(expectedProvider),
     phraseObserved: !expectedPhrase || text.toLowerCase().includes(expectedPhrase.toLowerCase()),
+    source: 'incomplete',
   }
 }
