@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
-import { parseWinAppJsonText } from './windows-ui-json.mjs'
+import { readWinAppJsonTextUntil } from './windows-ui-json.mjs'
 import { getTauriBridgeFacts } from './windows-ui-bridge.mjs'
 import { isSessionState, isSetupHealthState, isSetupReadyLabel, isSetupReuseLabel } from './windows-ui-evidence-contract.mjs'
 const args = new Map()
@@ -19,6 +19,7 @@ const targetWidth = Number(args.get('target-width') || '0')
 const targetHeight = Number(args.get('target-height') || '0')
 const port = Number(args.get('port') || '9222')
 const windowProbe = fileURLToPath(new URL('./windows-window-probe.ps1', import.meta.url))
+const nativeTextProbe = fileURLToPath(new URL('./windows-ui-native-text.ps1', import.meta.url))
 if (!state || !suffix || !outputDir || !hwnd || !pid || !sentinel || !targetWidth || !targetHeight) throw new Error('state, suffix, output, hwnd, pid, sentinel, target-width, and target-height are required')
 let lastNativeWindowList = ''
 
@@ -677,6 +678,9 @@ async function removalConfirmation(page) {
   let dialogText = ''
   let controlsText = ''
   let contentText = ''
+  let contentTextReadMethod = 'winapp-ui-get-value-json'
+  const expectedText = 'does not revoke the provider key'
+  const expectedProvider = 'OpenRouter Free'
   await clickProvider(page, 'OpenRouter Free')
   await text(page, 'OpenRouter Free', 'OpenRouter removal provider detail')
   const providerDetail = page.locator('aside.provider-detail').first()
@@ -702,9 +706,33 @@ async function removalConfirmation(page) {
             console.log(`NATIVE_CONFIRMATION_CONTROLS ${controlsText.replaceAll(sentinel, '[REDACTED]').slice(0, 3000)}`)
           } catch {}
           try {
-            const contentJson = execFileSync('winapp', ['ui', 'get-value', 'ContentText', '-w', handle, '--json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-            contentText = parseWinAppJsonText(contentJson, 'ContentText')
-            console.log(`NATIVE_CONFIRMATION_TEXT_JSON ${JSON.stringify({ method: 'winapp-ui-get-value-json', nonempty: true, length: contentText.length, provider_observed: contentText.includes('OpenRouter Free'), non_revocation_phrase_observed: contentText.toLowerCase().includes('does not revoke the provider key') })}`)
+            const contentEvidence = await readWinAppJsonTextUntil(
+              () => execFileSync('winapp', ['ui', 'get-value', 'ContentText', '-w', handle, '--json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
+              {
+                expectedProvider,
+                expectedPhrase: expectedText,
+                fallbackReadValue: () => execFileSync('powershell.exe', [
+                  '-NoProfile',
+                  '-NonInteractive',
+                  '-ExecutionPolicy',
+                  'Bypass',
+                  '-File',
+                  nativeTextProbe,
+                  '-WindowHandle',
+                  handle,
+                  '-AutomationId',
+                  'ContentText',
+                ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
+                fallbackSource: 'direct-uia-textpattern-json',
+                timeoutMs: 5_000,
+                intervalMs: 250,
+              },
+            )
+            contentText = contentEvidence.text
+            contentTextReadMethod = contentEvidence.source === 'winapp-cli-json'
+              ? 'winapp-ui-get-value-json'
+              : contentEvidence.source
+            console.log(`NATIVE_CONFIRMATION_TEXT_JSON ${JSON.stringify({ method: contentTextReadMethod, attempts: contentEvidence.attempts, nonempty: contentText.trim().length > 0, length: contentText.length, provider_observed: contentEvidence.providerObserved, non_revocation_phrase_observed: contentEvidence.phraseObserved })}`)
           } catch (error) {
             throw new Error(`machine-readable ContentText retrieval failed: ${String(error).replaceAll(sentinel, '[REDACTED]').slice(0, 320)}`)
           }
@@ -725,8 +753,6 @@ async function removalConfirmation(page) {
     console.log(`NATIVE_CONFIRMATION_UIA_SAMPLE ${dialogText.replaceAll(sentinel, '[REDACTED]').slice(0, 1200)}`)
     throw new Error('credential-removal confirmation was not observed through native UIA')
   }
-  const expectedText = 'does not revoke the provider key'
-  const expectedProvider = 'OpenRouter Free'
   const controlsHaveOk = /\bOK\b/i.test(controlsText)
   const controlsHaveCancel = /\bCancel\b/i.test(controlsText)
   const messageObserved = contentText.toLowerCase().includes(expectedText)
@@ -768,7 +794,7 @@ async function removalConfirmation(page) {
     class_name: '#32770',
     title: 'ClipGauge',
     ui_automation_inspected: true,
-    content_text_read_method: 'winapp-ui-get-value-json',
+    content_text_read_method: contentTextReadMethod,
     content_text_nonempty: contentText.trim().length > 0,
     expected_provider_observed: providerObserved,
     non_revocation_phrase_observed: messageObserved,
