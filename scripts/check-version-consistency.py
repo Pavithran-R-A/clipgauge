@@ -10,7 +10,7 @@ from pathlib import Path
 import tomllib
 
 EXPECTED = "0.6.2"
-PUBLIC_STABLE = "0.6.1"
+PUBLIC_STABLE = "0.6.2"
 ROOT = Path(__file__).resolve().parents[1]
 errors: list[str] = []
 
