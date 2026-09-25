@@ -2922,7 +2922,7 @@ mod tests {
         validate_creator_job_id, validate_render_collection_result, validate_sidecar_result,
         ResumeJobRequest, RunJobRequest,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     #[test]
     fn native_asr_exit_keeps_windows_code_and_cpu_recovery() {
