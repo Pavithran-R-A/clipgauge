@@ -41,6 +41,33 @@ def test_help_flag_remains_successful(capsys):
     assert stderr == ''
 
 
+def test_cli_resume_clears_cancel_marker_before_execution(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLIPGAUGE_HOME", str(tmp_path / "home"))
+    source = str(tmp_path / "media.mp4")
+    job = queue.create_job("file", source, json.dumps(config.Settings().to_json()), default_manifest("file", source))
+    marker = job.dir / "cancel.requested"
+    marker.write_text("requested\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_disk_block", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_execute", lambda resumed, *_args, **_kwargs: 0 if not marker.exists() and resumed.id == job.id else 1)
+    args = SimpleNamespace(
+        job_id=job.id,
+        jsonl=True,
+        stop_after=None,
+        allow_cpu_asr_fallback=False,
+        llm=None,
+        provider=None,
+        model=None,
+        endpoint=None,
+        captions=None,
+        camera=None,
+        quality_mode=None,
+        output_preference=None,
+        cookies_from_browser=None,
+    )
+
+    assert cli.cmd_resume(args) == 0
+
+
 def test_youtube_test_emits_heartbeat_during_silent_provider(monkeypatch, capsys):
     monkeypatch.setattr(cli, "YOUTUBE_TEST_HEARTBEAT_SECONDS", 0.01)
 
@@ -122,10 +149,10 @@ def test_score_resume_disk_block_uses_cached_score_budget(monkeypatch):
     assert 'Free disk space' in cli._disk_block('https://www.youtube.com/watch?v=test')
 
 
-def test_resume_disk_preflight_precedes_settings_persistence(monkeypatch):
-    job = SimpleNamespace(id='job-1', source='https://example.test/video')
+def test_resume_disk_preflight_precedes_settings_persistence(monkeypatch, tmp_path):
+    job = SimpleNamespace(id='20260925-120000-abcdef', source='https://example.test/video', dir=tmp_path)
     args = SimpleNamespace(
-        job_id='job-1',
+        job_id='20260925-120000-abcdef',
         jsonl=False,
         stop_after=None,
         allow_cpu_asr_fallback=False,
@@ -137,10 +164,10 @@ def test_resume_disk_preflight_precedes_settings_persistence(monkeypatch):
     assert cli.cmd_resume(args) == 2
 
 
-def test_score_resume_allows_cached_candidate_regeneration(monkeypatch):
-    job = SimpleNamespace(id='job-1', source='https://example.test/video')
+def test_score_resume_allows_cached_candidate_regeneration(monkeypatch, tmp_path):
+    job = SimpleNamespace(id='20260925-120000-abcdef', source='https://example.test/video', dir=tmp_path)
     args = SimpleNamespace(
-        job_id='job-1',
+        job_id='20260925-120000-abcdef',
         jsonl=False,
         stop_after='score',
         allow_cpu_asr_fallback=False,

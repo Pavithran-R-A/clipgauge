@@ -47,6 +47,11 @@ def _events(capsys):
 
 def _run(monkeypatch, stage, source="/tmp/input.mp4"):
     monkeypatch.setattr(cli, "_disk_block", lambda _source: None)
+    monkeypatch.setattr(
+        queue.resource_guard,
+        "disk_headroom_decision",
+        lambda *_args, **_kwargs: queue.resource_guard.DiskDecision(False, None, "test", 0, 0, "test"),
+    )
     monkeypatch.setattr(cli, "_stages", lambda: [stage])
     return cli.main(["--jsonl", "run", source])
 
@@ -156,7 +161,7 @@ def test_missing_local_source_is_structured_terminal(monkeypatch, capsys):
 
 
 def test_yt_dlp_failure_is_actionable_and_retryable(monkeypatch, capsys):
-    code = _run(monkeypatch, YtDlpFailureStage(), "https://example.test/video")
+    code = _run(monkeypatch, YtDlpFailureStage(), "https://www.youtube.com/watch?v=test")
     events = _events(capsys)
     assert code == 1
     terminal = _assert_one_terminal(events)
@@ -226,9 +231,15 @@ def test_real_ingest_translates_fake_ytdlp_failure(monkeypatch, tmp_path, capsys
 
     fake = _fake_ytdlp(tmp_path, "video unavailable after extractor failure")
     monkeypatch.setattr(cli, "_disk_block", lambda _source: None)
+    monkeypatch.setattr(
+        queue.resource_guard,
+        "disk_headroom_decision",
+        lambda *_args, **_kwargs: queue.resource_guard.DiskDecision(False, None, "test", 0, 0, "test"),
+    )
     monkeypatch.setattr(ingest_stage.ytdlp, "ensure_ytdlp", lambda _progress: fake)
+    monkeypatch.setattr(ingest_stage.ytdlp, "_youtube_provider_args", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(cli, "_stages", lambda: [ingest_stage.IngestStage()])
-    code = cli.main(["--jsonl", "run", "https://example.test/video"])
+    code = cli.main(["--jsonl", "run", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"])
     events = _events(capsys)
     assert code == 1
     terminal = _assert_one_terminal(events)

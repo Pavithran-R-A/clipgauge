@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -36,7 +37,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     source_type TEXT NOT NULL,          -- 'url' | 'file'
     source TEXT NOT NULL,
     title TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',  -- pending|running|done|failed
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending|running|done|failed|cancelled
     error TEXT,
     settings_json TEXT NOT NULL,
     input_json TEXT
@@ -127,6 +128,25 @@ def get_job(job_id: str) -> Job | None:
     with _connect() as conn:
         row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
     return _row_to_job(row) if row else None
+
+
+def require_job(job_id: str) -> Job:
+    value = validate_job_id(job_id)
+    job = get_job(value)
+    if job is None:
+        raise ValueError("job not found")
+    return job
+
+
+def clear_cancel_request(job: Job) -> None:
+    """Atomically remove a stale cancellation request before resuming."""
+    (job.dir / "cancel.requested").unlink(missing_ok=True)
+
+
+def prepare_resume(job_id: str) -> Job:
+    job = require_job(job_id)
+    clear_cancel_request(job)
+    return job
 
 
 def list_jobs(limit: int = 50) -> list[Job]:
@@ -456,6 +476,55 @@ def _sampled_source_hash(path: Path) -> str | None:
         return None
 
 
+_JOB_ID = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$")
+
+
+def validate_job_id(job_id: str) -> str:
+    value = str(job_id).strip()
+    if not _JOB_ID.fullmatch(value):
+        raise ValueError("invalid job identifier")
+    return value
+
+
+def _managed_media_identity(job: Job, ingest: dict[str, Any]) -> dict[str, Any] | None:
+    raw_media = ingest.get("media_path")
+    if not isinstance(raw_media, str) or not raw_media:
+        return None
+    job_root = job.dir.resolve()
+    candidate = Path(raw_media)
+    candidate = candidate if candidate.is_absolute() else job.dir / candidate
+    try:
+        media = candidate.resolve(strict=True)
+    except OSError:
+        return None
+    if candidate.is_symlink() or not media.is_file():
+        return None
+    try:
+        relative = media.relative_to(job_root).as_posix()
+    except ValueError:
+        return None
+    try:
+        stat = media.stat()
+    except OSError:
+        return None
+    return {
+        "relative_path": relative,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "sampled_hash": _sampled_source_hash(media),
+        "persisted_source_hash": ingest.get("source_hash"),
+    }
+
+
+def _existing_managed_ingest_identity(job: Job) -> dict[str, Any] | None:
+    try:
+        envelope = json.loads(checkpoint_path(job, "ingest").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    data = envelope.get("data") if isinstance(envelope, dict) else None
+    return _managed_media_identity(job, data) if isinstance(data, dict) else None
+
+
 def _dependency_fingerprint(stage: Stage, ctx: StageContext, prior: dict[str, dict]) -> str:
     upstream = {
         name: value.get("_checkpoint", {}).get("output_fingerprint")
@@ -481,20 +550,31 @@ def _dependency_fingerprint(stage: Stage, ctx: StageContext, prior: dict[str, di
             source_identity["subtitle_mode"] = subtitle.get("mode")
             source_identity["subtitle_sha256"] = subtitle.get("sha256")
     if ctx.job.source_type == "file":
-        source_path = Path(ctx.job.source)
-        try:
-            stat = source_path.stat()
-            source_identity.update(
-                {
-                    "size": stat.st_size,
-                    "mtime_ns": stat.st_mtime_ns,
-                    "sampled_hash": _sampled_source_hash(source_path)
-                    if stage.name == "ingest"
-                    else None,
-                }
-            )
-        except OSError:
-            source_identity["missing"] = True
+        managed_identity = None
+        if stage.name == "ingest":
+            managed_identity = _existing_managed_ingest_identity(ctx.job)
+        elif isinstance(ingest, dict):
+            managed_identity = _managed_media_identity(ctx.job, ingest)
+        if managed_identity is not None:
+            source_identity = {
+                "type": "file",
+                "managed_media": managed_identity,
+            }
+        else:
+            source_path = Path(ctx.job.source)
+            try:
+                stat = source_path.stat()
+                source_identity.update(
+                    {
+                        "size": stat.st_size,
+                        "mtime_ns": stat.st_mtime_ns,
+                        "sampled_hash": _sampled_source_hash(source_path)
+                        if stage.name == "ingest"
+                        else None,
+                    }
+                )
+            except OSError:
+                source_identity["missing"] = True
     return _fingerprint(
         {
             "stage": stage.name,
@@ -567,7 +647,7 @@ def run_stages(
     set_job_status(job.id, "running")
     for stage in stage_list:
         if (job.dir / "cancel.requested").exists():
-            set_job_status(job.id, "failed", "Job cancelled.")
+            set_job_status(job.id, "cancelled", "Job cancelled.")
             raise StageError("The job was cancelled. Completed checkpoints remain available for resume.", code="CANCELLED", retryable=False, stage=stage.name)
         estimate = None
         ingest_result = results.get("ingest")
@@ -582,6 +662,31 @@ def run_stages(
             stage.schema_version,
             dependency_fingerprint,
         )
+        if (
+            cached is None
+            and issue is not None
+            and issue.code == "CHECKPOINT_DEPENDENCY_STALE"
+            and stage.name == "ingest"
+            and _existing_managed_ingest_identity(job) is not None
+        ):
+            try:
+                envelope = json.loads(
+                    checkpoint_path(job, "ingest").read_text(encoding="utf-8")
+                )
+                stored_dependency = envelope.get("dependency_fingerprint")
+            except (OSError, json.JSONDecodeError):
+                stored_dependency = None
+            if isinstance(stored_dependency, str):
+                cached, legacy_issue = read_checkpoint_detailed(
+                    job,
+                    stage.name,
+                    stage.schema_version,
+                    stored_dependency,
+                )
+                if cached is not None:
+                    issue = None
+                else:
+                    issue = legacy_issue
         if issue is not None:
             progress(
                 stage.name,

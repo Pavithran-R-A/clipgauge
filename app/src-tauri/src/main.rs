@@ -1683,9 +1683,7 @@ fn list_job_dirs_blocking() -> Result<Vec<Value>, String> {
                 .ok()
                 .and_then(|text| serde_json::from_str::<Value>(&text).ok())
                 .and_then(|value| value["data"]["outcome"].as_str().map(String::from));
-            let lifecycle = fs::read_to_string(dir.join("lifecycle.json"))
-                .ok()
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+            let lifecycle = read_lifecycle_for_sessions(&dir);
             let lifecycle_state = lifecycle
                 .as_ref()
                 .and_then(|value| value["state"].as_str())
@@ -1738,6 +1736,22 @@ fn list_job_dirs_blocking() -> Result<Vec<Value>, String> {
     }
     out.sort_by(|a, b| b["id"].as_str().cmp(&a["id"].as_str()));
     Ok(out)
+}
+
+fn read_lifecycle_for_sessions(dir: &Path) -> Option<Value> {
+    let runtime = dir.join("runtime.json");
+    let runtime_present = fs::symlink_metadata(&runtime).is_ok();
+    let path = if runtime_present {
+        runtime
+    } else {
+        dir.join("lifecycle.json")
+    };
+    if path.is_symlink() || !path.is_file() {
+        return None;
+    }
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
 }
 
 #[tauri::command]
@@ -2902,11 +2916,11 @@ mod tests {
         append_output_preference_arg, canonical_provider_id, classify_native_exit,
         generate_support_bundle_at, ig_connect_args, ig_failure_message,
         instagram_connection_from_json, instagram_connection_is_valid, is_completion_payload,
-        migrate_legacy_data_from, privacy_summary, read_bounded_line, selected_provider_env,
-        setup_start_failure_message, spawn_blocking_result, valid_setup_tool_args,
-        valid_start_setup_args, validate_browser_session, validate_creator_job_id,
-        validate_render_collection_result, validate_sidecar_result, ResumeJobRequest,
-        RunJobRequest,
+        migrate_legacy_data_from, privacy_summary, read_bounded_line, read_lifecycle_for_sessions,
+        selected_provider_env, setup_start_failure_message, spawn_blocking_result,
+        valid_setup_tool_args, valid_start_setup_args, validate_browser_session,
+        validate_creator_job_id, validate_render_collection_result, validate_sidecar_result,
+        ResumeJobRequest, RunJobRequest,
     };
     use serde_json::json;
 
@@ -3558,6 +3572,69 @@ mod tests {
         assert_eq!(parsed.job_id, "20260819-120000-abcdef");
         assert_eq!(parsed.camera.as_deref(), Some("locked"));
         assert_eq!(parsed.output_preference.as_deref(), Some("best"));
+    }
+
+    #[test]
+    fn sessions_reads_all_terminal_states_from_runtime_record() {
+        let root = std::env::temp_dir().join(format!(
+            "clipgauge-session-runtime-{}",
+            super::diagnostics::diagnostic_id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        for state in ["CANCELLED", "FAILED", "INTERRUPTED", "COMPLETED", "RUNNING"] {
+            fs::write(
+                root.join("runtime.json"),
+                format!(r#"{{"state":"{state}","stage":"asr"}}"#),
+            )
+            .unwrap();
+            assert_eq!(
+                read_lifecycle_for_sessions(&root)
+                    .unwrap()
+                    .get("state")
+                    .and_then(Value::as_str),
+                Some(state)
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_record_wins_over_conflicting_legacy_lifecycle() {
+        let root = std::env::temp_dir().join(format!(
+            "clipgauge-session-precedence-{}",
+            super::diagnostics::diagnostic_id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("runtime.json"), r#"{"state":"CANCELLED"}"#).unwrap();
+        fs::write(root.join("lifecycle.json"), r#"{"state":"COMPLETED"}"#).unwrap();
+        assert_eq!(
+            read_lifecycle_for_sessions(&root)
+                .unwrap()
+                .get("state")
+                .and_then(Value::as_str),
+            Some("CANCELLED")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_lifecycle_is_read_only_fallback_and_corrupt_runtime_is_safe() {
+        let root = std::env::temp_dir().join(format!(
+            "clipgauge-session-legacy-{}",
+            super::diagnostics::diagnostic_id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("lifecycle.json"), r#"{"state":"INTERRUPTED"}"#).unwrap();
+        assert_eq!(
+            read_lifecycle_for_sessions(&root)
+                .unwrap()
+                .get("state")
+                .and_then(Value::as_str),
+            Some("INTERRUPTED")
+        );
+        fs::write(root.join("runtime.json"), b"not-json").unwrap();
+        assert!(read_lifecycle_for_sessions(&root).is_none());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

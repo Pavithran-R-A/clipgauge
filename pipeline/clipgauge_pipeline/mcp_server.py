@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from . import __version__, config, protocol
 from .collections.render import render_collection
 from .collections.service import create_collection, delete_collection, list_collections, update_collection
 from .ingest.manifest import default_manifest
+from .ingest import platforms
 from .jobs import queue
 from .scoring import providers
 
@@ -20,7 +22,7 @@ SECRET_KEY = re.compile(r"(?i)(api[_-]?key|token|secret|authorization|cookie|pas
 
 TOOLS = [
     "preflight", "list_providers", "list_jobs", "start_job", "get_job_status",
-    "get_job_results", "cancel_job", "render_clip", "rerender_clip",
+    "get_job_results", "cancel_job", "resume_job", "render_clip", "rerender_clip",
     "list_collections", "create_collection", "update_collection", "delete_collection", "render_collection",
 ]
 
@@ -39,6 +41,28 @@ def reject_secret_arguments(value: Any) -> None:
 class McpService:
     def __init__(self) -> None:
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="clipgauge-mcp")
+        self._active_jobs: set[str] = set()
+        self._active_lock = threading.Lock()
+
+    def _reserve_job(self, job_id: str) -> None:
+        with self._active_lock:
+            if self._active_jobs:
+                if job_id in self._active_jobs:
+                    raise ValueError("job is already active")
+                raise ValueError("another job is already active")
+            self._active_jobs.add(job_id)
+
+    def _release_job(self, job_id: str) -> None:
+        with self._active_lock:
+            self._active_jobs.discard(job_id)
+
+    def _submit_job(self, job) -> None:
+        self._reserve_job(job.id)
+        try:
+            self._executor.submit(self._run_job, job)
+        except Exception:
+            self._release_job(job.id)
+            raise
 
     def _run_job(self, job) -> None:
         from .cli import _stages
@@ -57,6 +81,8 @@ class McpService:
             return
         except Exception as exc:  # noqa: BLE001 - worker records through job store
             queue.set_job_status(job.id, "failed", protocol.safe_message(str(exc)))
+        finally:
+            self._release_job(job.id)
 
     def start_job(self, arguments: dict[str, Any]) -> dict[str, Any]:
         from .cli import _apply_profile
@@ -64,7 +90,7 @@ class McpService:
         source = str(arguments.get("source", "")).strip()
         if not source:
             raise ValueError("source is required")
-        source_type = "url" if source.startswith(("http://", "https://")) else "file"
+        source_type = platforms.source_type(source)
         if source_type == "file":
             source = str(Path(source).expanduser().resolve())
             if not Path(source).is_file():
@@ -83,7 +109,7 @@ class McpService:
         if subtitle_path:
             input_manifest["subtitle"].update({"mode": "external", "requested_path": str(Path(str(subtitle_path)).expanduser().resolve())})
         job = queue.create_job(source_type, source, json.dumps(settings.to_json()), input_manifest=input_manifest)
-        self._executor.submit(self._run_job, job)
+        self._submit_job(job)
         return {"job_id": job.id, "status": "pending"}
 
     def status(self, job_id: str) -> dict[str, Any]:
@@ -128,13 +154,27 @@ class McpService:
         return clips
 
     def cancel(self, job_id: str) -> dict[str, Any]:
-        job = queue.get_job(job_id)
-        if job is None:
-            raise ValueError("job not found")
+        job = queue.require_job(job_id)
+        if job.status in {"done", "failed", "cancelled"}:
+            return {"job_id": job.id, "cancel_requested": False, "status": job.status}
         (job.dir / "cancel.requested").write_text("requested\n", encoding="utf-8")
         if job.status == "pending":
-            queue.set_job_status(job.id, "failed", "Job cancelled.")
-        return {"job_id": job.id, "cancel_requested": True}
+            queue.set_job_status(job.id, "cancelled", "Job cancelled.")
+            status = "cancelled"
+        else:
+            status = "running"
+        return {"job_id": job.id, "cancel_requested": True, "status": status}
+
+    def resume_job(self, job_id: str) -> dict[str, Any]:
+        job = queue.require_job(job_id)
+        self._reserve_job(job.id)
+        try:
+            queue.clear_cancel_request(job)
+            self._executor.submit(self._run_job, job)
+        except Exception:
+            self._release_job(job.id)
+            raise
+        return {"job_id": job.id, "status": "pending", "resumed": True}
 
     def call(self, name: str, arguments: dict[str, Any]) -> Any:
         reject_secret_arguments(arguments)
@@ -148,6 +188,8 @@ class McpService:
             return self.results(str(arguments.get("job_id", "")))
         if name == "cancel_job":
             return self.cancel(str(arguments.get("job_id", "")))
+        if name == "resume_job":
+            return self.resume_job(str(arguments.get("job_id", "")))
         if name == "list_providers":
             return ["clipgauge-local", "ollama", "lmstudio", "gemini", "groq", "openrouter"]
         if name == "preflight":

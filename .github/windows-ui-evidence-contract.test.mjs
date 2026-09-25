@@ -21,10 +21,12 @@ test('accepts local AI install and ready actions', () => {
   assert.equal(isLocalAiActionLabel('Retry component'), false)
 })
 
-test('accepts local AI setup and ready headings', () => {
-  assert.equal(isLocalAiHeading('Run scoring locally'), true)
-  assert.equal(isLocalAiHeading('ClipGauge Local is ready'), true)
-  assert.equal(isLocalAiHeading('Local AI unavailable'), false)
+test('accepts current local AI headings without old overview copy', () => {
+  assert.equal(isLocalAiHeading('Optional local AI'), true)
+  assert.equal(isLocalAiHeading('Local scoring'), true)
+  assert.equal(isLocalAiHeading('Advanced local model details'), true)
+  assert.equal(isLocalAiHeading('Run scoring locally'), false)
+  assert.equal(isLocalAiHeading('ClipGauge Local is ready'), false)
 })
 
 test('accepts v0.6.2 setup health states', () => {

@@ -54,6 +54,7 @@ function Seed-SessionFixtures {
   $jobs = Join-Path $qualificationHome 'jobs'
   New-Item -ItemType Directory -Force $jobs | Out-Null
   $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   $records = @(
     @{ id = '20260923-050001-aaaaaa'; title = 'Interview with Alex'; source_type = 'file'; source = 'C:\ClipGauge QA\Interview with Alex.mp4'; platform = 'local'; lifecycle = 'COMPLETED'; stage = 'render'; terminal = $null; outcome = 'SUCCESS_WITH_CLIPS'; rendered = $true },
     @{ id = '20260923-050002-bbbbbb'; title = 'QA YouTube failed'; source_type = 'url'; source = 'https://www.youtube.com/watch?v=qa-fail01'; platform = 'youtube'; lifecycle = 'FAILED'; stage = 'ingest'; terminal = @{ stage = 'ingest'; code = 'YTDLP_TRANSFER_FAILED'; message = 'The public transfer failed during download.'; updated_at = $now }; outcome = $null; rendered = $false },
@@ -66,7 +67,7 @@ function Seed-SessionFixtures {
     New-Item -ItemType Directory -Force $dir | Out-Null
     Write-QualificationJson (Join-Path $dir 'input.json') @{ media = @{ source_type = $record.source_type; source = $record.source; platform = $record.platform } }
     if ($record.title) { Write-QualificationJson (Join-Path $dir 'ingest.json') @{ stage = 'ingest'; schema_version = 1; created_at = $now; data = @{ title = $record.title } } }
-    Write-QualificationJson (Join-Path $dir 'lifecycle.json') @{ state = $record.lifecycle; stage = $record.stage; updated_at = $now }
+    Write-QualificationJson (Join-Path $dir 'runtime.json') @{ protocol_version = 1; app_version = '0.6.2'; session_id = "qualification-$($record.id)"; job_id = $record.id; process_id = 0; started_at_ms = $nowMs; heartbeat_at_ms = $nowMs; stage = $record.stage; state = $record.lifecycle }
     if ($record.terminal) { Write-QualificationJson (Join-Path $dir 'terminal.json') $record.terminal }
     if ($record.outcome) {
       if ($record.id -eq '20260923-050001-aaaaaa') {
@@ -98,7 +99,7 @@ function Seed-HostileSessions {
     Write-QualificationJson (Join-Path $dir 'input.json') @{ media = @{ source_type = 'file'; source = "C:\ClipGauge QA\$($record.id).mp4"; platform = 'local' } }
     $payload = @{ stage = 'ingest'; schema_version = 1; created_at = 0; data = @{ title = $record.title } } | ConvertTo-Json -Depth 5
     [IO.File]::WriteAllText((Join-Path $dir 'ingest.json'), $payload, [Text.UTF8Encoding]::new($false))
-    Write-QualificationJson (Join-Path $dir 'lifecycle.json') @{ state = 'RESUMABLE'; stage = 'ingest'; updated_at = 0 }
+    Write-QualificationJson (Join-Path $dir 'runtime.json') @{ protocol_version = 1; app_version = '0.6.2'; session_id = "qualification-$($record.id)"; job_id = $record.id; process_id = 0; started_at_ms = 0; heartbeat_at_ms = 0; stage = 'ingest'; state = 'RESUMABLE' }
   }
 }
 

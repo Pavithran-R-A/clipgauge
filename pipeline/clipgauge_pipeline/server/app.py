@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from .. import __version__
+from ..ingest import platforms
 from .auth import authorize, reject_secret_payload, require_server_token
 
 
@@ -30,12 +31,34 @@ def create_app(*, host: str = "127.0.0.1", token: str | None = None, cors_origin
         if not authorize(provided, token):
             raise HTTPException(status_code=401, detail="unauthorized")
 
-    def allowed_source(body: dict) -> None:
+    def allowed_local_file(value: object, label: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise HTTPException(status_code=400, detail=f"{label} must be a regular file")
+        raw = Path(value).expanduser()
+        try:
+            candidate = raw.resolve(strict=True)
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=f"{label} is unavailable") from exc
+        if raw.is_symlink() and not candidate.is_file():
+            raise HTTPException(status_code=400, detail=f"{label} must be a regular file")
+        if not candidate.is_file():
+            raise HTTPException(status_code=400, detail=f"{label} must be a regular file")
+        if not roots or not any(root == candidate or root in candidate.parents for root in roots):
+            raise HTTPException(status_code=400, detail=f"{label} is outside configured import roots")
+        return str(candidate)
+
+    def allowed_source(body: dict) -> dict:
         source = body.get("source")
-        if isinstance(source, str) and not source.startswith(("http://", "https://")):
-            candidate = Path(source).expanduser().resolve()
-            if not roots or not any(root == candidate or root in candidate.parents for root in roots):
-                raise HTTPException(status_code=400, detail="local source is outside configured import roots")
+        try:
+            platform = platforms.validate_source(str(source or ""))
+        except platforms.SourcePolicyError as exc:
+            raise HTTPException(status_code=400, detail=exc.code) from exc
+        normalized = dict(body)
+        if platform == platforms.SourcePlatform.LOCAL:
+            normalized["source"] = allowed_local_file(source, "local source")
+        if body.get("subtitle_path") is not None:
+            normalized["subtitle_path"] = allowed_local_file(body.get("subtitle_path"), "subtitle")
+        return normalized
 
     @app.get("/v1/health")
     def health():
@@ -65,8 +88,7 @@ def create_app(*, host: str = "127.0.0.1", token: str | None = None, cors_origin
     def start(body: dict, x_clipgauge_token: str | None = Header(default=None)):
         check_auth(x_clipgauge_token)
         reject_secret_payload(body)
-        allowed_source(body)
-        return service.call("start_job", body)
+        return service.call("start_job", allowed_source(body))
 
     @app.get("/v1/jobs/{job_id}")
     def status(job_id: str, x_clipgauge_token: str | None = Header(default=None)):
@@ -82,6 +104,11 @@ def create_app(*, host: str = "127.0.0.1", token: str | None = None, cors_origin
     def cancel(job_id: str, x_clipgauge_token: str | None = Header(default=None)):
         check_auth(x_clipgauge_token)
         return service.call("cancel_job", {"job_id": job_id})
+
+    @app.post("/v1/jobs/{job_id}/resume")
+    def resume(job_id: str, x_clipgauge_token: str | None = Header(default=None)):
+        check_auth(x_clipgauge_token)
+        return service.call("resume_job", {"job_id": job_id})
 
     @app.get("/v1/jobs/{job_id}/collections")
     def collections(job_id: str, x_clipgauge_token: str | None = Header(default=None)):

@@ -822,10 +822,15 @@ def cmd_provider_models(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     source = args.source
+    from .ingest import platforms
+
+    try:
+        source_type = platforms.source_type(source)
+    except platforms.SourcePolicyError as err:
+        return _preflight_terminal(args.jsonl, None, err.code, str(err), False)
     disk_block = _disk_block(source)
     if disk_block:
         return _preflight_terminal(args.jsonl, None, "DISK_SPACE_LOW", disk_block, True)
-    source_type = "url" if source.startswith(("http://", "https://")) else "file"
     settings = config.Settings()
     try:
         quality_mode = config.validate_quality_mode(args.quality_mode or settings.quality_mode)
@@ -863,9 +868,14 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_resume(args: argparse.Namespace) -> int:
-    job = queue.get_job(args.job_id)
+    try:
+        job_id = queue.validate_job_id(args.job_id)
+    except ValueError as err:
+        return _preflight_terminal(args.jsonl, args.job_id, "JOB_ID_INVALID", str(err))
+    job = queue.get_job(job_id)
     if job is None:
         return _preflight_terminal(args.jsonl, args.job_id, "JOB_NOT_FOUND", "The requested job could not be found in the managed job store.")
+    queue.clear_cancel_request(job)
     stages = _stages() if args.stop_after == "score" else []
     cached_replay = False
     if stages and not args.allow_cpu_asr_fallback:

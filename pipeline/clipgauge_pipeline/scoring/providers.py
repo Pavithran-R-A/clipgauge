@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -736,36 +737,90 @@ def parse_json_text(text: str) -> dict[str, Any]:
 
 
 def validate_json_schema(value: Any, schema: dict[str, Any], path: str = "$") -> None:
+    if not isinstance(schema, dict):
+        raise ValueError(f"{path} has an invalid schema")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{path} must be finite")
+
     expected = schema.get("type")
-    if "enum" in schema and value not in schema["enum"]:
+    expected_types = expected if isinstance(expected, list) else [expected] if expected else []
+
+    def matches(type_name: object) -> bool:
+        if type_name == "object":
+            return isinstance(value, dict)
+        if type_name == "array":
+            return isinstance(value, list)
+        if type_name == "string":
+            return isinstance(value, str)
+        if type_name == "boolean":
+            return isinstance(value, bool)
+        if type_name == "integer":
+            return isinstance(value, int) and not isinstance(value, bool)
+        if type_name == "number":
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+        if type_name == "null":
+            return value is None
+        return False
+
+    if expected_types and not any(matches(type_name) for type_name in expected_types):
+        labels = ", ".join(str(type_name) for type_name in expected_types)
+        raise ValueError(f"{path} must be of type {labels}")
+    if "enum" in schema and not any(value == candidate for candidate in schema["enum"]):
         raise ValueError(f"{path} is not one of the allowed values")
-    if expected == "object":
-        if not isinstance(value, dict):
-            raise ValueError(f"{path} must be an object")
+
+    if isinstance(value, dict):
         for key in schema.get("required", []):
             if key not in value:
                 raise ValueError(f"{path}.{key} is required")
         properties = schema.get("properties", {})
-        if schema.get("additionalProperties") is False:
-            extra = set(value) - set(properties)
-            if extra:
-                raise ValueError(f"{path} contains unsupported fields")
-        for key, child in properties.items():
-            if key in value:
-                validate_json_schema(value[key], child, f"{path}.{key}")
-    elif expected == "array":
-        if not isinstance(value, list):
-            raise ValueError(f"{path} must be an array")
-        for index, item in enumerate(value):
-            validate_json_schema(item, schema.get("items", {}), f"{path}[{index}]")
-    elif expected == "string" and not isinstance(value, str):
-        raise ValueError(f"{path} must be a string")
-    elif expected == "boolean" and not isinstance(value, bool):
-        raise ValueError(f"{path} must be a boolean")
-    elif expected == "integer" and (not isinstance(value, int) or isinstance(value, bool)):
-        raise ValueError(f"{path} must be an integer")
-    elif expected == "number" and (not isinstance(value, (int, float)) or isinstance(value, bool)):
-        raise ValueError(f"{path} must be a number")
+        additional = schema.get("additionalProperties", True)
+        for key, item in value.items():
+            child_path = f"{path}.{key}"
+            if key in properties:
+                validate_json_schema(item, properties[key], child_path)
+            elif additional is False:
+                raise ValueError(f"{child_path} is not allowed")
+            elif isinstance(additional, dict):
+                validate_json_schema(item, additional, child_path)
+
+    if isinstance(value, list):
+        if "minItems" in schema and len(value) < int(schema["minItems"]):
+            raise ValueError(f"{path} must contain at least {schema['minItems']} items")
+        if "maxItems" in schema and len(value) > int(schema["maxItems"]):
+            raise ValueError(f"{path} must contain at most {schema['maxItems']} items")
+        if schema.get("uniqueItems"):
+            for index, item in enumerate(value):
+                if any(item == previous for previous in value[:index]):
+                    raise ValueError(f"{path} contains duplicate item at index {index}")
+        if isinstance(schema.get("items"), dict):
+            for index, item in enumerate(value):
+                validate_json_schema(item, schema["items"], f"{path}[{index}]")
+
+    if isinstance(value, str):
+        if "minLength" in schema and len(value) < int(schema["minLength"]):
+            raise ValueError(f"{path} must contain at least {schema['minLength']} characters")
+        if "maxLength" in schema and len(value) > int(schema["maxLength"]):
+            raise ValueError(f"{path} must contain at most {schema['maxLength']} characters")
+        if "pattern" in schema and re.search(str(schema["pattern"]), value) is None:
+            raise ValueError(f"{path} does not match the required pattern")
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            raise ValueError(f"{path} must be at least {schema['minimum']}")
+        if "maximum" in schema and value > schema["maximum"]:
+            raise ValueError(f"{path} must be at most {schema['maximum']}")
+        exclusive_minimum = schema.get("exclusiveMinimum")
+        if isinstance(exclusive_minimum, bool):
+            if exclusive_minimum and "minimum" in schema and value <= schema["minimum"]:
+                raise ValueError(f"{path} must be greater than {schema['minimum']}")
+        elif exclusive_minimum is not None and value <= exclusive_minimum:
+            raise ValueError(f"{path} must be greater than {exclusive_minimum}")
+        exclusive_maximum = schema.get("exclusiveMaximum")
+        if isinstance(exclusive_maximum, bool):
+            if exclusive_maximum and "maximum" in schema and value >= schema["maximum"]:
+                raise ValueError(f"{path} must be less than {schema['maximum']}")
+        elif exclusive_maximum is not None and value >= exclusive_maximum:
+            raise ValueError(f"{path} must be less than {exclusive_maximum}")
 
 
 def _retry_after(response: httpx.Response) -> float | None:

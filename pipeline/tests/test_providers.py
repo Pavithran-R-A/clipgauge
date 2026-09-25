@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from clipgauge_pipeline import config
+from clipgauge_pipeline.collections.smart import SMART_COLLECTION_SCHEMA
 from clipgauge_pipeline.scoring import providers
 
 
@@ -36,6 +37,50 @@ def profile(kind: str = "custom", **overrides) -> providers.ProviderProfile:
     }
     values.update(overrides)
     return providers.ProviderProfile(**values)
+
+
+def test_json_schema_validator_enforces_nested_bounds_and_paths():
+    schema = {
+        "type": "object",
+        "properties": {
+            "score": {"type": "integer", "minimum": 0, "maximum": 10},
+            "ratio": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+            "label": {"type": "string", "minLength": 2, "maxLength": 4, "pattern": "^[A-Z]+$"},
+            "groups": {"type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": True, "items": {"type": "string"}},
+            "nullable": {"type": ["string", "null"]},
+        },
+        "required": ["score", "ratio", "label", "groups", "nullable"],
+        "additionalProperties": False,
+    }
+    valid = {"score": 10, "ratio": 0.5, "label": "OK", "groups": ["one"], "nullable": None}
+    providers.validate_json_schema(valid, schema)
+    providers.validate_json_schema({**valid, "score": 0, "ratio": 0.0001, "label": "AB", "groups": ["one", "two"], "nullable": "yes"}, schema)
+
+    for value, path in [
+        ({**valid, "score": 11}, "$.score"),
+        ({**valid, "score": -1}, "$.score"),
+        ({**valid, "ratio": 0}, "$.ratio"),
+        ({**valid, "label": "abcde"}, "$.label"),
+        ({**valid, "groups": ["one", "one"]}, "$.groups"),
+        ({**valid, "extra": True}, "$.extra"),
+    ]:
+        with pytest.raises(ValueError, match=path.replace("$", r"\$")):
+            providers.validate_json_schema(value, schema)
+
+
+@pytest.mark.parametrize("value", [True, False, float("nan"), float("inf"), float("-inf")])
+def test_json_schema_validator_rejects_boolean_integer_and_nonfinite_number(value):
+    with pytest.raises(ValueError):
+        providers.validate_json_schema(value, {"type": "number"})
+    with pytest.raises(ValueError):
+        providers.validate_json_schema(value, {"type": "integer"})
+
+
+def test_json_schema_validator_accepts_current_smart_collection_response():
+    providers.validate_json_schema(
+        {"collections": [{"title": "Highlights", "summary": "Best moments", "clip_ids": ["a", "b"]}]},
+        SMART_COLLECTION_SCHEMA,
+    )
 
 
 def test_rejects_dangerous_provider_urls():
