@@ -18,6 +18,14 @@ def isolated_home(tmp_path, monkeypatch):
     yield
 
 
+def bypass_ambient_disk_guard(monkeypatch):
+    monkeypatch.setattr(
+        queue.resource_guard,
+        "disk_headroom_decision",
+        lambda *_args, **_kwargs: queue.resource_guard.DiskDecision(False, None, "test", 0, 0, "test"),
+    )
+
+
 def _settings_json() -> str:
     return json.dumps(config.Settings().to_json())
 
@@ -134,6 +142,19 @@ def test_stage_error_marks_job_failed():
     assert "politely" in (fetched.error or "")
 
 
+def test_cancelled_job_status_is_distinct_and_resume_can_reuse_checkpoints(tmp_path):
+    job = queue.create_job("file", str(tmp_path / "x.mp4"), _settings_json())
+    (job.dir / "cancel.requested").write_text("requested\n", encoding="utf-8")
+
+    with pytest.raises(queue.StageError) as error:
+        queue.run_stages(job, [CountingStage()], _noop_progress)
+
+    assert error.value.code == "CANCELLED"
+    assert queue.get_job(job.id).status == "cancelled"
+    queue.prepare_resume(job.id)
+    assert not (job.dir / "cancel.requested").exists()
+
+
 def test_checkpoint_contains_relative_descriptors_and_manifest():
     job = queue.create_job("file", "/tmp/x.mp4", _settings_json())
     stage = ArtifactStage()
@@ -204,7 +225,8 @@ def test_failure_then_resume_skips_completed_stages():
     assert queue.get_job(job.id).status == "done"
 
 
-def test_run_stages_can_stop_after_named_stage():
+def test_run_stages_can_stop_after_named_stage(monkeypatch):
+    bypass_ambient_disk_guard(monkeypatch)
     runs = []
 
     class FirstStage(queue.Stage):
@@ -242,7 +264,8 @@ def test_run_stages_can_stop_after_named_stage():
     assert runs == ["ingest", "score"]
 
 
-def test_cached_prefix_ready_requires_each_checkpoint_and_artifact():
+def test_cached_prefix_ready_requires_each_checkpoint_and_artifact(monkeypatch):
+    bypass_ambient_disk_guard(monkeypatch)
     class PrefixStage(queue.Stage):
         name = "ingest"
         schema_version = 1

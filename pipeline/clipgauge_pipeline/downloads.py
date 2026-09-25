@@ -381,7 +381,12 @@ class DownloadManager:
     def check_disk_space(self, assets: Iterable[ManagedAsset], *, extra_bytes: int = 0) -> None:
         estimate = self.estimate(assets)
         available = estimate["available_bytes"]
-        needed = int(estimate["download_bytes"]) + int(estimate["installed_bytes"]) + max(0, extra_bytes)
+        archive_peak = sum(
+            int(row.get("installed_size_bytes") or 0)
+            for row in estimate["assets"]
+            if not row.get("installed") and row.get("archive_type")
+        )
+        needed = int(estimate["download_bytes"]) + archive_peak + max(0, extra_bytes)
         if available is not None and available < needed:
             raise runtime.RuntimeDiskSpaceError(
                 f"ClipGauge needs {needed} bytes of staging space but only {available} bytes are available"

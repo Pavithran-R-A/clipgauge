@@ -162,6 +162,7 @@ def update_collection(
             changed["title"] = _normalize_title(title)
         if clip_ids is not None:
             changed["clip_ids"] = _validate_requested_clip_ids(clip_ids, valid_ids)
+        changed["render_path"] = None
         changed["user_edited"] = True
         changed["source"] = "manual"
         rows.append(changed)

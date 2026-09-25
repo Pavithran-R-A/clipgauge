@@ -22,6 +22,10 @@ def safe_name(value: str) -> str:
     return cleaned[:80] or "collection"
 
 
+def render_filename(title: str, identifier: str) -> str:
+    return f"{safe_name(title)}--{safe_name(identifier)}.mp4"
+
+
 def collection_id() -> str:
     return "collection-" + uuid.uuid4().hex[:12]
 

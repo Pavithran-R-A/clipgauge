@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import re
 from urllib.parse import urlsplit
 from typing import Any
 
@@ -13,6 +14,10 @@ class SourcePlatform(str, Enum):
     YOUTUBE = "youtube"
     BILIBILI = "bilibili"
     UNSUPPORTED_URL = "unsupported_url"
+
+
+class SourcePolicyError(ValueError):
+    code = "SOURCE_URL_UNSUPPORTED"
 
 
 @dataclass(frozen=True)
@@ -57,17 +62,31 @@ def caption_tracks(metadata: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def classify_source(value: str) -> SourcePlatform:
-    parsed = urlsplit(str(value).strip())
-    if parsed.scheme not in {"http", "https"}:
+    raw = str(value).strip()
+    parsed = urlsplit(raw)
+    if re.match(r"^[A-Za-z]:[\\/]", raw) or not parsed.scheme:
+        if "://" in raw:
+            return SourcePlatform.UNSUPPORTED_URL
         return SourcePlatform.LOCAL
+    if parsed.scheme not in {"http", "https"}:
+        return SourcePlatform.UNSUPPORTED_URL
     host = (parsed.hostname or "").lower().removeprefix("www.")
-    if host == "youtu.be" or host.endswith("youtube.com") or host.endswith("youtube-nocookie.com"):
+    if host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com") or host == "youtube-nocookie.com" or host.endswith(".youtube-nocookie.com"):
         return SourcePlatform.YOUTUBE
-    if host == "b23.tv" or host.endswith("bilibili.com"):
-        path = parsed.path.lower()
-        if host == "b23.tv" or "/video/bv" in path or "/video/av" in path:
-            return SourcePlatform.BILIBILI
+    if host == "b23.tv" or host == "bilibili.com" or host.endswith(".bilibili.com"):
+        return SourcePlatform.BILIBILI
     return SourcePlatform.UNSUPPORTED_URL
+
+
+def validate_source(value: str) -> SourcePlatform:
+    platform = classify_source(value)
+    if platform == SourcePlatform.UNSUPPORTED_URL:
+        raise SourcePolicyError("ClipGauge accepts local files, YouTube, and Bilibili sources only.")
+    return platform
+
+
+def source_type(value: str) -> str:
+    return "url" if validate_source(value) in {SourcePlatform.YOUTUBE, SourcePlatform.BILIBILI} else "file"
 
 
 def select_platform_caption(tracks: list[dict], *, requested_language: str | None = None) -> PlatformCaption | None:

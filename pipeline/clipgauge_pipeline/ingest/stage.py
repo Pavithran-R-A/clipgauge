@@ -38,7 +38,7 @@ class IngestStage(Stage):
             return False
         if data.get("source_hash"):
             try:
-                if not (_sample_hash(media) == data["source_hash"] or media.parent == ctx.job_dir):
+                if _sample_hash(media) != data["source_hash"]:
                     return False
             except OSError:
                 return False
@@ -58,6 +58,11 @@ class IngestStage(Stage):
         heatmap = None
         title = None
         platform = platforms.classify_source(job.source)
+        if job.source_type == "url":
+            try:
+                platform = platforms.validate_source(job.source)
+            except platforms.SourcePolicyError as err:
+                raise StageError(str(err), code=err.code, retryable=False, stage=self.name) from err
         browser_session = ctx.settings.provider_metadata.get("cookies_from_browser")
         if browser_session is not None and not isinstance(browser_session, str):
             browser_session = None

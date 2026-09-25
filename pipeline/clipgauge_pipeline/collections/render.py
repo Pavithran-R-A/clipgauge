@@ -9,7 +9,7 @@ from pathlib import Path
 from ..creator_state import clip_id_for
 from ..ingest import normalize
 from ..render import ffmpeg_bin
-from .model import safe_name
+from .model import render_filename, safe_name
 from .service import list_collections, set_collection_render_path
 
 
@@ -41,8 +41,8 @@ def render_collection(job, identifier: str, clips: list[dict]) -> Path:
         raise ValueError("collection has no clips")
     output_dir = job.dir / "collections"
     output_dir.mkdir(parents=True, exist_ok=True)
-    target = output_dir / f"{safe_name(collection['title'])}.mp4"
-    list_path = output_dir / f".{safe_name(collection['title'])}.{uuid.uuid4().hex}.txt"
+    target = output_dir / render_filename(collection["title"], collection["id"])
+    list_path = output_dir / f".{safe_name(collection['title'])}.{safe_name(collection['id'])}.{uuid.uuid4().hex}.txt"
     concat_lines = []
     for path in paths:
         escaped = path.as_posix().replace("'", "'\\''")

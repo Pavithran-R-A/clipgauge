@@ -11,6 +11,7 @@ from clipgauge_pipeline.collections.service import (
     list_collections,
     regenerate_smart_collections,
     reorder_collection,
+    set_collection_render_path,
     update_collection,
 )
 from clipgauge_pipeline.creator_state import creator_clips_for_job
@@ -60,6 +61,20 @@ def test_manual_edits_are_atomic_and_preserved(tmp_path):
     assert list_collections(job, clips)[0]["user_edited"] is True
     delete_collection(job, created["id"], clips=clips)
     assert list_collections(job, clips) == []
+
+
+def test_collection_mutations_invalidate_stale_render_path(tmp_path):
+    job = _job(tmp_path)
+    clips = _clips()
+    ids = [stable_clip_id(clip, index) for index, clip in enumerate(clips)]
+    created = create_collection(job, "My series", ids, clips=clips)
+    set_collection_render_path(job, created["id"], str(job.dir / "collections" / "old.mp4"), clips=clips)
+
+    renamed = update_collection(job, created["id"], title="Renamed", clips=clips)
+    assert renamed["render_path"] is None
+    set_collection_render_path(job, created["id"], str(job.dir / "collections" / "old.mp4"), clips=clips)
+    reordered = reorder_collection(job, created["id"], list(reversed(ids)), clips=clips)
+    assert reordered["render_path"] is None
 
 
 def test_unknown_clip_id_is_rejected(tmp_path):
@@ -124,7 +139,8 @@ def test_render_collection_resolves_relative_render_paths_inside_job(tmp_path, m
 
     output = render_collection(job, created["id"], clips)
 
-    assert output == job.dir / "collections" / "Relative-Paths.mp4"
+    assert output.parent == job.dir / "collections"
+    assert output.name.startswith("Relative-Paths--collection-")
     assert output.read_bytes() == b"compiled"
     assert list_collections(job, clips)[0]["render_path"] == str(output)
     assert not list((job.dir / "collections").glob(".*.txt"))
@@ -176,7 +192,42 @@ def test_legacy_score_only_job_renders_collection_from_persisted_outputs(tmp_pat
     )
 
     assert cli.main(["collections", "render", job.id, "legacy-series"]) == 0
-    output = job.dir / "collections" / "Legacy-series.mp4"
+    output = job.dir / "collections" / "Legacy-series--legacy-series.mp4"
 
     assert output.is_file()
     assert list_collections(job, clips)[0]["render_path"] == str(output)
+
+
+def test_collection_render_paths_include_identity_for_unicode_and_duplicate_titles(tmp_path, monkeypatch):
+    job = _job(tmp_path)
+    clips = _clips()
+    ids = [stable_clip_id(clip, index) for index, clip in enumerate(clips)]
+
+    def fake_run(command, **_kwargs):
+        temporary = Path(command[-1])
+        temporary.write_bytes(b"compiled")
+        return type("Completed", (), {"returncode": 0, "stderr": ""})()
+
+    monkeypatch.setattr(collection_render.ffmpeg_bin, "ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(collection_render.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        collection_render.normalize,
+        "probe",
+        lambda _path: type("Probe", (), {"has_audio": True, "duration_sec": 10.0})(),
+    )
+    clips_dir = job.dir / "clips"
+    clips_dir.mkdir()
+    (clips_dir / "clip_00.mp4").write_bytes(b"first")
+    (clips_dir / "clip_01.mp4").write_bytes(b"second")
+    renderable = [
+        {**clips[0], "render_path": "clips/clip_00.mp4"},
+        {**clips[1], "render_path": "clips/clip_01.mp4"},
+    ]
+    paths = []
+    for title in ["தமிழ்", "हिन्दी", "!!!", "!!!", "A/B", "A B"]:
+        item = create_collection(job, title, ids, clips=renderable)
+        paths.append(render_collection(job, item["id"], renderable))
+
+    assert len({path.name for path in paths}) == len(paths)
+    assert all(path.parent == job.dir / "collections" for path in paths)
+    assert all(path.is_file() for path in paths)

@@ -285,3 +285,39 @@ def test_disk_space_check_blocks_before_download(monkeypatch, tmp_path):
     monkeypatch.setattr(downloads.shutil, "disk_usage", lambda path: type("U", (), {"free": 1, "total": 1, "used": 0})())
     with pytest.raises(runtime.RuntimeDiskSpaceError):
         manager.check_disk_space([asset])
+
+
+def test_disk_space_check_counts_peak_additional_bytes_not_installed_content(monkeypatch, tmp_path):
+    manager = downloads.DownloadManager(tmp_path)
+    installed = 8 * 1024**3
+    available = 500 * 1024**2
+    rows = [
+        {"required": True, "installed": True, "size_bytes": installed, "installed_size_bytes": installed},
+        {"required": True, "installed": False, "size_bytes": 100 * 1024**2, "installed_size_bytes": None},
+    ]
+    monkeypatch.setattr(manager, "inventory_cached", lambda assets, **kwargs: rows)
+    monkeypatch.setattr(downloads.shutil, "disk_usage", lambda _path: SimpleNamespace(free=available, total=available, used=0))
+
+    manager.check_disk_space([_asset()])
+    with pytest.raises(runtime.RuntimeDiskSpaceError):
+        manager.check_disk_space([_asset()], extra_bytes=450 * 1024**2 + 1)
+
+    rows[1]["size_bytes"] = 600 * 1024**2
+    with pytest.raises(runtime.RuntimeDiskSpaceError):
+        manager.check_disk_space([_asset()])
+
+
+def test_disk_space_check_accounts_for_archive_extraction_peak(monkeypatch, tmp_path):
+    manager = downloads.DownloadManager(tmp_path)
+    rows = [{
+        "required": True,
+        "installed": False,
+        "size_bytes": 100,
+        "installed_size_bytes": 450,
+        "archive_type": "zip",
+    }]
+    monkeypatch.setattr(manager, "inventory_cached", lambda assets, **kwargs: rows)
+    monkeypatch.setattr(downloads.shutil, "disk_usage", lambda _path: SimpleNamespace(free=500, total=500, used=0))
+
+    with pytest.raises(runtime.RuntimeDiskSpaceError):
+        manager.check_disk_space([_asset()])

@@ -13,7 +13,7 @@ export function isLocalAiActionLabel(value) {
 }
 
 export function isLocalAiHeading(value) {
-  return value === 'Run scoring locally' || value === 'ClipGauge Local is ready'
+  return ['Optional local AI', 'Local scoring', 'Advanced local model details'].some((state) => value === state || value.startsWith(`${state} `))
 }
 
 export function isSetupHealthState(value) {

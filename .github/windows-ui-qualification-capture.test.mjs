@@ -83,7 +83,7 @@ test('hostile sidebar fixtures use the supported session metadata contract', () 
   assert.ok(hostileSeed, 'hostile session seeding must remain discoverable')
   assert.match(hostileSeed[0], /input\.json/)
   assert.match(hostileSeed[0], /source_type = 'file'/)
-  assert.match(hostileSeed[0], /lifecycle\.json/)
+  assert.match(hostileSeed[0], /runtime\.json/)
   assert.match(hostileSeed[0], /state = 'RESUMABLE'/)
 })
 
